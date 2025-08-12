@@ -1,0 +1,35 @@
+[
+  {
+    "date": "2025-07-01",
+    "platform": "Facebook",
+    "post_id": "FB001",
+    "post_type": "image",
+    "reach": 12000,
+    "engagement": 850,
+    "shares": 45,
+    "comments": 60,
+    "likes": 745
+  },
+  {
+    "date": "2025-07-02",
+    "platform": "Instagram",
+    "post_id": "IG001",
+    "post_type": "reel",
+    "reach": 45000,
+    "engagement": 5200,
+    "shares": 420,
+    "comments": 1100,
+    "likes": 3680
+  },
+  {
+    "date": "2025-07-03",
+    "platform": "Facebook",
+    "post_id": "FB002",
+    "post_type": "video",
+    "reach": 8000,
+    "engagement": 300,
+    "shares": 20,
+    "comments": 25,
+    "likes": 255
+  }
+]

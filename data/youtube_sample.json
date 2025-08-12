@@ -1,0 +1,22 @@
+[
+  {
+    "date": "2025-07-01",
+    "video_id": "YT001",
+    "title": "KSDC Event Highlights",
+    "views": 5600,
+    "watch_time_minutes": 4200,
+    "likes": 480,
+    "comments": 34,
+    "shares": 25
+  },
+  {
+    "date": "2025-07-05",
+    "video_id": "YT002",
+    "title": "Gathavibhava BTS",
+    "views": 24000,
+    "watch_time_minutes": 18000,
+    "likes": 3200,
+    "comments": 540,
+    "shares": 410
+  }
+]

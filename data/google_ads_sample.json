@@ -1,0 +1,18 @@
+[
+  {
+    "date": "2025-07-01",
+    "campaign": "SkillIndia_Aug",
+    "impressions": 120000,
+    "clicks": 4500,
+    "spend_inr": 15000,
+    "conversions": 320
+  },
+  {
+    "date": "2025-07-10",
+    "campaign": "Gathavibhava_Trailer",
+    "impressions": 500000,
+    "clicks": 15000,
+    "spend_inr": 65000,
+    "conversions": 1200
+  }
+]

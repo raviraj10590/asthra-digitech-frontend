@@ -1,0 +1,18 @@
+[
+  {
+    "date": "2025-07-01",
+    "competitor": "BJP_PR",
+    "platform": "Facebook",
+    "reach": 40000,
+    "engagement": 3200,
+    "ad_spend_inr": 40000
+  },
+  {
+    "date": "2025-07-01",
+    "competitor": "JDS_PR",
+    "platform": "Facebook",
+    "reach": 22000,
+    "engagement": 1100,
+    "ad_spend_inr": 15000
+  }
+]
