@@ -1,42 +1,126 @@
-async function fetchJSON(url) {
-  const res = await fetch(url);
-  return res.json();
+const API_BASE = "https://asthra-digitech-backend-production.up.railway.app";
+
+/* ------------------- HELPERS ------------------- */
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
 }
 
-async function init() {
-  const sum = await fetchJSON('/api/summary');
-  document.getElementById('kpi-reach').innerText = sum.reach.toLocaleString();
-  document.getElementById('kpi-engagement').innerText = sum.engagement.toLocaleString();
-  document.getElementById('kpi-campaigns').innerText = sum.campaigns;
-  document.getElementById('kpi-leads').innerText = sum.leads;
-
-  const trend = await fetchJSON('/api/engagement-trend');
-  const labels = trend.map(r=>r.date);
-  const data = trend.map(r=>r.engagement);
-  const ctx = document.getElementById('chartTrend').getContext('2d');
-  new Chart(ctx, { type:'line', data:{ labels, datasets:[{ label:'Engagement', data, fill:true, tension:0.3 }] }, options:{ responsive:true }});
-
-  const top = await fetchJSON('/api/top-posts');
-  const tbody = document.querySelector('#topPostsTable tbody');
-  top.forEach(r => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${r.post_id || r.video_id || ''}</td><td>${r.platform || 'YouTube'}</td><td>${r.engagement || r.likes || 0}</td>`;
-    tbody.appendChild(tr);
-  });
-
-  const comp = await fetchJSON('/api/competitors');
-  const compLabels = comp.map(c=>c.competitor);
-  const compData = comp.map(c=>c.reach);
-  const ctx2 = document.getElementById('chartCompetitor').getContext('2d');
-  new Chart(ctx2, { type:'bar', data:{ labels:compLabels, datasets:[{ label:'Reach', data:compData }] }, options:{ responsive:true }});
-
-  const events = await fetchJSON('/api/events');
-  const etbody = document.querySelector('#eventsTable tbody');
-  events.forEach(e=>{
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${e.event_date}</td><td>${e.event_name}</td><td>${e.location}</td>`;
-    etbody.appendChild(tr);
-  });
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = msg;
 }
 
-init();
+/* ------------------- SUMMARY ------------------- */
+setText('reach', 'Loading...');
+setText('engagement', 'Loading...');
+setText('campaigns', 'Loading...');
+setText('leads', 'Loading...');
+
+fetch(`${API_BASE}/api/summary`)
+  .then(res => res.json())
+  .then(data => {
+    setText('reach', data.reach);
+    setText('engagement', data.engagement);
+    setText('campaigns', data.campaigns);
+    setText('leads', data.leads);
+  })
+  .catch(err => {
+    console.error(err);
+    showError('reach', 'Error');
+    showError('engagement', 'Error');
+    showError('campaigns', 'Error');
+    showError('leads', 'Error');
+  });
+
+/* ------------------- TOP POSTS ------------------- */
+const topPostsContainer = document.getElementById('top-posts');
+if (topPostsContainer) topPostsContainer.textContent = 'Loading...';
+
+fetch(`${API_BASE}/api/top-posts`)
+  .then(res => res.json())
+  .then(posts => {
+    if (!topPostsContainer) return;
+    topPostsContainer.innerHTML = '';
+    posts.forEach(post => {
+      const li = document.createElement('li');
+      li.textContent = `${post.date} | ${post.platform} | ${post.post_type.toUpperCase()} | Engagement: ${post.engagement}`;
+      topPostsContainer.appendChild(li);
+    });
+  })
+  .catch(err => {
+    console.error(err);
+    if (topPostsContainer) topPostsContainer.textContent = 'Failed to load posts.';
+  });
+
+/* ------------------- ENGAGEMENT TREND CHART ------------------- */
+const chartCanvas = document.getElementById('engagementChart');
+if (chartCanvas) {
+  const ctx = chartCanvas.getContext('2d');
+  chartCanvas.parentNode.insertAdjacentHTML('beforeend', '<p id="chart-loading">Loading chart...</p>');
+}
+
+fetch(`${API_BASE}/api/engagement-trend`)
+  .then(res => res.json())
+  .then(trend => {
+    if (!chartCanvas) return;
+    document.getElementById('chart-loading')?.remove();
+    new Chart(chartCanvas.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: trend.map(t => t.date),
+        datasets: [{
+          label: 'Engagement',
+          data: trend.map(t => t.engagement),
+          borderColor: 'blue',
+          fill: false
+        }]
+      },
+      options: { responsive: true }
+    });
+  })
+  .catch(err => {
+    console.error(err);
+    document.getElementById('chart-loading')?.remove();
+    if (chartCanvas) chartCanvas.insertAdjacentText('afterend', 'Failed to load chart.');
+  });
+
+/* ------------------- COMPETITORS ------------------- */
+const competitorsTable = document.getElementById('competitors');
+if (competitorsTable) competitorsTable.innerHTML = '<tr><td colspan="2">Loading...</td></tr>';
+
+fetch(`${API_BASE}/api/competitors`)
+  .then(res => res.json())
+  .then(competitors => {
+    if (!competitorsTable) return;
+    competitorsTable.innerHTML = '';
+    competitors.forEach(c => {
+      const row = document.createElement('tr');
+      row.innerHTML = `<td>${c.name}</td><td>${c.engagement || 0}</td>`;
+      competitorsTable.appendChild(row);
+    });
+  })
+  .catch(err => {
+    console.error(err);
+    if (competitorsTable) competitorsTable.innerHTML = '<tr><td colspan="2">Failed to load competitors.</td></tr>';
+  });
+
+/* ------------------- EVENTS ------------------- */
+const eventsList = document.getElementById('events');
+if (eventsList) eventsList.textContent = 'Loading...';
+
+fetch(`${API_BASE}/api/events`)
+  .then(res => res.json())
+  .then(events => {
+    if (!eventsList) return;
+    eventsList.innerHTML = '';
+    events.forEach(e => {
+      const li = document.createElement('li');
+      li.textContent = `${e.date} | ${e.name} | ${e.location || ''}`;
+      eventsList.appendChild(li);
+    });
+  })
+  .catch(err => {
+    console.error(err);
+    if (eventsList) eventsList.textContent = 'Failed to load events.';
+  });
