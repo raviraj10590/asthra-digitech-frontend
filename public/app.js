@@ -124,3 +124,36 @@ fetch(`${API_BASE}/api/events`)
     console.error(err);
     if (eventsList) eventsList.textContent = 'Failed to load events.';
   });
+
+function fetchMetrics() {
+  fetch("/api/metrics")
+    .then(res => res.json())
+    .then(data => {
+      document.getElementById("totalReach").innerText = data.totalReach;
+      document.getElementById("engagement").innerText = data.engagement;
+      document.getElementById("campaigns").innerText = data.campaignsRunning;
+      document.getElementById("conversions").innerText = data.leadConversions;
+
+      // Last updated
+      const now = new Date().toLocaleTimeString();
+      document.querySelectorAll(".last-updated").forEach(el => el.innerText = now);
+
+      // Top Posts
+      const posts = document.getElementById("topPosts");
+      posts.innerHTML = "";
+      data.topPosts.forEach(p => {
+        posts.innerHTML += `<tr><td>${p.id}</td><td>${p.platform}</td><td>${p.engagement}</td></tr>`;
+      });
+
+      // Events
+      const events = document.getElementById("upcomingEvents");
+      events.innerHTML = "";
+      data.upcomingEvents.forEach(e => {
+        events.innerHTML += `<tr><td>${e.date}</td><td>${e.event}</td><td>${e.location}</td></tr>`;
+      });
+    });
+}
+
+// Auto refresh every 3s
+setInterval(fetchMetrics, 3000);
+fetchMetrics();
