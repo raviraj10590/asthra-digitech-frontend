@@ -4,46 +4,74 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Asthra DigiTech Dashboard</title>
+  <!-- Tailwind & Chart.js CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    table th, table td { white-space: nowrap; }
+  </style>
 </head>
 <body class="bg-gray-100 text-gray-800">
+  <!-- Status / Error Banner -->
+  <div id="statusBanner" class="hidden">
+    <div class="px-4 py-3 text-sm" id="statusInner"></div>
+  </div>
 
   <!-- Header -->
   <header class="bg-blue-600 text-white p-6 shadow-lg">
-    <h1 class="text-2xl font-bold">📊 Asthra DigiTech - Dashboard</h1>
+    <div class="max-w-7xl mx-auto flex items-center justify-between gap-4">
+      <h1 class="text-2xl font-bold">📊 Asthra DigiTech - Dashboard</h1>
+      <div class="flex items-center gap-3 text-xs">
+        <span id="refreshLabel" class="opacity-80">Auto refresh: 10s</span>
+        <button id="refreshBtn" class="bg-white/10 hover:bg-white/20 px-3 py-1 rounded-full">Refresh now</button>
+      </div>
+    </div>
   </header>
 
-  <main class="p-6 space-y-8">
+  <main class="p-6 max-w-7xl mx-auto space-y-8">
     <!-- Metrics -->
     <section id="metrics" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
       <div class="bg-white p-6 rounded-2xl shadow">
         <h3 class="text-sm text-gray-500">Total Reach</h3>
-        <p id="reach" class="text-2xl font-bold">—</p>
+        <p id="reach" class="text-3xl font-bold tracking-tight">—</p>
+        <p id="reachSub" class="text-xs text-gray-500 mt-1">Last updated —</p>
       </div>
       <div class="bg-white p-6 rounded-2xl shadow">
         <h3 class="text-sm text-gray-500">Total Engagement</h3>
-        <p id="engagement" class="text-2xl font-bold">—</p>
+        <p id="engagement" class="text-3xl font-bold tracking-tight">—</p>
+        <p id="engagementSub" class="text-xs text-gray-500 mt-1">Last updated —</p>
       </div>
       <div class="bg-white p-6 rounded-2xl shadow">
         <h3 class="text-sm text-gray-500">Campaigns Running</h3>
-        <p id="campaigns" class="text-2xl font-bold">—</p>
+        <p id="campaigns" class="text-3xl font-bold tracking-tight">—</p>
+        <p id="campaignsSub" class="text-xs text-gray-500 mt-1">Last updated —</p>
       </div>
       <div class="bg-white p-6 rounded-2xl shadow">
         <h3 class="text-sm text-gray-500">Lead Conversions</h3>
-        <p id="leads" class="text-2xl font-bold">—</p>
+        <p id="leads" class="text-3xl font-bold tracking-tight">—</p>
+        <p id="leadsSub" class="text-xs text-gray-500 mt-1">Last updated —</p>
       </div>
     </section>
 
     <!-- Engagement Chart -->
     <section class="bg-white p-6 rounded-2xl shadow">
-      <h2 class="text-xl font-semibold mb-4">Engagement Trend</h2>
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-semibold">Engagement Trend</h2>
+        <select id="rangeSelect" class="text-sm border rounded-md px-2 py-1">
+          <option value="7d">Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+          <option value="12w">Last 12 weeks</option>
+        </select>
+      </div>
       <canvas id="engagementChart" height="100"></canvas>
     </section>
 
     <!-- Top Posts -->
     <section class="bg-white p-6 rounded-2xl shadow">
-      <h2 class="text-xl font-semibold mb-4">Top Posts</h2>
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-semibold">Top Posts</h2>
+        <input id="postSearch" placeholder="Search…" class="text-sm border rounded-md px-2 py-1" />
+      </div>
       <div class="overflow-x-auto">
         <table id="top-posts" class="w-full border border-gray-200 rounded-lg text-sm">
           <thead class="bg-gray-100">
@@ -74,63 +102,289 @@
         </table>
       </div>
     </section>
+
+    <!-- Dev/Test Panel (hidden unless ?dev=1) -->
+    <details class="bg-white p-4 rounded-2xl shadow" id="devPanel" hidden>
+      <summary class="cursor-pointer font-medium">Developer Panel</summary>
+      <div class="mt-3 grid sm:grid-cols-2 gap-3 text-sm">
+        <label class="flex items-center gap-2">API Base URL
+          <input id="apiBaseInput" class="border rounded px-2 py-1 w-full" placeholder="https://your-domain" />
+        </label>
+        <button id="saveApiBtn" class="bg-blue-600 text-white rounded px-3 py-2">Save & Reload</button>
+        <button id="runTestsBtn" class="bg-gray-800 text-white rounded px-3 py-2">Run Tests</button>
+        <button id="clearCacheBtn" class="bg-red-600 text-white rounded px-3 py-2">Clear Cache</button>
+      </div>
+      <p class="text-xs text-gray-500 mt-2">Tip: Add <code>?api=https://your-domain</code> or <code>?test=1</code> to the URL.</p>
+    </details>
   </main>
 
   <script>
-    // Example Chart
-    const ctx = document.getElementById("engagementChart").getContext("2d");
-    new Chart(ctx, {
-      type: "line",
-      data: {
-        labels: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-        datasets: [{
-          label: "Engagement",
-          data: [12, 19, 7, 11, 14, 20, 9],
-          borderColor: "#2563eb",
-          backgroundColor: "rgba(37, 99, 235, 0.2)",
-          fill: true,
-          tension: 0.4
-        }]
-      },
-      options: { responsive: true }
+    // ======== CONFIG ========
+    const qs = new URLSearchParams(location.search);
+    const fromQuery = qs.get('api');
+    const savedBase = localStorage.getItem('DASHBOARD_BASE_URL');
+    const BASE_URL = (fromQuery || savedBase || (location.protocol.startsWith('http') ? location.origin : '')).replace(/\/$/, '');
+    const RANGE = () => document.getElementById('rangeSelect').value || '7d';
+    const REFRESH_MS = 10000; // 10s
+
+    // Show dev panel if query dev=1
+    if (qs.get('dev') === '1') {
+      document.getElementById('devPanel').hidden = false;
+      document.getElementById('apiBaseInput').value = BASE_URL;
+    }
+
+    // ======== UTILITIES ========
+    function showBanner(type, msg) {
+      const wrap = document.getElementById('statusBanner');
+      const inner = document.getElementById('statusInner');
+      const classes = {
+        info: 'bg-blue-50 text-blue-800',
+        warn: 'bg-yellow-50 text-yellow-800',
+        error: 'bg-red-50 text-red-800'
+      };
+      wrap.className = '';
+      wrap.classList.add(classes[type] || classes.info);
+      inner.textContent = msg;
+      wrap.classList.remove('hidden');
+    }
+    function hideBanner() { document.getElementById('statusBanner').classList.add('hidden'); }
+
+    const fmt = new Intl.NumberFormat('en', { notation: 'compact' });
+    const isFile = location.protocol === 'file:';
+
+    function timeoutFetch(resource, options = {}) {
+      const { timeout = 8000 } = options;
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeout);
+      return fetch(resource, { ...options, signal: controller.signal })
+        .finally(() => clearTimeout(id));
+    }
+
+    async function fetchJSON(url) {
+      const res = await timeoutFetch(url, { headers: { 'Accept': 'application/json' }, timeout: 8000 });
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      return res.json();
+    }
+
+    // Demo fallback data used when API is unreachable
+    const DEMO = {
+      metrics: { reach: 1200000, engagement: 450000, campaigns: 12, leads: 320, ts: new Date().toISOString() },
+      posts: [
+        { id: 'P001', platform: 'Facebook', engagement: 2100 },
+        { id: 'P002', platform: 'Instagram', engagement: 3500 },
+        { id: 'P003', platform: 'YouTube', engagement: 1800 },
+      ],
+      events: [
+        { date: '2025-08-25', event: 'Campaign Launch', location: 'Bengaluru' },
+        { date: '2025-08-30', event: 'Youth Meetup', location: 'Vijayapura' },
+      ],
+      trend: {
+        '7d': { labels: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'], data: [12,19,7,11,14,20,9] },
+        '30d': { labels: Array.from({length:30}, (_,i)=>`D${i+1}`), data: Array.from({length:30}, ()=>Math.floor(10+Math.random()*20)) },
+        '12w': { labels: Array.from({length:12}, (_,i)=>`W${i+1}`), data: Array.from({length:12}, ()=>Math.floor(80+Math.random()*120)) },
+      }
+    };
+
+    // Cache helpers
+    function cacheSet(key, value) { localStorage.setItem(key, JSON.stringify({ value, ts: Date.now() })); }
+    function cacheGet(key, maxAgeMs) {
+      try {
+        const raw = localStorage.getItem(key); if (!raw) return null;
+        const { value, ts } = JSON.parse(raw);
+        if (maxAgeMs && Date.now() - ts > maxAgeMs) return null;
+        return value;
+      } catch { return null; }
+    }
+
+    // ======== CHART ========
+    let chart;
+    function renderChart(trend) {
+      const ctx = document.getElementById('engagementChart').getContext('2d');
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: trend.labels,
+          datasets: [{
+            label: 'Engagement',
+            data: trend.data,
+            borderColor: '#2563eb',
+            backgroundColor: 'rgba(37,99,235,0.2)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2
+          }]
+        },
+        options: { responsive: true, maintainAspectRatio: true }
+      });
+    }
+
+    // ======== UI BINDINGS ========
+    function renderMetrics(m) {
+      document.getElementById('reach').textContent = typeof m.reach === 'number' ? fmt.format(m.reach) : m.reach;
+      document.getElementById('engagement').textContent = typeof m.engagement === 'number' ? fmt.format(m.engagement) : m.engagement;
+      document.getElementById('campaigns').textContent = m.campaigns;
+      document.getElementById('leads').textContent = m.leads;
+      const ts = m.ts ? new Date(m.ts) : new Date();
+      const when = ts.toLocaleString();
+      document.getElementById('reachSub').textContent = `Last updated ${when}`;
+      document.getElementById('engagementSub').textContent = `Last updated ${when}`;
+      document.getElementById('campaignsSub').textContent = `Last updated ${when}`;
+      document.getElementById('leadsSub').textContent = `Last updated ${when}`;
+    }
+
+    function renderPosts(list) {
+      const q = (document.getElementById('postSearch').value || '').toLowerCase();
+      const body = document.querySelector('#top-posts tbody');
+      body.innerHTML = '';
+      list
+        .filter(p => !q || `${p.id} ${p.platform}`.toLowerCase().includes(q))
+        .forEach(p => {
+          body.insertAdjacentHTML('beforeend', `
+            <tr class="border-t">
+              <td class="p-3">${p.id}</td>
+              <td class="p-3">${p.platform}</td>
+              <td class="p-3">${typeof p.engagement === 'number' ? fmt.format(p.engagement) : p.engagement}</td>
+            </tr>`);
+        });
+    }
+
+    function renderEvents(rows) {
+      const body = document.querySelector('#events tbody');
+      body.innerHTML = '';
+      rows
+        .slice()
+        .sort((a,b) => new Date(a.date) - new Date(b.date))
+        .forEach(e => {
+          const d = new Date(e.date);
+          body.insertAdjacentHTML('beforeend', `
+            <tr class="border-t">
+              <td class="p-3">${isNaN(d) ? e.date : d.toLocaleDateString()}</td>
+              <td class="p-3">${e.event}</td>
+              <td class="p-3">${e.location}</td>
+            </tr>`);
+        });
+    }
+
+    document.getElementById('postSearch').addEventListener('input', () => {
+      const cached = cacheGet('posts', 5*60*1000) || DEMO.posts;
+      renderPosts(cached);
     });
 
-    // Example Top Posts Data
-    const posts = [
-      { id: "P001", platform: "Facebook", engagement: "2.1K" },
-      { id: "P002", platform: "Instagram", engagement: "3.5K" },
-      { id: "P003", platform: "YouTube", engagement: "1.8K" }
-    ];
-    const postTable = document.querySelector("#top-posts tbody");
-    posts.forEach(p => {
-      postTable.innerHTML += `
-        <tr class="border-t">
-          <td class="p-3">${p.id}</td>
-          <td class="p-3">${p.platform}</td>
-          <td class="p-3">${p.engagement}</td>
-        </tr>`;
+    // ======== DATA FETCH LOOP ========
+    let isFetching = false;
+    async function fetchData() {
+      if (isFetching) return; // prevent overlap
+      isFetching = true;
+      const useDemo = isFile || !BASE_URL || BASE_URL === 'null' || BASE_URL === 'undefined';
+
+      try {
+        let metrics, posts, events, trend;
+
+        if (useDemo) {
+          showBanner('warn', 'API not configured or page opened from file system. Showing demo data. Set ?api=https://your-domain or save in Developer Panel.');
+          ({ metrics } = DEMO);
+          posts = DEMO.posts; events = DEMO.events; trend = DEMO.trend[RANGE()];
+        } else {
+          hideBanner();
+          const [mRes, pRes, eRes, tRes] = await Promise.allSettled([
+            fetchJSON(`${BASE_URL}/api/metrics`),
+            fetchJSON(`${BASE_URL}/api/posts`),
+            fetchJSON(`${BASE_URL}/api/events`),
+            fetchJSON(`${BASE_URL}/api/engagement-trend?range=${encodeURIComponent(RANGE())}`)
+          ]);
+
+          if (mRes.status === 'fulfilled') { metrics = mRes.value; cacheSet('metrics', metrics); }
+          if (pRes.status === 'fulfilled') { posts = pRes.value; cacheSet('posts', posts); }
+          if (eRes.status === 'fulfilled') { events = eRes.value; cacheSet('events', events); }
+          if (tRes.status === 'fulfilled') { trend = mRes.status === 'fulfilled' ? tRes.value : tRes.value; cacheSet('trend', { [RANGE()]: trend }); }
+
+          // Fallback to cache or demo for any failed endpoint
+          if (!metrics) metrics = cacheGet('metrics', 15*60*1000) || DEMO.metrics;
+          if (!posts) posts = cacheGet('posts', 15*60*1000) || DEMO.posts;
+          if (!events) events = cacheGet('events', 15*60*1000) || DEMO.events;
+          if (!trend) {
+            const cachedTrend = cacheGet('trend', 15*60*1000);
+            trend = (cachedTrend && cachedTrend[RANGE()]) || DEMO.trend[RANGE()];
+          }
+
+          const failed = [mRes, pRes, eRes, tRes].filter(x => x.status === 'rejected');
+          if (failed.length) {
+            showBanner('warn', `Some data failed to load (${failed.length}). Using cached/demo where needed. Check CORS, HTTPS, or server status for ${BASE_URL}.`);
+            console.warn('Fetch failures:', failed.map(f => f.reason?.message || f.reason));
+          }
+        }
+
+        renderMetrics(metrics);
+        renderPosts(posts);
+        renderEvents(events);
+        renderChart(trend);
+
+      } catch (err) {
+        console.error('Critical error in fetchData():', err);
+        showBanner('error', `Could not load data. ${err?.message || err}`);
+        // Last resort demo so UI never breaks
+        renderMetrics(DEMO.metrics);
+        renderPosts(DEMO.posts);
+        renderEvents(DEMO.events);
+        renderChart(DEMO.trend[RANGE()]);
+      } finally {
+        isFetching = false;
+      }
+    }
+
+    // Manual refresh + range change
+    document.getElementById('refreshBtn').addEventListener('click', fetchData);
+    document.getElementById('rangeSelect').addEventListener('change', fetchData);
+
+    // Interval refresh (with visible countdown)
+    const REFRESH_SECS = REFRESH_MS / 1000;
+    let left = REFRESH_SECS;
+    setInterval(() => {
+      left--; if (left < 0) { left = REFRESH_SECS; fetchData(); }
+      document.getElementById('refreshLabel').textContent = `Auto refresh: ${left}s`;
+    }, 1000);
+
+    // Dev panel buttons
+    document.getElementById('saveApiBtn')?.addEventListener('click', () => {
+      const val = document.getElementById('apiBaseInput').value.trim();
+      localStorage.setItem('DASHBOARD_BASE_URL', val);
+      location.href = location.pathname + '?dev=1';
+    });
+    document.getElementById('clearCacheBtn')?.addEventListener('click', () => {
+      ['metrics','posts','events','trend'].forEach(k => localStorage.removeItem(k));
+      showBanner('info', 'Cache cleared.');
     });
 
-    // Example Events Data
-    const events = [
-      { date: "25 Aug 2025", event: "Campaign Launch", location: "Bengaluru" },
-      { date: "30 Aug 2025", event: "Youth Meetup", location: "Vijayapura" }
-    ];
-    const eventsTable = document.querySelector("#events tbody");
-    events.forEach(e => {
-      eventsTable.innerHTML += `
-        <tr class="border-t">
-          <td class="p-3">${e.date}</td>
-          <td class="p-3">${e.event}</td>
-          <td class="p-3">${e.location}</td>
-        </tr>`;
-    });
+    // ======== LIGHTWEIGHT TESTS ========
+    function assert(name, cond) {
+      if (!cond) throw new Error('Test failed: ' + name);
+      console.log('✅', name);
+    }
+    async function runTests() {
+      console.log('Running dashboard tests…');
+      await fetchData();
+      // Metric elements exist & non-empty
+      assert('reach filled', document.getElementById('reach').textContent.trim() !== '—');
+      assert('engagement filled', document.getElementById('engagement').textContent.trim() !== '—');
+      // Posts render
+      const rows = document.querySelectorAll('#top-posts tbody tr');
+      assert('posts rendered', rows.length > 0);
+      // Chart rendered
+      assert('chart created', !!chart && chart.data && chart.data.labels.length === chart.data.datasets[0].data.length);
+      // Events sorted (where parseable)
+      const dates = Array.from(document.querySelectorAll('#events tbody tr td:first-child')).map(td => new Date(td.textContent));
+      const sorted = dates.slice().sort((a,b)=>a-b);
+      assert('events sorted', dates.every((d,i)=> isNaN(d) || +d === +sorted[i] ));
+      console.log('🎉 All tests passed');
+      showBanner('info', 'All tests passed.');
+    }
 
-    // Example Metric Numbers
-    document.getElementById("reach").textContent = "1.2M";
-    document.getElementById("engagement").textContent = "450K";
-    document.getElementById("campaigns").textContent = "12";
-    document.getElementById("leads").textContent = "320";
+    if (qs.get('test') === '1') { runTests().catch(e => { console.error(e); showBanner('error', e.message); }); }
+    document.getElementById('runTestsBtn')?.addEventListener('click', () => runTests().catch(e => { console.error(e); showBanner('error', e.message); }));
+
+    // ======== INITIALIZE ========
+    fetchData();
   </script>
 </body>
 </html>
