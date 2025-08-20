@@ -1,37 +1,136 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Asthra DigiTech Dashboard</title>
-  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body>
-  <h1>Asthra DigiTech - Dashboard</h1>
+<body class="bg-gray-100 text-gray-800">
 
-  <div id="metrics">
-    <div>Total Reach: <span id="reach">—</span></div>
-    <div>Total Engagement: <span id="engagement">—</span></div>
-    <div>Campaigns Running: <span id="campaigns">—</span></div>
-    <div>Lead Conversions: <span id="leads">—</span></div>
-  </div>
+  <!-- Header -->
+  <header class="bg-blue-600 text-white p-6 shadow-lg">
+    <h1 class="text-2xl font-bold">📊 Asthra DigiTech - Dashboard</h1>
+  </header>
 
-  <h2>Top Posts</h2>
-  <table id="top-posts">
-    <thead>
-      <tr><th>Post ID</th><th>Platform</th><th>Engagement</th></tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+  <main class="p-6 space-y-8">
+    <!-- Metrics -->
+    <section id="metrics" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div class="bg-white p-6 rounded-2xl shadow">
+        <h3 class="text-sm text-gray-500">Total Reach</h3>
+        <p id="reach" class="text-2xl font-bold">—</p>
+      </div>
+      <div class="bg-white p-6 rounded-2xl shadow">
+        <h3 class="text-sm text-gray-500">Total Engagement</h3>
+        <p id="engagement" class="text-2xl font-bold">—</p>
+      </div>
+      <div class="bg-white p-6 rounded-2xl shadow">
+        <h3 class="text-sm text-gray-500">Campaigns Running</h3>
+        <p id="campaigns" class="text-2xl font-bold">—</p>
+      </div>
+      <div class="bg-white p-6 rounded-2xl shadow">
+        <h3 class="text-sm text-gray-500">Lead Conversions</h3>
+        <p id="leads" class="text-2xl font-bold">—</p>
+      </div>
+    </section>
 
-  <h2>Upcoming Events</h2>
-  <table id="events">
-    <thead>
-      <tr><th>Date</th><th>Event</th><th>Location</th></tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+    <!-- Engagement Chart -->
+    <section class="bg-white p-6 rounded-2xl shadow">
+      <h2 class="text-xl font-semibold mb-4">Engagement Trend</h2>
+      <canvas id="engagementChart" height="100"></canvas>
+    </section>
 
-  <script src="app.js"></script>
+    <!-- Top Posts -->
+    <section class="bg-white p-6 rounded-2xl shadow">
+      <h2 class="text-xl font-semibold mb-4">Top Posts</h2>
+      <div class="overflow-x-auto">
+        <table id="top-posts" class="w-full border border-gray-200 rounded-lg text-sm">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="p-3 text-left">Post ID</th>
+              <th class="p-3 text-left">Platform</th>
+              <th class="p-3 text-left">Engagement</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Events -->
+    <section class="bg-white p-6 rounded-2xl shadow">
+      <h2 class="text-xl font-semibold mb-4">Upcoming Events</h2>
+      <div class="overflow-x-auto">
+        <table id="events" class="w-full border border-gray-200 rounded-lg text-sm">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="p-3 text-left">Date</th>
+              <th class="p-3 text-left">Event</th>
+              <th class="p-3 text-left">Location</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // Example Chart
+    const ctx = document.getElementById("engagementChart").getContext("2d");
+    new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        datasets: [{
+          label: "Engagement",
+          data: [12, 19, 7, 11, 14, 20, 9],
+          borderColor: "#2563eb",
+          backgroundColor: "rgba(37, 99, 235, 0.2)",
+          fill: true,
+          tension: 0.4
+        }]
+      },
+      options: { responsive: true }
+    });
+
+    // Example Top Posts Data
+    const posts = [
+      { id: "P001", platform: "Facebook", engagement: "2.1K" },
+      { id: "P002", platform: "Instagram", engagement: "3.5K" },
+      { id: "P003", platform: "YouTube", engagement: "1.8K" }
+    ];
+    const postTable = document.querySelector("#top-posts tbody");
+    posts.forEach(p => {
+      postTable.innerHTML += `
+        <tr class="border-t">
+          <td class="p-3">${p.id}</td>
+          <td class="p-3">${p.platform}</td>
+          <td class="p-3">${p.engagement}</td>
+        </tr>`;
+    });
+
+    // Example Events Data
+    const events = [
+      { date: "25 Aug 2025", event: "Campaign Launch", location: "Bengaluru" },
+      { date: "30 Aug 2025", event: "Youth Meetup", location: "Vijayapura" }
+    ];
+    const eventsTable = document.querySelector("#events tbody");
+    events.forEach(e => {
+      eventsTable.innerHTML += `
+        <tr class="border-t">
+          <td class="p-3">${e.date}</td>
+          <td class="p-3">${e.event}</td>
+          <td class="p-3">${e.location}</td>
+        </tr>`;
+    });
+
+    // Example Metric Numbers
+    document.getElementById("reach").textContent = "1.2M";
+    document.getElementById("engagement").textContent = "450K";
+    document.getElementById("campaigns").textContent = "12";
+    document.getElementById("leads").textContent = "320";
+  </script>
 </body>
 </html>
