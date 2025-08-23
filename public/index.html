@@ -1,277 +1,58 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>n8n Webhook Tester for Railway</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        body {
-            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container {
-            max-width: 900px;
-            background: white;
-            border-radius: 15px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-            padding: 30px;
-            margin-top: 30px;
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-            padding-bottom: 20px;
-            border-bottom: 2px solid #eaeaea;
-        }
-        .logo {
-            font-size: 2.5rem;
-            font-weight: bold;
-            color: #4361ee;
-            margin-bottom: 10px;
-        }
-        .endpoint-info {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 20px;
-        }
-        .response-box {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 15px;
-            margin-top: 20px;
-            min-height: 200px;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        .console {
-            background: #2d3748;
-            color: #e2e8f0;
-            font-family: monospace;
-            padding: 15px;
-            border-radius: 8px;
-            height: 200px;
-            overflow-y: auto;
-            margin-top: 20px;
-        }
-        .btn-primary {
-            background: #4361ee;
-            border: none;
-        }
-        .btn-primary:hover {
-            background: #3a56d4;
-        }
-        .status-badge {
-            padding: 5px 10px;
-            border-radius: 20px;
-            font-size: 0.8rem;
-            font-weight: bold;
-        }
-        .status-running {
-            background: #d1fae5;
-            color: #065f46;
-        }
-        .status-offline {
-            background: #fee2e2;
-            color: #991b1b;
-        }
-        .config-section {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 20px;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Webhook Test (CORS Safe)</title>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <div class="logo">n8n Webhook Tester</div>
-            <p class="text-muted">Test your n8n webhooks running on Railway</p>
-        </div>
+  <h1>Webhook Test (CORS Safe)</h1>
 
-        <div class="config-section">
-            <h5><i class="fas fa-cog me-2"></i>Configuration</h5>
-            <div class="mb-3">
-                <label for="webhookUrl" class="form-label">Webhook URL</label>
-                <input type="text" class="form-control" id="webhookUrl" placeholder="https://your-app.railway.app/webhook/webhook-s">
-                <div class="form-text">Enter the full URL of your n8n webhook on Railway</div>
-            </div>
-            <button id="saveConfig" class="btn btn-sm btn-primary">Save URL</button>
-        </div>
+  <textarea id="payload" rows="5" cols="50">
+{
+  "event": "test",
+  "id": "123",
+  "message": "Hello from frontend"
+}
+  </textarea><br><br>
 
-        <div class="row">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header bg-primary text-white">
-                        <h5 class="mb-0">Webhook Status</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="d-flex justify-content-between align-items-center mb-3">
-                            <span>Connection Status:</span>
-                            <span class="status-badge status-offline" id="connectionStatus">Not tested</span>
-                        </div>
-                        <button id="testConnection" class="btn btn-outline-primary w-100">Test Connection</button>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header bg-primary text-white">
-                        <h5 class="mb-0">Webhook Information</h5>
-                    </div>
-                    <div class="card-body">
-                        <p><strong>Method:</strong> POST</p>
-                        <p><strong>Path:</strong> /webhook/webhook-s</p>
-                        <p><strong>Response Mode:</strong> responseNode</p>
-                    </div>
-                </div>
-            </div>
-        </div>
+  <button id="sendBtn">Send to Webhook</button>
 
-        <div class="card mt-4">
-            <div class="card-header bg-primary text-white">
-                <h5 class="mb-0">Test Webhook</h5>
-            </div>
-            <div class="card-body">
-                <div class="mb-3">
-                    <label for="payload" class="form-label">Payload (JSON)</label>
-                    <textarea class="form-control" id="payload" rows="6">{
-  "event": "order_created",
-  "id": "ord_12345",
-  "amount": 99.99,
-  "currency": "USD",
-  "customer": {
-    "id": "cus_67890",
-    "email": "customer@example.com"
+  <h3>Response:</h3>
+  <pre id="response"></pre>
+
+<script>
+const webhookURL = "https://primary-production-3b8c.up.railway.app/webhook/webhook-s";
+
+document.getElementById("sendBtn").addEventListener("click", () => {
+  let data;
+  try {
+    data = JSON.parse(document.getElementById("payload").value);
+  } catch (e) {
+    document.getElementById("response").textContent = "Invalid JSON";
+    return;
   }
-}</textarea>
-                </div>
-                <button id="sendWebhook" class="btn btn-primary w-100">Send Test Webhook</button>
-                
-                <div class="mt-4">
-                    <h6>Response</h6>
-                    <div class="response-box">
-                        <pre id="response">Response will appear here...</pre>
-                    </div>
-                </div>
-            </div>
-        </div>
 
-        <div class="mt-4">
-            <h5>Activity Log</h5>
-            <div class="console">
-                <div id="consoleOutput">Webhook activity will appear here...</div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            const webhookUrlInput = document.getElementById('webhookUrl');
-            const saveConfigBtn = document.getElementById('saveConfig');
-            const testConnectionBtn = document.getElementById('testConnection');
-            const connectionStatus = document.getElementById('connectionStatus');
-            const sendWebhookBtn = document.getElementById('sendWebhook');
-            const payloadTextarea = document.getElementById('payload');
-            const responsePre = document.getElementById('response');
-            const consoleOutput = document.getElementById('consoleOutput');
-
-            // Load saved webhook URL
-            const savedWebhookUrl = localStorage.getItem('n8nWebhookUrl');
-            if (savedWebhookUrl) {
-                webhookUrlInput.value = savedWebhookUrl;
-            }
-
-            // Save webhook URL
-            saveConfigBtn.addEventListener('click', function() {
-                const url = webhookUrlInput.value.trim();
-                if (url) {
-                    localStorage.setItem('n8nWebhookUrl', url);
-                    addToConsole('Webhook URL saved: ' + url);
-                    alert('Webhook URL saved successfully!');
-                } else {
-                    alert('Please enter a valid webhook URL');
-                }
-            });
-
-            // Test connection
-            testConnectionBtn.addEventListener('click', function() {
-                const url = webhookUrlInput.value.trim();
-                if (!url) {
-                    alert('Please enter a webhook URL first');
-                    return;
-                }
-
-                connectionStatus.textContent = 'Testing...';
-                connectionStatus.className = 'status-badge status-running';
-                
-                fetch(url, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ test: true, message: 'Connection test' })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    connectionStatus.textContent = 'Connected';
-                    connectionStatus.className = 'status-badge status-running';
-                    addToConsole('Connection test successful: ' + JSON.stringify(data));
-                })
-                .catch(error => {
-                    connectionStatus.textContent = 'Failed';
-                    connectionStatus.className = 'status-badge status-offline';
-                    addToConsole('Connection test failed: ' + error.message);
-                });
-            });
-
-            // Send webhook
-            sendWebhookBtn.addEventListener('click', function() {
-                const url = webhookUrlInput.value.trim();
-                if (!url) {
-                    alert('Please enter a webhook URL first');
-                    return;
-                }
-
-                let payload;
-                try {
-                    payload = JSON.parse(payloadTextarea.value);
-                } catch (e) {
-                    responsePre.textContent = 'Error: Invalid JSON payload';
-                    addToConsole('Error: Invalid JSON payload');
-                    return;
-                }
-                
-                fetch(url, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(payload)
-                })
-                .then(response => response.json())
-                .then(data => {
-                    responsePre.textContent = JSON.stringify(data, null, 2);
-                    addToConsole('Webhook sent: Received response - ' + JSON.stringify(data));
-                })
-                .catch(error => {
-                    responsePre.textContent = 'Error: ' + error.message;
-                    addToConsole('Webhook failed: ' + error.message);
-                    connectionStatus.textContent = 'Failed';
-                    connectionStatus.className = 'status-badge status-offline';
-                });
-            });
-
-            function addToConsole(message) {
-                const timestamp = new Date().toLocaleTimeString();
-                consoleOutput.innerHTML += `<div>[${timestamp}] ${message}</div>`;
-                consoleOutput.scrollTop = consoleOutput.scrollHeight;
-            }
-        });
-    </script>
+  fetch(webhookURL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+    mode: "cors"  // ensure browser sends CORS request
+  })
+  .then(async res => {
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    return res.json();
+  })
+  .then(resp => {
+    document.getElementById("response").textContent = JSON.stringify(resp, null, 2);
+  })
+  .catch(err => {
+    document.getElementById("response").textContent = `Error: ${err.message}\nCheck n8n CORS settings.`;
+  });
+});
+</script>
 </body>
 </html>
