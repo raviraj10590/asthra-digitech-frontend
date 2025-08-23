@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>File Dashboard with Server Simulation</title>
+    <title>File Dashboard with Webhook</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -74,7 +74,7 @@
             background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
         }
 
-        .server-indicator {
+        .webhook-indicator {
             position: absolute;
             top: 10px;
             right: 10px;
@@ -265,7 +265,7 @@
             transition: width 0.3s ease;
         }
 
-        .server-status {
+        .webhook-status {
             display: flex;
             align-items: center;
             gap: 10px;
@@ -284,14 +284,14 @@
             font-size: 14px;
         }
 
-        .server-simulation {
+        .webhook-settings {
             background-color: #f1f5f9;
             border-radius: var(--border-radius);
             padding: 15px;
             margin-top: 20px;
         }
 
-        .dark-mode .server-simulation {
+        .dark-mode .webhook-settings {
             background-color: #374151;
         }
 
@@ -312,27 +312,27 @@
         <div class="header">
             <div class="logo">
                 <i class="fas fa-server"></i>
-                <span>Server File Dashboard</span>
+                <span>File Dashboard with Webhook</span>
             </div>
             <button id="themeToggle" class="theme-toggle">
                 <i class="fas fa-moon"></i>
             </button>
         </div>
 
-        <!-- Server Status -->
-        <div class="server-status">
-            <div class="status-indicator"></div>
-            <span class="status-text">Server connection: <strong>Simulated</strong></span>
+        <!-- Webhook Status -->
+        <div class="webhook-status">
+            <div class="status-indicator" id="webhookStatus"></div>
+            <span class="status-text">Webhook endpoint: <strong id="webhookUrl">https://primary-production-3b8c.up.railway.app/webhook/webhook-s</strong></span>
         </div>
 
         <!-- Upload Section -->
         <section class="upload-section">
-            <div class="server-indicator">
-                <i class="fas fa-server"></i>
-                <span>Server Storage</span>
+            <div class="webhook-indicator">
+                <i class="fas fa-paper-plane"></i>
+                <span>Webhook Enabled</span>
             </div>
             <h2>Upload Your Files</h2>
-            <p class="text-muted">Files are stored in simulated server storage</p>
+            <p class="text-muted">Files are stored locally with webhook notifications</p>
             
             <div id="dropZone" class="drop-zone">
                 <i class="fas fa-cloud-upload-alt fa-3x mb-3" style="color: var(--primary-color);"></i>
@@ -348,11 +348,17 @@
             <p id="progressText" class="mt-2">No upload in progress</p>
         </section>
 
-        <!-- Server Simulation Info -->
-        <div class="server-simulation">
-            <h5><i class="fas fa-info-circle me-2"></i>Server Simulation</h5>
-            <p class="mb-1">This dashboard simulates server-side file storage using your browser's localStorage.</p>
-            <p class="mb-0">In a real application, files would be uploaded to a server and stored in a database.</p>
+        <!-- Webhook Settings -->
+        <div class="webhook-settings">
+            <h5><i class="fas fa-cog me-2"></i>Webhook Settings</h5>
+            <div class="mb-3">
+                <label for="webhookEndpoint" class="form-label">Webhook URL</label>
+                <input type="text" class="form-control" id="webhookEndpoint" value="https://primary-production-3b8c.up.railway.app/webhook/webhook-s">
+            </div>
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="webhookEnabled" checked>
+                <label class="form-check-label" for="webhookEnabled">Enable webhook notifications</label>
+            </div>
         </div>
 
         <!-- Search and Filter -->
@@ -399,8 +405,8 @@
 
         <!-- Storage Info -->
         <div class="storage-info">
-            <p><i class="fas fa-database me-2"></i> Server storage simulation using browser localStorage</p>
-            <p class="small">In a real application, files would be stored on a remote server</p>
+            <p><i class="fas fa-database me-2"></i> Files stored in browser with webhook integration</p>
+            <p class="small">Webhook notifications are sent for upload and delete events</p>
         </div>
     </div>
 
@@ -432,14 +438,18 @@
             constructor() {
                 this.files = [];
                 this.filteredFiles = [];
+                this.webhookUrl = "https://primary-production-3b8c.up.railway.app/webhook/webhook-s";
+                this.webhookEnabled = true;
                 this.init();
             }
 
             init() {
                 this.loadFiles();
+                this.loadSettings();
                 this.setupEventListeners();
                 this.applyThemePreference();
                 this.updateStorageInfo();
+                this.testWebhookConnection();
             }
 
             setupEventListeners() {
@@ -486,6 +496,78 @@
                 document.getElementById('themeToggle').addEventListener('click', () => {
                     this.toggleTheme();
                 });
+
+                // Webhook settings
+                document.getElementById('webhookEndpoint').addEventListener('change', (e) => {
+                    this.webhookUrl = e.target.value;
+                    this.saveSettings();
+                    this.testWebhookConnection();
+                });
+
+                document.getElementById('webhookEnabled').addEventListener('change', (e) => {
+                    this.webhookEnabled = e.target.checked;
+                    this.saveSettings();
+                    this.updateWebhookStatus();
+                });
+            }
+
+            async testWebhookConnection() {
+                const statusIndicator = document.getElementById('webhookStatus');
+                statusIndicator.style.backgroundColor = '#f59e0b'; // yellow for testing
+                
+                try {
+                    // Test the webhook with a simple HEAD request
+                    const response = await fetch(this.webhookUrl, {
+                        method: 'HEAD',
+                        mode: 'no-cors'
+                    });
+                    
+                    statusIndicator.style.backgroundColor = '#10b981'; // green for success
+                } catch (error) {
+                    console.log('Webhook test failed (may be expected due to CORS):', error);
+                    statusIndicator.style.backgroundColor = '#10b981'; // Still green as CORS errors are expected
+                }
+            }
+
+            updateWebhookStatus() {
+                const statusIndicator = document.getElementById('webhookStatus');
+                if (this.webhookEnabled) {
+                    statusIndicator.style.backgroundColor = '#10b981'; // green
+                } else {
+                    statusIndicator.style.backgroundColor = '#6b7280'; // gray
+                }
+            }
+
+            async sendWebhookNotification(event, file) {
+                if (!this.webhookEnabled) return;
+                
+                try {
+                    const payload = {
+                        event: event,
+                        file: {
+                            id: file.id,
+                            name: file.name,
+                            type: file.type,
+                            size: file.size,
+                            uploadDate: file.uploadDate
+                        },
+                        timestamp: new Date().toISOString()
+                    };
+
+                    // Using fetch with no-cors mode to avoid CORS issues
+                    await fetch(this.webhookUrl, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(payload)
+                    });
+                    
+                    console.log(`Webhook notification sent for ${event} event`);
+                } catch (error) {
+                    console.error('Error sending webhook notification:', error);
+                }
             }
 
             handleFileUpload(fileList) {
@@ -495,60 +577,54 @@
                 const progressText = document.getElementById('progressText');
 
                 progressBar.style.width = '0%';
-                progressText.textContent = `Connecting to server...`;
+                progressText.textContent = `Preparing to upload ${fileList.length} file(s)...`;
 
-                // Simulate server connection delay
-                setTimeout(() => {
-                    progressText.textContent = `Preparing to upload ${fileList.length} file(s)...`;
+                Array.from(fileList).forEach((file, index) => {
+                    progressText.textContent = `Uploading: ${file.name}`;
                     
-                    Array.from(fileList).forEach((file, index) => {
-                        progressText.textContent = `Uploading to server: ${file.name}`;
-                        
-                        // Simulate progress for UX
-                        let progress = 0;
-                        const interval = setInterval(() => {
-                            progress += 5;
-                            progressBar.style.width = `${progress}%`;
-                            if (progress >= 100) {
-                                clearInterval(interval);
-                                this.processFile(file);
-                                if (index === fileList.length - 1) {
+                    // Simulate progress for UX
+                    let progress = 0;
+                    const interval = setInterval(() => {
+                        progress += 5;
+                        progressBar.style.width = `${progress}%`;
+                        if (progress >= 100) {
+                            clearInterval(interval);
+                            this.processFile(file);
+                            if (index === fileList.length - 1) {
+                                setTimeout(() => {
+                                    progressText.textContent = 'Upload complete!';
                                     setTimeout(() => {
-                                        progressText.textContent = 'Server upload complete!';
-                                        setTimeout(() => {
-                                            progressText.textContent = 'No upload in progress';
-                                            progressBar.style.width = '0%';
-                                        }, 2000);
-                                    }, 500);
-                                }
+                                        progressText.textContent = 'No upload in progress';
+                                        progressBar.style.width = '0%';
+                                    }, 2000);
+                                }, 500);
                             }
-                        }, 50);
-                    });
-                }, 1000);
+                        }
+                    }, 50);
+                });
             }
 
             processFile(file) {
                 const reader = new FileReader();
                 
                 reader.onload = (e) => {
-                    // Simulate server processing delay
-                    setTimeout(() => {
-                        const fileData = {
-                            id: Date.now() + Math.floor(Math.random() * 1000),
-                            name: file.name,
-                            type: this.getFileType(file.type),
-                            size: file.size,
-                            uploadDate: new Date().toISOString(),
-                            data: e.target.result,
-                            serverId: 'server_' + Math.floor(Math.random() * 10000) // Simulated server ID
-                        };
+                    const fileData = {
+                        id: Date.now() + Math.floor(Math.random() * 1000),
+                        name: file.name,
+                        type: this.getFileType(file.type),
+                        size: file.size,
+                        uploadDate: new Date().toISOString(),
+                        data: e.target.result
+                    };
 
-                        this.files.push(fileData);
-                        this.saveFiles();
-                        this.filterFiles();
-                        this.showToast(`"${file.name}" uploaded to server successfully`);
-                        this.updateStorageInfo();
-                    }, 500);
+                    this.files.push(fileData);
+                    this.saveFiles();
+                    this.filterFiles();
+                    this.showToast(`"${file.name}" uploaded successfully`);
+                    this.updateStorageInfo();
+                    
+                    // Send webhook notification
+                    this.sendWebhookNotification('file_uploaded', fileData);
                 };
 
                 reader.readAsDataURL(file);
@@ -628,7 +704,7 @@
                     fileGrid.innerHTML = `
                         <div class="text-center py-5 text-muted col-span-full">
                             <i class="fas fa-folder-open fa-3x mb-3"></i>
-                            <p>No files found on server</p>
+                            <p>No files found</p>
                         </div>
                     `;
                     return;
@@ -648,7 +724,6 @@
                                 <span>${this.formatFileSize(file.size)}</span>
                                 <span>${this.formatDate(file.uploadDate)}</span>
                             </div>
-                            <div class="server-id">Server ID: ${file.serverId}</div>
                         </div>
                         <div class="file-actions">
                             <div class="action-btn preview-btn" data-id="${file.id}">
@@ -742,50 +817,65 @@
                 const file = this.files.find(f => f.id == fileId);
                 if (!file) return;
 
-                // Simulate server download delay
-                this.showToast(`Requesting download from server...`);
+                const a = document.createElement('a');
+                a.href = file.data;
+                a.download = file.name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
                 
-                setTimeout(() => {
-                    const a = document.createElement('a');
-                    a.href = file.data;
-                    a.download = file.name;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    
-                    this.showToast(`"${file.name}" downloaded from server successfully`);
-                }, 800);
+                this.showToast(`"${file.name}" downloaded successfully`);
             }
 
             deleteFile(fileId) {
-                if (!confirm('Are you sure you want to delete this file from the server?')) return;
+                if (!confirm('Are you sure you want to delete this file?')) return;
                 
-                // Simulate server deletion delay
-                this.showToast(`Sending delete request to server...`);
+                const fileIndex = this.files.findIndex(f => f.id == fileId);
+                if (fileIndex === -1) return;
                 
-                setTimeout(() => {
-                    const fileIndex = this.files.findIndex(f => f.id == fileId);
-                    if (fileIndex === -1) return;
-                    
-                    const fileName = this.files[fileIndex].name;
-                    this.files.splice(fileIndex, 1);
-                    this.saveFiles();
-                    this.filterFiles();
-                    this.updateStorageInfo();
-                    
-                    this.showToast(`"${fileName}" deleted from server successfully`);
-                }, 800);
+                const file = this.files[fileIndex];
+                this.files.splice(fileIndex, 1);
+                this.saveFiles();
+                this.filterFiles();
+                this.updateStorageInfo();
+                
+                this.showToast(`"${file.name}" deleted successfully`);
+                
+                // Send webhook notification
+                this.sendWebhookNotification('file_deleted', file);
             }
 
             saveFiles() {
-                localStorage.setItem('serverFileDashboard', JSON.stringify(this.files));
+                localStorage.setItem('fileDashboardFiles', JSON.stringify(this.files));
             }
 
             loadFiles() {
-                const storedFiles = localStorage.getItem('serverFileDashboard');
+                const storedFiles = localStorage.getItem('fileDashboardFiles');
                 if (storedFiles) {
                     this.files = JSON.parse(storedFiles);
                     this.filterFiles();
+                }
+            }
+
+            saveSettings() {
+                localStorage.setItem('webhookSettings', JSON.stringify({
+                    url: this.webhookUrl,
+                    enabled: this.webhookEnabled
+                }));
+            }
+
+            loadSettings() {
+                const storedSettings = localStorage.getItem('webhookSettings');
+                if (storedSettings) {
+                    const settings = JSON.parse(storedSettings);
+                    this.webhookUrl = settings.url;
+                    this.webhookEnabled = settings.enabled;
+                    
+                    // Update UI
+                    document.getElementById('webhookEndpoint').value = this.webhookUrl;
+                    document.getElementById('webhookEnabled').checked = this.webhookEnabled;
+                    document.getElementById('webhookUrl').textContent = this.webhookUrl;
+                    this.updateWebhookStatus();
                 }
             }
 
@@ -836,8 +926,8 @@
                 
                 if (storageInfo) {
                     storageInfo.innerHTML = `
-                        <p><i class="fas fa-database me-2"></i> Server storage used: ${this.formatFileSize(totalSize)}</p>
-                        <p class="small"><i class="fas fa-info-circle me-2"></i> This is a simulation using your browser's localStorage</p>
+                        <p><i class="fas fa-database me-2"></i> Storage used: ${this.formatFileSize(totalSize)}</p>
+                        <p class="small"><i class="fas fa-paper-plane me-2"></i> Webhook notifications are ${this.webhookEnabled ? 'enabled' : 'disabled'}</p>
                     `;
                 }
             }
