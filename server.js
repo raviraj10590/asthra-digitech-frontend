@@ -1,3 +1,4 @@
+cat > server.js << 'EOF'
 const express = require('express');
 const cors = require('cors');
 const app = express();
@@ -125,3 +126,4 @@ process.on('SIGINT', () => {
     console.log('\nShutting down gracefully...');
     process.exit(0);
 });
+EOF
