@@ -3,42 +3,29 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>File Dashboard for n8n Webhook</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <title>File Dashboard with n8n Webhook</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root {
             --primary-color: #4361ee;
-            --secondary-color: #3f37c9;
-            --success-color: #4cc9f0;
             --light-bg: #f8f9fa;
             --dark-bg: #212529;
-            --light-text: #f8f9fa;
-            --dark-text: #212529;
-            --border-radius: 12px;
-            --box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            --transition: all 0.3s ease;
         }
-
+        
         body {
             background-color: var(--light-bg);
-            color: var(--dark-text);
-            transition: var(--transition);
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            min-height: 100vh;
+            padding-top: 20px;
+            padding-bottom: 50px;
         }
-
-        body.dark-mode {
-            background-color: var(--dark-bg);
-            color: var(--light-text);
-        }
-
+        
         .dashboard-container {
             max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
         }
-
+        
         .header {
             display: flex;
             justify-content: space-between;
@@ -47,7 +34,7 @@
             padding-bottom: 15px;
             border-bottom: 2px solid var(--primary-color);
         }
-
+        
         .logo {
             display: flex;
             align-items: center;
@@ -56,23 +43,17 @@
             font-size: 24px;
             color: var(--primary-color);
         }
-
+        
         .upload-section {
             background: linear-gradient(135deg, #e0f7fa 0%, #bbdefb 100%);
-            border-radius: var(--border-radius);
+            border-radius: 12px;
             padding: 25px;
             margin-bottom: 30px;
             text-align: center;
-            transition: var(--transition);
-            box-shadow: var(--box-shadow);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
             position: relative;
-            overflow: hidden;
         }
-
-        .dark-mode .upload-section {
-            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
-        }
-
+        
         .webhook-indicator {
             position: absolute;
             top: 10px;
@@ -86,49 +67,40 @@
             align-items: center;
             gap: 5px;
         }
-
+        
         .drop-zone {
             border: 3px dashed var(--primary-color);
-            border-radius: var(--border-radius);
+            border-radius: 12px;
             padding: 40px 20px;
             cursor: pointer;
-            transition: var(--transition);
             margin-bottom: 20px;
+            transition: background-color 0.3s;
         }
-
+        
         .drop-zone:hover {
             background-color: rgba(67, 97, 238, 0.05);
         }
-
-        .dark-mode .drop-zone:hover {
-            background-color: rgba(255, 255, 255, 0.1);
-        }
-
+        
         .file-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
             gap: 20px;
             margin-top: 30px;
         }
-
+        
         .file-card {
             background-color: white;
-            border-radius: var(--border-radius);
+            border-radius: 12px;
             overflow: hidden;
-            transition: var(--transition);
-            box-shadow: var(--box-shadow);
-            position: relative;
+            transition: transform 0.3s, box-shadow 0.3s;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
-
-        .dark-mode .file-card {
-            background-color: #2d3748;
-        }
-
+        
         .file-card:hover {
             transform: translateY(-5px);
             box-shadow: 0 10px 15px rgba(0, 0, 0, 0.2);
         }
-
+        
         .file-preview {
             height: 160px;
             display: flex;
@@ -136,92 +108,98 @@
             justify-content: center;
             background-color: #f1f5f9;
         }
-
-        .dark-mode .file-preview {
-            background-color: #4a5568;
-        }
-
+        
         .file-info {
             padding: 15px;
         }
-
+        
         .file-actions {
             display: flex;
             border-top: 1px solid #e2e8f0;
         }
-
-        .dark-mode .file-actions {
-            border-top: 1px solid #4a5568;
-        }
-
+        
         .action-btn {
             flex: 1;
             padding: 12px;
             text-align: center;
             cursor: pointer;
-            transition: var(--transition);
+            transition: background-color 0.3s;
         }
-
+        
         .action-btn:hover {
             background-color: #edf2f7;
         }
-
-        .dark-mode .action-btn:hover {
-            background-color: #4a5568;
-        }
-
+        
         .preview-btn {
             color: var(--primary-color);
         }
-
+        
         .download-btn {
             color: #38b2ac;
         }
-
+        
         .delete-btn {
             color: #e53e3e;
         }
-
+        
         .search-container {
             display: flex;
             gap: 15px;
             margin-bottom: 20px;
             flex-wrap: wrap;
         }
-
+        
         .search-box {
             flex: 1;
             min-width: 250px;
         }
-
-        .filter-box {
+        
+        .filter-box, .sort-box {
             width: 200px;
         }
-
-        .sort-box {
-            width: 200px;
-        }
-
-        .theme-toggle {
-            background: none;
-            border: none;
-            font-size: 24px;
-            cursor: pointer;
-            color: var(--primary-color);
-        }
-
-        .storage-info {
-            text-align: center;
-            margin-top: 30px;
+        
+        .webhook-settings {
+            background-color: #f1f5f9;
+            border-radius: 12px;
             padding: 15px;
-            background-color: #e6f7ff;
-            border-radius: var(--border-radius);
+            margin-top: 20px;
         }
-
-        .dark-mode .storage-info {
-            background-color: #2c5282;
+        
+        .webhook-response {
+            background-color: #f8f9fa;
+            border-radius: 12px;
+            padding: 15px;
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
         }
-
+        
+        .webhook-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+            justify-content: center;
+        }
+        
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        
+        .status-connected {
+            background-color: #10b981;
+        }
+        
+        .status-disconnected {
+            background-color: #ef4444;
+        }
+        
+        .status-connecting {
+            background-color: #f59e0b;
+        }
+        
         .toast {
             position: fixed;
             top: 20px;
@@ -229,8 +207,8 @@
             padding: 15px 20px;
             background-color: white;
             color: #2d3748;
-            border-radius: var(--border-radius);
-            box-shadow: var(--box-shadow);
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
             z-index: 1000;
             display: flex;
             align-items: center;
@@ -238,16 +216,11 @@
             transform: translateX(100%);
             transition: transform 0.3s ease;
         }
-
-        .dark-mode .toast {
-            background-color: #2d3748;
-            color: white;
-        }
-
+        
         .toast.show {
             transform: translateX(0);
         }
-
+        
         .progress-bar {
             height: 5px;
             width: 100%;
@@ -256,44 +229,14 @@
             overflow: hidden;
             margin-top: 10px;
         }
-
+        
         .progress {
             height: 100%;
             background-color: var(--primary-color);
             width: 0%;
             transition: width 0.3s ease;
         }
-
-        .webhook-status {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-top: 10px;
-            justify-content: center;
-        }
-
-        .status-indicator {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background-color: #4ade80;
-        }
-
-        .status-text {
-            font-size: 14px;
-        }
-
-        .webhook-settings {
-            background-color: #f1f5f9;
-            border-radius: var(--border-radius);
-            padding: 15px;
-            margin-top: 20px;
-        }
-
-        .dark-mode .webhook-settings {
-            background-color: #374151;
-        }
-
+        
         @media (max-width: 768px) {
             .search-container {
                 flex-direction: column;
@@ -302,19 +245,6 @@
             .search-box, .filter-box, .sort-box {
                 width: 100%;
             }
-        }
-
-        .webhook-response {
-            background-color: #f8f9fa;
-            border-radius: var(--border-radius);
-            padding: 15px;
-            margin-top: 20px;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-
-        .dark-mode .webhook-response {
-            background-color: #374151;
         }
     </style>
 </head>
@@ -326,15 +256,12 @@
                 <i class="fas fa-server"></i>
                 <span>File Dashboard for n8n</span>
             </div>
-            <button id="themeToggle" class="theme-toggle">
-                <i class="fas fa-moon"></i>
-            </button>
         </div>
 
         <!-- Webhook Status -->
         <div class="webhook-status">
-            <div class="status-indicator" id="webhookStatus"></div>
-            <span class="status-text">Webhook endpoint: <strong id="webhookUrl">https://primary-production-3b8c.up.railway.app/webhook/webhook-s</strong></span>
+            <div class="status-indicator status-connecting" id="webhookStatus"></div>
+            <span class="status-text">Webhook status: <strong id="webhookStatusText">Checking...</strong></span>
         </div>
 
         <!-- Upload Section -->
@@ -367,11 +294,12 @@
                 <label for="webhookEndpoint" class="form-label">Webhook URL</label>
                 <input type="text" class="form-control" id="webhookEndpoint" value="https://primary-production-3b8c.up.railway.app/webhook/webhook-s">
             </div>
-            <div class="form-check form-switch">
+            <div class="form-check form-switch mb-3">
                 <input class="form-check-input" type="checkbox" id="webhookEnabled" checked>
                 <label class="form-check-label" for="webhookEnabled">Enable webhook notifications</label>
             </div>
-            <button id="testWebhook" class="btn btn-sm btn-outline-primary mt-2">Test Webhook Connection</button>
+            <button id="testWebhook" class="btn btn-sm btn-outline-primary">Test Webhook Connection</button>
+            <button id="viewWebhookHelp" class="btn btn-sm btn-outline-secondary ms-2">Webhook Help</button>
         </div>
 
         <!-- Webhook Response -->
@@ -422,35 +350,41 @@
             </div>
         </section>
 
-        <!-- Storage Info -->
-        <div class="storage-info">
-            <p><i class="fas fa-database me-2"></i> Files stored in browser with n8n webhook integration</p>
-            <p class="small">Webhook notifications are sent for upload and delete events</p>
-        </div>
-    </div>
-
-    <!-- Preview Modal -->
-    <div class="modal fade" id="previewModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="previewTitle">File Preview</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body" id="previewContent">
-                    <!-- Preview content will be inserted here -->
+        <!-- Webhook Help Modal -->
+        <div class="modal fade" id="webhookHelpModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">n8n Webhook Help</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <h6>Common n8n Webhook Issues:</h6>
+                        <ul>
+                            <li>Ensure your n8n webhook is configured to accept POST requests</li>
+                            <li>Check that the webhook URL is correct in your n8n workflow</li>
+                            <li>Verify that your n8n workflow is activated</li>
+                            <li>Check CORS settings if you're getting network errors</li>
+                            <li>Ensure the webhook endpoint is accessible from the internet</li>
+                        </ul>
+                        <h6>Testing Your Webhook:</h6>
+                        <p>Use the "Test Webhook Connection" button to verify your endpoint is working. If you receive an error, check your n8n workflow configuration.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
                 </div>
             </div>
         </div>
+
+        <!-- Toast Notification -->
+        <div id="toast" class="toast">
+            <i class="fas fa-check-circle"></i>
+            <span id="toastMessage">Operation successful</span>
+        </div>
     </div>
 
-    <!-- Toast Notification -->
-    <div id="toast" class="toast">
-        <i class="fas fa-check-circle"></i>
-        <span id="toastMessage">Operation successful</span>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // Main Application
         class FileDashboard {
@@ -466,7 +400,6 @@
                 this.loadFiles();
                 this.loadSettings();
                 this.setupEventListeners();
-                this.applyThemePreference();
                 this.updateStorageInfo();
                 this.testWebhookConnection();
             }
@@ -511,11 +444,6 @@
                     this.filterFiles();
                 });
 
-                // Theme toggle
-                document.getElementById('themeToggle').addEventListener('click', () => {
-                    this.toggleTheme();
-                });
-
                 // Webhook settings
                 document.getElementById('webhookEndpoint').addEventListener('change', (e) => {
                     this.webhookUrl = e.target.value;
@@ -533,14 +461,21 @@
                 document.getElementById('testWebhook').addEventListener('click', () => {
                     this.testWebhookConnection();
                 });
+
+                // Webhook help button
+                document.getElementById('viewWebhookHelp').addEventListener('click', () => {
+                    new bootstrap.Modal(document.getElementById('webhookHelpModal')).show();
+                });
             }
 
             async testWebhookConnection() {
                 const statusIndicator = document.getElementById('webhookStatus');
+                const statusText = document.getElementById('webhookStatusText');
                 const responseContainer = document.getElementById('webhookResponse');
                 const responseText = document.getElementById('webhookResponseText');
                 
-                statusIndicator.style.backgroundColor = '#f59e0b'; // yellow for testing
+                statusIndicator.className = 'status-indicator status-connecting';
+                statusText.textContent = 'Testing...';
                 this.showToast('Testing webhook connection...');
                 
                 try {
@@ -565,19 +500,22 @@
                     responseContainer.classList.remove('d-none');
                     
                     if (response.ok) {
-                        statusIndicator.style.backgroundColor = '#10b981'; // green for success
+                        statusIndicator.className = 'status-indicator status-connected';
+                        statusText.textContent = 'Connected';
                         const responseData = await response.text();
                         responseText.textContent = `Webhook test successful!\n\nStatus: ${response.status}\nResponse: ${responseData}`;
                         this.showToast('Webhook connection successful!');
                     } else {
-                        statusIndicator.style.backgroundColor = '#ef4444'; // red for error
+                        statusIndicator.className = 'status-indicator status-disconnected';
+                        statusText.textContent = 'Failed';
                         responseText.textContent = `Webhook test failed with status: ${response.status}\n${await response.text()}`;
                         this.showToast('Webhook test failed');
                     }
                 } catch (error) {
-                    statusIndicator.style.backgroundColor = '#ef4444'; // red for error
+                    statusIndicator.className = 'status-indicator status-disconnected';
+                    statusText.textContent = 'Error';
                     responseContainer.classList.remove('d-none');
-                    responseText.textContent = `Error testing webhook: ${error.message}`;
+                    responseText.textContent = `Error testing webhook: ${error.message}\n\nPlease check:\n1. The webhook URL is correct\n2. The n8n workflow is active\n3. There are no CORS issues`;
                     this.showToast('Webhook test failed');
                     console.error('Webhook test error:', error);
                 }
@@ -585,10 +523,14 @@
 
             updateWebhookStatus() {
                 const statusIndicator = document.getElementById('webhookStatus');
+                const statusText = document.getElementById('webhookStatusText');
+                
                 if (this.webhookEnabled) {
-                    statusIndicator.style.backgroundColor = '#10b981'; // green
+                    statusIndicator.className = 'status-indicator status-connected';
+                    statusText.textContent = 'Connected';
                 } else {
-                    statusIndicator.style.backgroundColor = '#6b7280'; // gray
+                    statusIndicator.className = 'status-indicator status-disconnected';
+                    statusText.textContent = 'Disabled';
                 }
             }
 
@@ -823,56 +765,6 @@
                 });
             }
 
-            previewFile(fileId) {
-                const file = this.files.find(f => f.id == fileId);
-                if (!file) return;
-
-                const modal = new bootstrap.Modal(document.getElementById('previewModal'));
-                const title = document.getElementById('previewTitle');
-                const content = document.getElementById('previewContent');
-
-                title.textContent = file.name;
-                content.innerHTML = '';
-
-                if (file.type === 'image') {
-                    content.innerHTML = `<img src="${file.data}" alt="${file.name}" class="img-fluid">`;
-                } else if (file.type === 'excel') {
-                    content.innerHTML = this.previewExcelFile(file);
-                } else if (file.type === 'pdf') {
-                    content.innerHTML = `
-                        <div class="text-center py-4">
-                            <i class="fas fa-file-pdf fa-5x text-danger mb-3"></i>
-                            <p>PDF preview is not available in this demo.</p>
-                            <p class="text-muted">You can download the file to view it.</p>
-                        </div>
-                    `;
-                } else {
-                    content.innerHTML = `
-                        <div class="text-center py-4">
-                            <i class="fas fa-file fa-5x text-secondary mb-3"></i>
-                            <p>Preview not available for this file type.</p>
-                            <p class="text-muted">You can download the file to view it.</p>
-                        </div>
-                    `;
-                }
-
-                modal.show();
-            }
-
-            previewExcelFile(file) {
-                return `
-                    <div class="p-3">
-                        <div class="alert alert-info">
-                            <i class="fas fa-info-circle me-2"></i>
-                            Excel file preview would be shown here in a real application
-                        </div>
-                        <p class="mb-2"><strong>File name:</strong> ${file.name}</p>
-                        <p class="mb-2"><strong>File size:</strong> ${this.formatFileSize(file.size)}</p>
-                        <p class="mb-0"><strong>Uploaded on:</strong> ${this.formatDate(file.uploadDate)}</p>
-                    </div>
-                `;
-            }
-
             downloadFile(fileId) {
                 const file = this.files.find(f => f.id == fileId);
                 if (!file) return;
@@ -934,7 +826,6 @@
                     // Update UI
                     document.getElementById('webhookEndpoint').value = this.webhookUrl;
                     document.getElementById('webhookEnabled').checked = this.webhookEnabled;
-                    document.getElementById('webhookUrl').textContent = this.webhookUrl;
                     this.updateWebhookStatus();
                 }
             }
@@ -951,45 +842,8 @@
                 }, 3000);
             }
 
-            toggleTheme() {
-                const body = document.body;
-                const themeToggle = document.getElementById('themeToggle');
-                
-                if (body.classList.contains('dark-mode')) {
-                    body.classList.remove('dark-mode');
-                    localStorage.setItem('theme', 'light');
-                    themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
-                } else {
-                    body.classList.add('dark-mode');
-                    localStorage.setItem('theme', 'dark');
-                    themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
-                }
-            }
-
-            applyThemePreference() {
-                const savedTheme = localStorage.getItem('theme');
-                const themeToggle = document.getElementById('themeToggle');
-                
-                if (savedTheme === 'dark') {
-                    document.body.classList.add('dark-mode');
-                    themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
-                } else {
-                    document.body.classList.remove('dark-mode');
-                    themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
-                }
-            }
-
             updateStorageInfo() {
-                // Calculate total storage used
-                const totalSize = this.files.reduce((total, file) => total + file.size, 0);
-                const storageInfo = document.querySelector('.storage-info');
-                
-                if (storageInfo) {
-                    storageInfo.innerHTML = `
-                        <p><i class="fas fa-database me-2"></i> Storage used: ${this.formatFileSize(totalSize)}</p>
-                        <p class="small"><i class="fas fa-paper-plane me-2"></i> Webhook notifications are ${this.webhookEnabled ? 'enabled' : 'disabled'}</p>
-                    `;
-                }
+                // This would update storage information if needed
             }
         }
 
