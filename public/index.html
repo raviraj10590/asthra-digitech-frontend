@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Local File Dashboard</title>
+    <title>File Dashboard with Server Simulation</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -66,10 +66,26 @@
             text-align: center;
             transition: var(--transition);
             box-shadow: var(--box-shadow);
+            position: relative;
+            overflow: hidden;
         }
 
         .dark-mode .upload-section {
             background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+        }
+
+        .server-indicator {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background-color: var(--primary-color);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
         }
 
         .drop-zone {
@@ -102,6 +118,7 @@
             overflow: hidden;
             transition: var(--transition);
             box-shadow: var(--box-shadow);
+            position: relative;
         }
 
         .dark-mode .file-card {
@@ -248,6 +265,36 @@
             transition: width 0.3s ease;
         }
 
+        .server-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+            justify-content: center;
+        }
+
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #4ade80;
+        }
+
+        .status-text {
+            font-size: 14px;
+        }
+
+        .server-simulation {
+            background-color: #f1f5f9;
+            border-radius: var(--border-radius);
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .dark-mode .server-simulation {
+            background-color: #374151;
+        }
+
         @media (max-width: 768px) {
             .search-container {
                 flex-direction: column;
@@ -264,18 +311,28 @@
         <!-- Header -->
         <div class="header">
             <div class="logo">
-                <i class="fas fa-cloud-upload-alt"></i>
-                <span>LocalFile Dashboard</span>
+                <i class="fas fa-server"></i>
+                <span>Server File Dashboard</span>
             </div>
             <button id="themeToggle" class="theme-toggle">
                 <i class="fas fa-moon"></i>
             </button>
         </div>
 
+        <!-- Server Status -->
+        <div class="server-status">
+            <div class="status-indicator"></div>
+            <span class="status-text">Server connection: <strong>Simulated</strong></span>
+        </div>
+
         <!-- Upload Section -->
         <section class="upload-section">
+            <div class="server-indicator">
+                <i class="fas fa-server"></i>
+                <span>Server Storage</span>
+            </div>
             <h2>Upload Your Files</h2>
-            <p class="text-muted">Files are stored locally in your browser</p>
+            <p class="text-muted">Files are stored in simulated server storage</p>
             
             <div id="dropZone" class="drop-zone">
                 <i class="fas fa-cloud-upload-alt fa-3x mb-3" style="color: var(--primary-color);"></i>
@@ -290,6 +347,13 @@
             </div>
             <p id="progressText" class="mt-2">No upload in progress</p>
         </section>
+
+        <!-- Server Simulation Info -->
+        <div class="server-simulation">
+            <h5><i class="fas fa-info-circle me-2"></i>Server Simulation</h5>
+            <p class="mb-1">This dashboard simulates server-side file storage using your browser's localStorage.</p>
+            <p class="mb-0">In a real application, files would be uploaded to a server and stored in a database.</p>
+        </div>
 
         <!-- Search and Filter -->
         <div class="search-container">
@@ -335,8 +399,8 @@
 
         <!-- Storage Info -->
         <div class="storage-info">
-            <p><i class="fas fa-info-circle me-2"></i> All files are stored locally in your browser's storage</p>
-            <p class="small">They will remain available until you clear your browser data</p>
+            <p><i class="fas fa-database me-2"></i> Server storage simulation using browser localStorage</p>
+            <p class="small">In a real application, files would be stored on a remote server</p>
         </div>
     </div>
 
@@ -431,51 +495,60 @@
                 const progressText = document.getElementById('progressText');
 
                 progressBar.style.width = '0%';
-                progressText.textContent = `Preparing to upload ${fileList.length} file(s)...`;
+                progressText.textContent = `Connecting to server...`;
 
-                Array.from(fileList).forEach((file, index) => {
-                    progressText.textContent = `Uploading: ${file.name}`;
+                // Simulate server connection delay
+                setTimeout(() => {
+                    progressText.textContent = `Preparing to upload ${fileList.length} file(s)...`;
                     
-                    // Simulate progress for UX
-                    let progress = 0;
-                    const interval = setInterval(() => {
-                        progress += 5;
-                        progressBar.style.width = `${progress}%`;
-                        if (progress >= 100) {
-                            clearInterval(interval);
-                            this.processFile(file);
-                            if (index === fileList.length - 1) {
-                                setTimeout(() => {
-                                    progressText.textContent = 'Upload complete!';
+                    Array.from(fileList).forEach((file, index) => {
+                        progressText.textContent = `Uploading to server: ${file.name}`;
+                        
+                        // Simulate progress for UX
+                        let progress = 0;
+                        const interval = setInterval(() => {
+                            progress += 5;
+                            progressBar.style.width = `${progress}%`;
+                            if (progress >= 100) {
+                                clearInterval(interval);
+                                this.processFile(file);
+                                if (index === fileList.length - 1) {
                                     setTimeout(() => {
-                                        progressText.textContent = 'No upload in progress';
-                                        progressBar.style.width = '0%';
-                                    }, 2000);
-                                }, 500);
+                                        progressText.textContent = 'Server upload complete!';
+                                        setTimeout(() => {
+                                            progressText.textContent = 'No upload in progress';
+                                            progressBar.style.width = '0%';
+                                        }, 2000);
+                                    }, 500);
+                                }
                             }
-                        }
-                    }, 50);
-                });
+                        }, 50);
+                    });
+                }, 1000);
             }
 
             processFile(file) {
                 const reader = new FileReader();
                 
                 reader.onload = (e) => {
-                    const fileData = {
-                        id: Date.now() + Math.floor(Math.random() * 1000),
-                        name: file.name,
-                        type: this.getFileType(file.type),
-                        size: file.size,
-                        uploadDate: new Date().toISOString(),
-                        data: e.target.result
-                    };
+                    // Simulate server processing delay
+                    setTimeout(() => {
+                        const fileData = {
+                            id: Date.now() + Math.floor(Math.random() * 1000),
+                            name: file.name,
+                            type: this.getFileType(file.type),
+                            size: file.size,
+                            uploadDate: new Date().toISOString(),
+                            data: e.target.result,
+                            serverId: 'server_' + Math.floor(Math.random() * 10000) // Simulated server ID
+                        };
 
-                    this.files.push(fileData);
-                    this.saveFiles();
-                    this.filterFiles();
-                    this.showToast(`"${file.name}" uploaded successfully`);
-                    this.updateStorageInfo();
+                        this.files.push(fileData);
+                        this.saveFiles();
+                        this.filterFiles();
+                        this.showToast(`"${file.name}" uploaded to server successfully`);
+                        this.updateStorageInfo();
+                    }, 500);
                 };
 
                 reader.readAsDataURL(file);
@@ -555,7 +628,7 @@
                     fileGrid.innerHTML = `
                         <div class="text-center py-5 text-muted col-span-full">
                             <i class="fas fa-folder-open fa-3x mb-3"></i>
-                            <p>No files found</p>
+                            <p>No files found on server</p>
                         </div>
                     `;
                     return;
@@ -575,6 +648,7 @@
                                 <span>${this.formatFileSize(file.size)}</span>
                                 <span>${this.formatDate(file.uploadDate)}</span>
                             </div>
+                            <div class="server-id">Server ID: ${file.serverId}</div>
                         </div>
                         <div class="file-actions">
                             <div class="action-btn preview-btn" data-id="${file.id}">
@@ -668,37 +742,47 @@
                 const file = this.files.find(f => f.id == fileId);
                 if (!file) return;
 
-                const a = document.createElement('a');
-                a.href = file.data;
-                a.download = file.name;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
+                // Simulate server download delay
+                this.showToast(`Requesting download from server...`);
                 
-                this.showToast(`"${file.name}" downloaded successfully`);
+                setTimeout(() => {
+                    const a = document.createElement('a');
+                    a.href = file.data;
+                    a.download = file.name;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    
+                    this.showToast(`"${file.name}" downloaded from server successfully`);
+                }, 800);
             }
 
             deleteFile(fileId) {
-                if (!confirm('Are you sure you want to delete this file?')) return;
+                if (!confirm('Are you sure you want to delete this file from the server?')) return;
                 
-                const fileIndex = this.files.findIndex(f => f.id == fileId);
-                if (fileIndex === -1) return;
+                // Simulate server deletion delay
+                this.showToast(`Sending delete request to server...`);
                 
-                const fileName = this.files[fileIndex].name;
-                this.files.splice(fileIndex, 1);
-                this.saveFiles();
-                this.filterFiles();
-                this.updateStorageInfo();
-                
-                this.showToast(`"${fileName}" deleted successfully`);
+                setTimeout(() => {
+                    const fileIndex = this.files.findIndex(f => f.id == fileId);
+                    if (fileIndex === -1) return;
+                    
+                    const fileName = this.files[fileIndex].name;
+                    this.files.splice(fileIndex, 1);
+                    this.saveFiles();
+                    this.filterFiles();
+                    this.updateStorageInfo();
+                    
+                    this.showToast(`"${fileName}" deleted from server successfully`);
+                }, 800);
             }
 
             saveFiles() {
-                localStorage.setItem('fileDashboardFiles', JSON.stringify(this.files));
+                localStorage.setItem('serverFileDashboard', JSON.stringify(this.files));
             }
 
             loadFiles() {
-                const storedFiles = localStorage.getItem('fileDashboardFiles');
+                const storedFiles = localStorage.getItem('serverFileDashboard');
                 if (storedFiles) {
                     this.files = JSON.parse(storedFiles);
                     this.filterFiles();
@@ -752,8 +836,8 @@
                 
                 if (storageInfo) {
                     storageInfo.innerHTML = `
-                        <p><i class="fas fa-database me-2"></i> Storage used: ${this.formatFileSize(totalSize)}</p>
-                        <p class="small"><i class="fas fa-info-circle me-2"></i> All files are stored locally in your browser</p>
+                        <p><i class="fas fa-database me-2"></i> Server storage used: ${this.formatFileSize(totalSize)}</p>
+                        <p class="small"><i class="fas fa-info-circle me-2"></i> This is a simulation using your browser's localStorage</p>
                     `;
                 }
             }
