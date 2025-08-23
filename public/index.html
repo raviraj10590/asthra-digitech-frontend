@@ -3,853 +3,205 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>File Dashboard with n8n Webhook</title>
+    <title>Byras Webhook Tester</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        :root {
-            --primary-color: #4361ee;
-            --light-bg: #f8f9fa;
-            --dark-bg: #212529;
-        }
-        
         body {
-            background-color: var(--light-bg);
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            padding-top: 20px;
-            padding-bottom: 50px;
-        }
-        
-        .dashboard-container {
-            max-width: 1200px;
-            margin: 0 auto;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            min-height: 100vh;
             padding: 20px;
         }
-        
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 30px;
-            padding-bottom: 15px;
-            border-bottom: 2px solid var(--primary-color);
-        }
-        
-        .logo {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-weight: 700;
-            font-size: 24px;
-            color: var(--primary-color);
-        }
-        
-        .upload-section {
-            background: linear-gradient(135deg, #e0f7fa 0%, #bbdefb 100%);
-            border-radius: 12px;
-            padding: 25px;
-            margin-bottom: 30px;
-            text-align: center;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            position: relative;
-        }
-        
-        .webhook-indicator {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background-color: var(--primary-color);
-            color: white;
-            padding: 5px 10px;
-            border-radius: 20px;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 5px;
-        }
-        
-        .drop-zone {
-            border: 3px dashed var(--primary-color);
-            border-radius: 12px;
-            padding: 40px 20px;
-            cursor: pointer;
-            margin-bottom: 20px;
-            transition: background-color 0.3s;
-        }
-        
-        .drop-zone:hover {
-            background-color: rgba(67, 97, 238, 0.05);
-        }
-        
-        .file-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-            gap: 20px;
+        .container {
+            max-width: 900px;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            padding: 30px;
             margin-top: 30px;
         }
-        
-        .file-card {
-            background-color: white;
-            border-radius: 12px;
-            overflow: hidden;
-            transition: transform 0.3s, box-shadow 0.3s;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-        
-        .file-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.2);
-        }
-        
-        .file-preview {
-            height: 160px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background-color: #f1f5f9;
-        }
-        
-        .file-info {
-            padding: 15px;
-        }
-        
-        .file-actions {
-            display: flex;
-            border-top: 1px solid #e2e8f0;
-        }
-        
-        .action-btn {
-            flex: 1;
-            padding: 12px;
+        .header {
             text-align: center;
-            cursor: pointer;
-            transition: background-color 0.3s;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #eaeaea;
         }
-        
-        .action-btn:hover {
-            background-color: #edf2f7;
+        .logo {
+            font-size: 2.5rem;
+            font-weight: bold;
+            color: #4361ee;
+            margin-bottom: 10px;
         }
-        
-        .preview-btn {
-            color: var(--primary-color);
-        }
-        
-        .download-btn {
-            color: #38b2ac;
-        }
-        
-        .delete-btn {
-            color: #e53e3e;
-        }
-        
-        .search-container {
-            display: flex;
-            gap: 15px;
+        .endpoint-info {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 15px;
             margin-bottom: 20px;
-            flex-wrap: wrap;
         }
-        
-        .search-box {
-            flex: 1;
-            min-width: 250px;
-        }
-        
-        .filter-box, .sort-box {
-            width: 200px;
-        }
-        
-        .webhook-settings {
-            background-color: #f1f5f9;
-            border-radius: 12px;
+        .response-box {
+            background: #f8f9fa;
+            border-radius: 8px;
             padding: 15px;
             margin-top: 20px;
-        }
-        
-        .webhook-response {
-            background-color: #f8f9fa;
-            border-radius: 12px;
-            padding: 15px;
-            margin-top: 20px;
-            max-height: 200px;
+            min-height: 200px;
+            max-height: 300px;
             overflow-y: auto;
         }
-        
-        .webhook-status {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-top: 10px;
-            justify-content: center;
+        .console {
+            background: #2d3748;
+            color: #e2e8f0;
+            font-family: monospace;
+            padding: 15px;
+            border-radius: 8px;
+            height: 200px;
+            overflow-y: auto;
+            margin-top: 20px;
         }
-        
-        .status-indicator {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
+        .btn-primary {
+            background: #4361ee;
+            border: none;
         }
-        
-        .status-connected {
-            background-color: #10b981;
-        }
-        
-        .status-disconnected {
-            background-color: #ef4444;
-        }
-        
-        .status-connecting {
-            background-color: #f59e0b;
-        }
-        
-        .toast {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 15px 20px;
-            background-color: white;
-            color: #2d3748;
-            border-radius: 12px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            z-index: 1000;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            transform: translateX(100%);
-            transition: transform 0.3s ease;
-        }
-        
-        .toast.show {
-            transform: translateX(0);
-        }
-        
-        .progress-bar {
-            height: 5px;
-            width: 100%;
-            background-color: #e2e8f0;
-            border-radius: 5px;
-            overflow: hidden;
-            margin-top: 10px;
-        }
-        
-        .progress {
-            height: 100%;
-            background-color: var(--primary-color);
-            width: 0%;
-            transition: width 0.3s ease;
-        }
-        
-        @media (max-width: 768px) {
-            .search-container {
-                flex-direction: column;
-            }
-            
-            .search-box, .filter-box, .sort-box {
-                width: 100%;
-            }
+        .btn-primary:hover {
+            background: #3a56d4;
         }
     </style>
 </head>
 <body>
-    <div class="dashboard-container">
-        <!-- Header -->
+    <div class="container">
         <div class="header">
-            <div class="logo">
-                <i class="fas fa-server"></i>
-                <span>File Dashboard for n8n</span>
-            </div>
+            <div class="logo">Byras Webhook Tester</div>
+            <p class="text-muted">Test interface for the Byras.com webhook receiver</p>
         </div>
 
-        <!-- Webhook Status -->
-        <div class="webhook-status">
-            <div class="status-indicator status-connecting" id="webhookStatus"></div>
-            <span class="status-text">Webhook status: <strong id="webhookStatusText">Checking...</strong></span>
-        </div>
-
-        <!-- Upload Section -->
-        <section class="upload-section">
-            <div class="webhook-indicator">
-                <i class="fas fa-paper-plane"></i>
-                <span>n8n Webhook</span>
-            </div>
-            <h2>Upload Your Files</h2>
-            <p class="text-muted">Files are stored locally with webhook notifications to n8n</p>
-            
-            <div id="dropZone" class="drop-zone">
-                <i class="fas fa-cloud-upload-alt fa-3x mb-3" style="color: var(--primary-color);"></i>
-                <h5>Drag & Drop Files Here</h5>
-                <p class="text-muted">or</p>
-                <button id="browseBtn" class="btn btn-primary">Browse Files</button>
-                <input type="file" id="fileInput" class="d-none" multiple>
-            </div>
-            
-            <div class="progress-bar">
-                <div id="uploadProgress" class="progress"></div>
-            </div>
-            <p id="progressText" class="mt-2">No upload in progress</p>
-        </section>
-
-        <!-- Webhook Settings -->
-        <div class="webhook-settings">
-            <h5><i class="fas fa-cog me-2"></i>n8n Webhook Settings</h5>
-            <div class="mb-3">
-                <label for="webhookEndpoint" class="form-label">Webhook URL</label>
-                <input type="text" class="form-control" id="webhookEndpoint" value="https://primary-production-3b8c.up.railway.app/webhook/webhook-s">
-            </div>
-            <div class="form-check form-switch mb-3">
-                <input class="form-check-input" type="checkbox" id="webhookEnabled" checked>
-                <label class="form-check-label" for="webhookEnabled">Enable webhook notifications</label>
-            </div>
-            <button id="testWebhook" class="btn btn-sm btn-outline-primary">Test Webhook Connection</button>
-            <button id="viewWebhookHelp" class="btn btn-sm btn-outline-secondary ms-2">Webhook Help</button>
-        </div>
-
-        <!-- Webhook Response -->
-        <div class="webhook-response d-none" id="webhookResponse">
-            <h6><i class="fas fa-reply me-2"></i>Webhook Response</h6>
-            <pre id="webhookResponseText" class="mb-0"></pre>
-        </div>
-
-        <!-- Search and Filter -->
-        <div class="search-container">
-            <div class="search-box">
-                <div class="input-group">
-                    <span class="input-group-text"><i class="fas fa-search"></i></span>
-                    <input type="text" id="searchInput" class="form-control" placeholder="Search files...">
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0">Server Status</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <span>Health Status:</span>
+                            <span class="badge bg-success" id="healthStatus">Checking...</span>
+                        </div>
+                        <button id="healthCheck" class="btn btn-outline-primary w-100">Check Health</button>
+                    </div>
                 </div>
             </div>
-            
-            <div class="filter-box">
-                <select id="filterSelect" class="form-select">
-                    <option value="all">All Files</option>
-                    <option value="image">Images</option>
-                    <option value="excel">Excel/CSV</option>
-                    <option value="pdf">PDFs</option>
-                    <option value="other">Other</option>
-                </select>
-            </div>
-            
-            <div class="sort-box">
-                <select id="sortSelect" class="form-select">
-                    <option value="newest">Newest First</option>
-                    <option value="oldest">Oldest First</option>
-                    <option value="name-asc">Name A-Z</option>
-                    <option value="name-desc">Name Z-A</option>
-                    <option value="type">By Type</option>
-                </select>
-            </div>
-        </div>
-
-        <!-- Files Grid -->
-        <section>
-            <h3 class="mb-4">Your Files</h3>
-            <div id="fileGrid" class="file-grid">
-                <!-- Files will be displayed here -->
-                <div class="text-center py-5 text-muted col-span-full">
-                    <i class="fas fa-folder-open fa-3x mb-3"></i>
-                    <p>No files uploaded yet</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- Webhook Help Modal -->
-        <div class="modal fade" id="webhookHelpModal" tabindex="-1" aria-hidden="true">
-            <div class="modal-dialog">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h5 class="modal-title">n8n Webhook Help</h5>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0">Server Information</h5>
                     </div>
-                    <div class="modal-body">
-                        <h6>Common n8n Webhook Issues:</h6>
-                        <ul>
-                            <li>Ensure your n8n webhook is configured to accept POST requests</li>
-                            <li>Check that the webhook URL is correct in your n8n workflow</li>
-                            <li>Verify that your n8n workflow is activated</li>
-                            <li>Check CORS settings if you're getting network errors</li>
-                            <li>Ensure the webhook endpoint is accessible from the internet</li>
-                        </ul>
-                        <h6>Testing Your Webhook:</h6>
-                        <p>Use the "Test Webhook Connection" button to verify your endpoint is working. If you receive an error, check your n8n workflow configuration.</p>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <div class="card-body">
+                        <p><strong>Port:</strong> 3000</p>
+                        <p><strong>Webhook Endpoint:</strong> POST /webhook</p>
+                        <p><strong>Health Endpoint:</strong> GET /health</p>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Toast Notification -->
-        <div id="toast" class="toast">
-            <i class="fas fa-check-circle"></i>
-            <span id="toastMessage">Operation successful</span>
+        <div class="card mt-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">Test Webhook</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="payload" class="form-label">Payload (JSON)</label>
+                    <textarea class="form-control" id="payload" rows="6">{
+  "event": "order_created",
+  "id": "ord_12345",
+  "amount": 99.99,
+  "currency": "USD",
+  "customer": {
+    "id": "cus_67890",
+    "email": "customer@example.com"
+  }
+}</textarea>
+                </div>
+                <button id="sendWebhook" class="btn btn-primary w-100">Send Test Webhook</button>
+                
+                <div class="mt-4">
+                    <h6>Response</h6>
+                    <div class="response-box">
+                        <pre id="response">Response will appear here...</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-4">
+            <h5>Activity Log</h5>
+            <div class="console">
+                <div id="consoleOutput">Server activity will appear here...</div>
+            </div>
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Main Application
-        class FileDashboard {
-            constructor() {
-                this.files = [];
-                this.filteredFiles = [];
-                this.webhookUrl = "https://primary-production-3b8c.up.railway.app/webhook/webhook-s";
-                this.webhookEnabled = true;
-                this.init();
-            }
+        document.addEventListener('DOMContentLoaded', function() {
+            const healthCheckBtn = document.getElementById('healthCheck');
+            const healthStatus = document.getElementById('healthStatus');
+            const sendWebhookBtn = document.getElementById('sendWebhook');
+            const payloadTextarea = document.getElementById('payload');
+            const responsePre = document.getElementById('response');
+            const consoleOutput = document.getElementById('consoleOutput');
 
-            init() {
-                this.loadFiles();
-                this.loadSettings();
-                this.setupEventListeners();
-                this.updateStorageInfo();
-                this.testWebhookConnection();
-            }
+            // Check server health on page load
+            checkHealth();
 
-            setupEventListeners() {
-                // File input
-                document.getElementById('browseBtn').addEventListener('click', () => {
-                    document.getElementById('fileInput').click();
-                });
-
-                document.getElementById('fileInput').addEventListener('change', (e) => {
-                    this.handleFileUpload(e.target.files);
-                });
-
-                // Drag and drop
-                const dropZone = document.getElementById('dropZone');
-                dropZone.addEventListener('dragover', (e) => {
-                    e.preventDefault();
-                    dropZone.style.backgroundColor = 'rgba(67, 97, 238, 0.1)';
-                });
-
-                dropZone.addEventListener('dragleave', () => {
-                    dropZone.style.backgroundColor = '';
-                });
-
-                dropZone.addEventListener('drop', (e) => {
-                    e.preventDefault();
-                    dropZone.style.backgroundColor = '';
-                    this.handleFileUpload(e.dataTransfer.files);
-                });
-
-                // Search and filter
-                document.getElementById('searchInput').addEventListener('input', () => {
-                    this.filterFiles();
-                });
-
-                document.getElementById('filterSelect').addEventListener('change', () => {
-                    this.filterFiles();
-                });
-
-                document.getElementById('sortSelect').addEventListener('change', () => {
-                    this.filterFiles();
-                });
-
-                // Webhook settings
-                document.getElementById('webhookEndpoint').addEventListener('change', (e) => {
-                    this.webhookUrl = e.target.value;
-                    this.saveSettings();
-                    this.testWebhookConnection();
-                });
-
-                document.getElementById('webhookEnabled').addEventListener('change', (e) => {
-                    this.webhookEnabled = e.target.checked;
-                    this.saveSettings();
-                    this.updateWebhookStatus();
-                });
-
-                // Test webhook button
-                document.getElementById('testWebhook').addEventListener('click', () => {
-                    this.testWebhookConnection();
-                });
-
-                // Webhook help button
-                document.getElementById('viewWebhookHelp').addEventListener('click', () => {
-                    new bootstrap.Modal(document.getElementById('webhookHelpModal')).show();
-                });
-            }
-
-            async testWebhookConnection() {
-                const statusIndicator = document.getElementById('webhookStatus');
-                const statusText = document.getElementById('webhookStatusText');
-                const responseContainer = document.getElementById('webhookResponse');
-                const responseText = document.getElementById('webhookResponseText');
-                
-                statusIndicator.className = 'status-indicator status-connecting';
-                statusText.textContent = 'Testing...';
-                this.showToast('Testing webhook connection...');
-                
+            healthCheckBtn.addEventListener('click', checkHealth);
+            
+            sendWebhookBtn.addEventListener('click', function() {
+                let payload;
                 try {
-                    // Create a simple test payload
-                    const testPayload = {
-                        event: 'test',
-                        message: 'Testing connection to n8n webhook',
-                        timestamp: new Date().toISOString(),
-                        source: 'file-dashboard'
-                    };
-
-                    // Send test request to webhook
-                    const response = await fetch(this.webhookUrl, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify(testPayload)
-                    });
-                    
-                    // Show response details
-                    responseContainer.classList.remove('d-none');
-                    
-                    if (response.ok) {
-                        statusIndicator.className = 'status-indicator status-connected';
-                        statusText.textContent = 'Connected';
-                        const responseData = await response.text();
-                        responseText.textContent = `Webhook test successful!\n\nStatus: ${response.status}\nResponse: ${responseData}`;
-                        this.showToast('Webhook connection successful!');
-                    } else {
-                        statusIndicator.className = 'status-indicator status-disconnected';
-                        statusText.textContent = 'Failed';
-                        responseText.textContent = `Webhook test failed with status: ${response.status}\n${await response.text()}`;
-                        this.showToast('Webhook test failed');
-                    }
-                } catch (error) {
-                    statusIndicator.className = 'status-indicator status-disconnected';
-                    statusText.textContent = 'Error';
-                    responseContainer.classList.remove('d-none');
-                    responseText.textContent = `Error testing webhook: ${error.message}\n\nPlease check:\n1. The webhook URL is correct\n2. The n8n workflow is active\n3. There are no CORS issues`;
-                    this.showToast('Webhook test failed');
-                    console.error('Webhook test error:', error);
-                }
-            }
-
-            updateWebhookStatus() {
-                const statusIndicator = document.getElementById('webhookStatus');
-                const statusText = document.getElementById('webhookStatusText');
-                
-                if (this.webhookEnabled) {
-                    statusIndicator.className = 'status-indicator status-connected';
-                    statusText.textContent = 'Connected';
-                } else {
-                    statusIndicator.className = 'status-indicator status-disconnected';
-                    statusText.textContent = 'Disabled';
-                }
-            }
-
-            async sendWebhookNotification(event, file) {
-                if (!this.webhookEnabled) return;
-                
-                try {
-                    const payload = {
-                        event: event,
-                        file: {
-                            id: file.id,
-                            name: file.name,
-                            type: file.type,
-                            size: file.size,
-                            uploadDate: file.uploadDate
-                        },
-                        timestamp: new Date().toISOString(),
-                        source: 'file-dashboard'
-                    };
-
-                    // Send to webhook
-                    const response = await fetch(this.webhookUrl, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify(payload)
-                    });
-                    
-                    if (response.ok) {
-                        console.log(`Webhook notification sent for ${event} event`);
-                        this.showToast(`Webhook notification sent for ${event}`);
-                    } else {
-                        console.error('Webhook responded with error:', response.status);
-                        this.showToast('Webhook notification failed');
-                    }
-                } catch (error) {
-                    console.error('Error sending webhook notification:', error);
-                    this.showToast('Webhook notification failed');
-                }
-            }
-
-            handleFileUpload(fileList) {
-                if (!fileList || fileList.length === 0) return;
-
-                const progressBar = document.getElementById('uploadProgress');
-                const progressText = document.getElementById('progressText');
-
-                progressBar.style.width = '0%';
-                progressText.textContent = `Preparing to upload ${fileList.length} file(s)...`;
-
-                Array.from(fileList).forEach((file, index) => {
-                    progressText.textContent = `Uploading: ${file.name}`;
-                    
-                    // Simulate progress for UX
-                    let progress = 0;
-                    const interval = setInterval(() => {
-                        progress += 5;
-                        progressBar.style.width = `${progress}%`;
-                        if (progress >= 100) {
-                            clearInterval(interval);
-                            this.processFile(file);
-                            if (index === fileList.length - 1) {
-                                setTimeout(() => {
-                                    progressText.textContent = 'Upload complete!';
-                                    setTimeout(() => {
-                                        progressText.textContent = 'No upload in progress';
-                                        progressBar.style.width = '0%';
-                                    }, 2000);
-                                }, 500);
-                            }
-                        }
-                    }, 50);
-                });
-            }
-
-            processFile(file) {
-                const reader = new FileReader();
-                
-                reader.onload = (e) => {
-                    const fileData = {
-                        id: Date.now() + Math.floor(Math.random() * 1000),
-                        name: file.name,
-                        type: this.getFileType(file.type),
-                        size: file.size,
-                        uploadDate: new Date().toISOString(),
-                        data: e.target.result
-                    };
-
-                    this.files.push(fileData);
-                    this.saveFiles();
-                    this.filterFiles();
-                    this.showToast(`"${file.name}" uploaded successfully`);
-                    this.updateStorageInfo();
-                    
-                    // Send webhook notification
-                    this.sendWebhookNotification('file_uploaded', fileData);
-                };
-
-                reader.readAsDataURL(file);
-            }
-
-            getFileType(mimeType) {
-                if (mimeType.startsWith('image/')) return 'image';
-                if (mimeType.includes('spreadsheet') || 
-                    mimeType.includes('excel') || 
-                    mimeType.includes('sheet') ||
-                    mimeType === 'text/csv') return 'excel';
-                if (mimeType.includes('pdf')) return 'pdf';
-                return 'other';
-            }
-
-            getFileIcon(type) {
-                switch (type) {
-                    case 'image': return 'fa-image';
-                    case 'excel': return 'fa-file-excel';
-                    case 'pdf': return 'fa-file-pdf';
-                    default: return 'fa-file';
-                }
-            }
-
-            formatFileSize(bytes) {
-                if (bytes === 0) return '0 Bytes';
-                const k = 1024;
-                const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-                const i = Math.floor(Math.log(bytes) / Math.log(k));
-                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-            }
-
-            formatDate(dateString) {
-                const date = new Date(dateString);
-                return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
-            }
-
-            filterFiles() {
-                const searchTerm = document.getElementById('searchInput').value.toLowerCase();
-                const filterType = document.getElementById('filterSelect').value;
-                const sortBy = document.getElementById('sortSelect').value;
-
-                this.filteredFiles = this.files.filter(file => {
-                    const matchesSearch = file.name.toLowerCase().includes(searchTerm);
-                    const matchesFilter = filterType === 'all' || file.type === filterType;
-                    return matchesSearch && matchesFilter;
-                });
-
-                this.sortFiles(sortBy);
-                this.renderFiles();
-            }
-
-            sortFiles(sortBy) {
-                switch (sortBy) {
-                    case 'newest':
-                        this.filteredFiles.sort((a, b) => new Date(b.uploadDate) - new Date(a.uploadDate));
-                        break;
-                    case 'oldest':
-                        this.filteredFiles.sort((a, b) => new Date(a.uploadDate) - new Date(b.uploadDate));
-                        break;
-                    case 'name-asc':
-                        this.filteredFiles.sort((a, b) => a.name.localeCompare(b.name));
-                        break;
-                    case 'name-desc':
-                        this.filteredFiles.sort((a, b) => b.name.localeCompare(a.name));
-                        break;
-                    case 'type':
-                        this.filteredFiles.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
-                        break;
-                }
-            }
-
-            renderFiles() {
-                const fileGrid = document.getElementById('fileGrid');
-                
-                if (this.filteredFiles.length === 0) {
-                    fileGrid.innerHTML = `
-                        <div class="text-center py-5 text-muted col-span-full">
-                            <i class="fas fa-folder-open fa-3x mb-3"></i>
-                            <p>No files found</p>
-                        </div>
-                    `;
+                    payload = JSON.parse(payloadTextarea.value);
+                } catch (e) {
+                    responsePre.textContent = 'Error: Invalid JSON payload';
+                    addToConsole('Error: Invalid JSON payload');
                     return;
                 }
-
-                fileGrid.innerHTML = this.filteredFiles.map(file => `
-                    <div class="file-card">
-                        <div class="file-preview">
-                            ${file.type === 'image' ? 
-                                `<img src="${file.data}" alt="${file.name}" class="img-fluid" style="max-height: 140px;">` : 
-                                `<i class="fas ${this.getFileIcon(file.type)} fa-4x" style="${file.type === 'excel' ? 'color: #21a366;' : file.type === 'pdf' ? 'color: #e74c3c;' : 'color: #6c757d;'}"></i>`
-                            }
-                        </div>
-                        <div class="file-info">
-                            <h6 class="file-name" title="${file.name}">${file.name}</h6>
-                            <div class="d-flex justify-content-between text-sm text-muted mt-2">
-                                <span>${this.formatFileSize(file.size)}</span>
-                                <span>${this.formatDate(file.uploadDate)}</span>
-                            </div>
-                        </div>
-                        <div class="file-actions">
-                            <div class="action-btn preview-btn" data-id="${file.id}">
-                                <i class="fas fa-eye"></i>
-                            </div>
-                            <div class="action-btn download-btn" data-id="${file.id}">
-                                <i class="fas fa-download"></i>
-                            </div>
-                            <div class="action-btn delete-btn" data-id="${file.id}">
-                                <i class="fas fa-trash"></i>
-                            </div>
-                        </div>
-                    </div>
-                `).join('');
-
-                // Add event listeners to the buttons
-                document.querySelectorAll('.preview-btn').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        const fileId = e.currentTarget.getAttribute('data-id');
-                        this.previewFile(fileId);
-                    });
+                
+                fetch('http://localhost:3000/webhook', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    responsePre.textContent = JSON.stringify(data, null, 2);
+                    addToConsole('Webhook sent: Received response - ' + data.status);
+                })
+                .catch(error => {
+                    responsePre.textContent = 'Error: ' + error.message;
+                    addToConsole('Webhook failed: ' + error.message);
+                    healthStatus.className = 'badge bg-danger';
+                    healthStatus.textContent = 'Offline';
                 });
+            });
 
-                document.querySelectorAll('.download-btn').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        const fileId = e.currentTarget.getAttribute('data-id');
-                        this.downloadFile(fileId);
-                    });
-                });
-
-                document.querySelectorAll('.delete-btn').forEach(btn => {
-                    btn.addEventListener('click', (e) => {
-                        const fileId = e.currentTarget.getAttribute('data-id');
-                        this.deleteFile(fileId);
-                    });
+            function checkHealth() {
+                fetch('http://localhost:3000/health')
+                .then(response => response.json())
+                .then(data => {
+                    healthStatus.textContent = data.status;
+                    healthStatus.className = 'badge bg-success';
+                    addToConsole('Health check: Server is running');
+                })
+                .catch(error => {
+                    healthStatus.textContent = 'offline';
+                    healthStatus.className = 'badge bg-danger';
+                    addToConsole('Health check: Server is offline - ' + error.message);
                 });
             }
 
-            downloadFile(fileId) {
-                const file = this.files.find(f => f.id == fileId);
-                if (!file) return;
-
-                const a = document.createElement('a');
-                a.href = file.data;
-                a.download = file.name;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                
-                this.showToast(`"${file.name}" downloaded successfully`);
+            function addToConsole(message) {
+                const timestamp = new Date().toLocaleTimeString();
+                consoleOutput.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+                consoleOutput.scrollTop = consoleOutput.scrollHeight;
             }
-
-            deleteFile(fileId) {
-                if (!confirm('Are you sure you want to delete this file?')) return;
-                
-                const fileIndex = this.files.findIndex(f => f.id == fileId);
-                if (fileIndex === -1) return;
-                
-                const file = this.files[fileIndex];
-                this.files.splice(fileIndex, 1);
-                this.saveFiles();
-                this.filterFiles();
-                this.updateStorageInfo();
-                
-                this.showToast(`"${file.name}" deleted successfully`);
-                
-                // Send webhook notification
-                this.sendWebhookNotification('file_deleted', file);
-            }
-
-            saveFiles() {
-                localStorage.setItem('fileDashboardFiles', JSON.stringify(this.files));
-            }
-
-            loadFiles() {
-                const storedFiles = localStorage.getItem('fileDashboardFiles');
-                if (storedFiles) {
-                    this.files = JSON.parse(storedFiles);
-                    this.filterFiles();
-                }
-            }
-
-            saveSettings() {
-                localStorage.setItem('webhookSettings', JSON.stringify({
-                    url: this.webhookUrl,
-                    enabled: this.webhookEnabled
-                }));
-            }
-
-            loadSettings() {
-                const storedSettings = localStorage.getItem('webhookSettings');
-                if (storedSettings) {
-                    const settings = JSON.parse(storedSettings);
-                    this.webhookUrl = settings.url;
-                    this.webhookEnabled = settings.enabled;
-                    
-                    // Update UI
-                    document.getElementById('webhookEndpoint').value = this.webhookUrl;
-                    document.getElementById('webhookEnabled').checked = this.webhookEnabled;
-                    this.updateWebhookStatus();
-                }
-            }
-
-            showToast(message) {
-                const toast = document.getElementById('toast');
-                const toastMessage = document.getElementById('toastMessage');
-                
-                toastMessage.textContent = message;
-                toast.classList.add('show');
-                
-                setTimeout(() => {
-                    toast.classList.remove('show');
-                }, 3000);
-            }
-
-            updateStorageInfo() {
-                // This would update storage information if needed
-            }
-        }
-
-        // Initialize the application when the DOM is loaded
-        document.addEventListener('DOMContentLoaded', () => {
-            new FileDashboard();
         });
     </script>
 </body>
