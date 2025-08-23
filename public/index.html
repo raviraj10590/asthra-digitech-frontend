@@ -1,183 +1,550 @@
-let db;
-const request = indexedDB.open("FileManagerDB", 1);
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.0/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen transition-colors duration-300 dark:bg-gray-900">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="flex flex-col md:flex-row justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800 dark:text-white mb-4 md:mb-0">File Dashboard</h1>
+            <div class="flex items-center space-x-4">
+                <button id="themeToggle" class="p-2 rounded-full bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-white">
+                    <i class="fas fa-moon"></i>
+                </button>
+            </div>
+        </header>
 
-request.onupgradeneeded = (e) => {
-  db = e.target.result;
-  if (!db.objectStoreNames.contains("files")) {
-    const store = db.createObjectStore("files", { keyPath: "id", autoIncrement: true });
-    store.createIndex("name", "name", { unique: false });
-    store.createIndex("type", "type", { unique: false });
-  }
-};
+        <!-- Upload Section -->
+        <section class="mb-8">
+            <div id="dropArea" class="border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-lg p-8 text-center cursor-pointer transition-colors hover:border-blue-400">
+                <i class="fas fa-cloud-upload-alt text-4xl text-gray-400 mb-4"></i>
+                <p class="text-gray-600 dark:text-gray-300">Drag & drop files here or click to browse</p>
+                <input type="file" id="fileInput" class="hidden" multiple>
+                <button id="browseBtn" class="mt-4 px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors">Browse Files</button>
+            </div>
+            <div id="uploadProgress" class="mt-4 hidden">
+                <div class="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700">
+                    <div class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
+                </div>
+                <p class="text-sm text-gray-600 dark:text-gray-300 mt-2">Uploading: <span id="progressFileName"></span></p>
+            </div>
+        </section>
 
-request.onsuccess = (e) => {
-  db = e.target.result;
-  displayFiles();
-};
+        <!-- Search and Filter -->
+        <section class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-center md:space-x-4 space-y-4 md:space-y-0">
+                <div class="relative flex-grow">
+                    <input type="text" id="searchInput" placeholder="Search files..." class="w-full px-4 py-2 border border-gray-300 rounded-md dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <i class="fas fa-search absolute right-3 top-3 text-gray-400"></i>
+                </div>
+                <div>
+                    <select id="filterSelect" class="w-full md:w-auto px-4 py-2 border border-gray-300 rounded-md dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="all">All Files</option>
+                        <option value="image">Images</option>
+                        <option value="excel">Excel/CSV</option>
+                        <option value="pdf">PDFs</option>
+                        <option value="other">Other</option>
+                    </select>
+                </div>
+                <div>
+                    <select id="sortSelect" class="w-full md:w-auto px-4 py-2 border border-gray-300 rounded-md dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="newest">Newest First</option>
+                        <option value="oldest">Oldest First</option>
+                        <option value="name-asc">Name A-Z</option>
+                        <option value="name-desc">Name Z-A</option>
+                        <option value="type">By Type</option>
+                    </select>
+                </div>
+            </div>
+        </section>
 
-request.onerror = (e) => console.error("DB error:", e);
+        <!-- Files Grid -->
+        <section>
+            <div id="fileGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                <!-- Files will be displayed here -->
+                <div class="text-center py-10 text-gray-500 dark:text-gray-400 col-span-full">
+                    <i class="fas fa-folder-open text-4xl mb-2"></i>
+                    <p>No files uploaded yet</p>
+                </div>
+            </div>
+        </section>
+    </div>
 
-// File Upload via Input
-document.getElementById("fileInput").addEventListener("change", (e) => handleFiles(Array.from(e.target.files)));
+    <!-- Preview Modal -->
+    <div id="previewModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 hidden">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full max-h-screen overflow-hidden">
+            <div class="flex justify-between items-center p-4 border-b dark:border-gray-700">
+                <h3 class="text-lg font-semibold text-gray-800 dark:text-white" id="previewTitle">Preview</h3>
+                <button id="closePreview" class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="p-4 overflow-auto max-h-[70vh]" id="previewContent">
+                <!-- Preview content will be inserted here -->
+            </div>
+        </div>
+    </div>
 
-// Drag & Drop
-const uploadArea = document.getElementById("uploadArea");
-uploadArea.addEventListener("click", () => document.getElementById("fileInput").click());
-uploadArea.addEventListener("dragover", (e) => { e.preventDefault(); uploadArea.classList.add("bg-gray-200"); });
-uploadArea.addEventListener("dragleave", () => uploadArea.classList.remove("bg-gray-200"));
-uploadArea.addEventListener("drop", (e) => {
-  e.preventDefault(); 
-  uploadArea.classList.remove("bg-gray-200");
-  handleFiles(Array.from(e.dataTransfer.files));
-});
+    <!-- Notification Toast -->
+    <div id="toast" class="fixed top-4 right-4 p-4 rounded-md shadow-lg bg-white dark:bg-gray-800 border-l-4 border-green-500 transform translate-x-full transition-transform duration-300">
+        <div class="flex items-center">
+            <i class="fas fa-check-circle text-green-500 mr-2"></i>
+            <p class="text-gray-800 dark:text-white" id="toastMessage">Operation successful</p>
+        </div>
+    </div>
 
-function handleFiles(files) {
-  const tx = db.transaction("files", "readwrite");
-  const store = tx.objectStore("files");
+    <script>
+        // Main Application
+        class FileDashboard {
+            constructor() {
+                this.files = [];
+                this.filteredFiles = [];
+                this.init();
+            }
 
-  files.forEach(file => {
-    const reader = new FileReader();
-    reader.onload = function(evt) {
-      store.add({
-        name: file.name,
-        type: getFileType(file),
-        data: evt.target.result,
-        size: file.size,
-        date: new Date().toISOString()
-      });
-      tx.oncomplete = () => displayFiles();
-    };
-    reader.readAsDataURL(file);
-  });
-}
+            init() {
+                this.loadFiles();
+                this.setupEventListeners();
+                this.applyThemePreference();
+            }
 
-// Helpers
-function getFileType(file) {
-  if (file.type.startsWith("image/")) return "image";
-  if (file.name.endsWith(".xlsx") || file.name.endsWith(".csv")) return "excel";
-  if (file.type === "application/pdf") return "pdf";
-  return "other";
-}
+            setupEventListeners() {
+                // File input
+                document.getElementById('browseBtn').addEventListener('click', () => {
+                    document.getElementById('fileInput').click();
+                });
 
-// Display Files
-function displayFiles() {
-  const fileList = document.getElementById("fileList");
-  fileList.innerHTML = "";
+                document.getElementById('fileInput').addEventListener('change', (e) => {
+                    this.handleFileUpload(e.target.files);
+                });
 
-  const searchTerm = document.getElementById("searchInput").value.toLowerCase();
-  const filterType = document.getElementById("filterSelect").value;
+                // Drag and drop
+                const dropArea = document.getElementById('dropArea');
+                dropArea.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    dropArea.classList.add('border-blue-500');
+                });
 
-  const tx = db.transaction("files", "readonly");
-  const store = tx.objectStore("files");
-  const requestAll = store.getAll();
+                dropArea.addEventListener('dragleave', () => {
+                    dropArea.classList.remove('border-blue-500');
+                });
 
-  requestAll.onsuccess = () => {
-    let files = requestAll.result;
-    if (searchTerm) files = files.filter(f => f.name.toLowerCase().includes(searchTerm));
-    if (filterType !== "all") files = files.filter(f => f.type === filterType);
+                dropArea.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    dropArea.classList.remove('border-blue-500');
+                    this.handleFileUpload(e.dataTransfer.files);
+                });
 
-    files.forEach(file => {
-      const div = document.createElement("div");
-      div.className = "bg-white p-3 rounded shadow flex flex-col items-start";
+                // Search and filter
+                document.getElementById('searchInput').addEventListener('input', () => {
+                    this.filterFiles();
+                });
 
-      const title = document.createElement("div");
-      title.className = "font-medium mb-2";
-      title.textContent = file.name;
+                document.getElementById('filterSelect').addEventListener('change', () => {
+                    this.filterFiles();
+                });
 
-      let preview;
-      if (file.type === "image") {
-        preview = document.createElement("img");
-        preview.src = file.data;
-        preview.className = "w-full h-32 object-contain mb-2";
-      } else if (file.type === "excel") {
-        preview = document.createElement("div");
-        preview.className = "text-sm text-gray-600 mb-2";
-        preview.textContent = "Excel file (click View)";
-      } else if (file.type === "pdf") {
-        preview = document.createElement("div");
-        preview.className = "text-sm text-gray-600 mb-2";
-        preview.textContent = "PDF file";
-      }
+                document.getElementById('sortSelect').addEventListener('change', () => {
+                    this.filterFiles();
+                });
 
-      const btnContainer = document.createElement("div");
-      btnContainer.className = "flex gap-2";
+                // Theme toggle
+                document.getElementById('themeToggle').addEventListener('click', () => {
+                    this.toggleTheme();
+                });
 
-      const downloadBtn = document.createElement("button");
-      downloadBtn.textContent = "Download";
-      downloadBtn.className = "bg-blue-500 text-white px-2 py-1 rounded text-sm";
-      downloadBtn.onclick = () => downloadFile(file);
+                // Close preview modal
+                document.getElementById('closePreview').addEventListener('click', () => {
+                    document.getElementById('previewModal').classList.add('hidden');
+                });
+            }
 
-      const deleteBtn = document.createElement("button");
-      deleteBtn.textContent = "Delete";
-      deleteBtn.className = "bg-red-500 text-white px-2 py-1 rounded text-sm";
-      deleteBtn.onclick = () => deleteFile(file.id);
+            handleFileUpload(fileList) {
+                if (!fileList || fileList.length === 0) return;
 
-      const viewBtn = document.createElement("button");
-      viewBtn.textContent = "View";
-      viewBtn.className = "bg-green-500 text-white px-2 py-1 rounded text-sm";
-      viewBtn.onclick = () => viewFile(file);
+                const uploadProgress = document.getElementById('uploadProgress');
+                const progressBar = uploadProgress.querySelector('div > div');
+                const progressFileName = document.getElementById('progressFileName');
 
-      btnContainer.append(downloadBtn, deleteBtn, viewBtn);
-      div.append(title, preview, btnContainer);
-      fileList.appendChild(div);
-    });
-  };
-}
+                uploadProgress.classList.remove('hidden');
 
-// File Actions
-function downloadFile(file) {
-  const a = document.createElement("a");
-  a.href = file.data;
-  a.download = file.name;
-  a.click();
-}
+                Array.from(fileList).forEach((file, index) => {
+                    progressFileName.textContent = file.name;
+                    progressBar.style.width = '0%';
 
-function deleteFile(id) {
-  const tx = db.transaction("files", "readwrite");
-  const store = tx.objectStore("files");
-  store.delete(id);
-  tx.oncomplete = () => displayFiles();
-}
+                    // Simulate progress for UX
+                    let progress = 0;
+                    const interval = setInterval(() => {
+                        progress += 5;
+                        progressBar.style.width = `${progress}%`;
+                        if (progress >= 100) {
+                            clearInterval(interval);
+                            this.processFile(file);
+                            if (index === fileList.length - 1) {
+                                setTimeout(() => {
+                                    uploadProgress.classList.add('hidden');
+                                }, 500);
+                            }
+                        }
+                    }, 50);
+                });
+            }
 
-function viewFile(file) {
-  if (file.type === "excel") {
-    const wb = XLSX.read(file.data, { type: "base64" });
-    const excelContent = document.getElementById("excelContent");
-    excelContent.innerHTML = "";
+            processFile(file) {
+                const reader = new FileReader();
+                
+                reader.onload = (e) => {
+                    const fileData = {
+                        id: Date.now() + Math.floor(Math.random() * 1000),
+                        name: file.name,
+                        type: this.getFileType(file.type),
+                        size: file.size,
+                        uploadDate: new Date().toISOString(),
+                        data: e.target.result
+                    };
 
-    wb.SheetNames.forEach(sheetName => {
-      const ws = wb.Sheets[sheetName];
-      const data = XLSX.utils.sheet_to_html(ws);
-      const h3 = document.createElement("h3");
-      h3.textContent = sheetName;
-      h3.className = "font-bold mt-2 mb-1";
-      excelContent.appendChild(h3);
-      excelContent.innerHTML += data;
-    });
+                    this.files.push(fileData);
+                    this.saveFiles();
+                    this.filterFiles();
+                    this.showToast(`"${file.name}" uploaded successfully`);
+                };
 
-    document.getElementById("excelModal").classList.remove("hidden");
-  } else if (file.type === "pdf") {
-    const win = window.open("");
-    win.document.write(`<embed src="${file.data}" width="100%" height="100%">`);
-  } else if (file.type === "image") {
-    const win = window.open("");
-    win.document.write(`<img src="${file.data}" style="width:100%">`);
-  }
-}
+                reader.readAsDataURL(file);
+            }
 
-// Excel Modal Close
-document.getElementById("closeModal").addEventListener("click", () => {
-  document.getElementById("excelModal").classList.add("hidden");
-});
+            getFileType(mimeType) {
+                if (mimeType.startsWith('image/')) return 'image';
+                if (mimeType.includes('spreadsheet') || 
+                    mimeType.includes('excel') || 
+                    mimeType.includes('sheet') ||
+                    mimeType === 'text/csv') return 'excel';
+                if (mimeType.includes('pdf')) return 'pdf';
+                return 'other';
+            }
 
-// Search & Filter Events
-document.getElementById("searchInput").addEventListener("input", displayFiles);
-document.getElementById("filterSelect").addEventListener("change", displayFiles);
+            getFileIcon(type) {
+                switch (type) {
+                    case 'image': return 'fa-image';
+                    case 'excel': return 'fa-file-excel';
+                    case 'pdf': return 'fa-file-pdf';
+                    default: return 'fa-file';
+                }
+            }
 
-// Dark/Light Mode Toggle
-const toggleThemeBtn = document.getElementById("toggleTheme");
-toggleThemeBtn.addEventListener("click", () => {
-  document.body.classList.toggle("bg-gray-900");
-  document.body.classList.toggle("text-gray-100");
-  toggleThemeBtn.textContent = document.body.classList.contains("bg-gray-900") ? "Light Mode" : "Dark Mode";
-});
+            formatFileSize(bytes) {
+                if (bytes === 0) return '0 Bytes';
+                const k = 1024;
+                const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            }
+
+            formatDate(dateString) {
+                const date = new Date(dateString);
+                return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+            }
+
+            filterFiles() {
+                const searchTerm = document.getElementById('searchInput').value.toLowerCase();
+                const filterType = document.getElementById('filterSelect').value;
+                const sortBy = document.getElementById('sortSelect').value;
+
+                this.filteredFiles = this.files.filter(file => {
+                    const matchesSearch = file.name.toLowerCase().includes(searchTerm);
+                    const matchesFilter = filterType === 'all' || file.type === filterType;
+                    return matchesSearch && matchesFilter;
+                });
+
+                this.sortFiles(sortBy);
+                this.renderFiles();
+            }
+
+            sortFiles(sortBy) {
+                switch (sortBy) {
+                    case 'newest':
+                        this.filteredFiles.sort((a, b) => new Date(b.uploadDate) - new Date(a.uploadDate));
+                        break;
+                    case 'oldest':
+                        this.filteredFiles.sort((a, b) => new Date(a.uploadDate) - new Date(b.uploadDate));
+                        break;
+                    case 'name-asc':
+                        this.filteredFiles.sort((a, b) => a.name.localeCompare(b.name));
+                        break;
+                    case 'name-desc':
+                        this.filteredFiles.sort((a, b) => b.name.localeCompare(a.name));
+                        break;
+                    case 'type':
+                        this.filteredFiles.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+                        break;
+                }
+            }
+
+            renderFiles() {
+                const fileGrid = document.getElementById('fileGrid');
+                
+                if (this.filteredFiles.length === 0) {
+                    fileGrid.innerHTML = `
+                        <div class="text-center py-10 text-gray-500 dark:text-gray-400 col-span-full">
+                            <i class="fas fa-folder-open text-4xl mb-2"></i>
+                            <p>No files found</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                fileGrid.innerHTML = this.filteredFiles.map(file => `
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden transition-transform hover:scale-105">
+                        <div class="p-4">
+                            <div class="flex justify-between items-start mb-4">
+                                <i class="fas ${this.getFileIcon(file.type)} text-2xl ${file.type === 'image' ? 'text-blue-500' : file.type === 'excel' ? 'text-green-500' : file.type === 'pdf' ? 'text-red-500' : 'text-gray-500'}"></i>
+                                <button class="text-gray-400 hover:text-red-500 delete-btn" data-id="${file.id}">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </div>
+                            <h3 class="font-semibold text-gray-800 dark:text-white truncate" title="${file.name}">${file.name}</h3>
+                            <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">${this.formatFileSize(file.size)}</p>
+                            <p class="text-xs text-gray-400 dark:text-gray-500 mt-2">${this.formatDate(file.uploadDate)}</p>
+                        </div>
+                        <div class="flex border-t dark:border-gray-700 divide-x dark:divide-gray-700">
+                            <button class="flex-1 py-2 text-center text-blue-500 hover:bg-blue-50 dark:hover:bg-gray-700 preview-btn" data-id="${file.id}">
+                                <i class="fas fa-eye mr-1"></i> Preview
+                            </button>
+                            <button class="flex-1 py-2 text-center text-green-500 hover:bg-green-50 dark:hover:bg-gray-700 download-btn" data-id="${file.id}">
+                                <i class="fas fa-download mr-1"></i> Download
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+
+                // Add event listeners to the buttons
+                document.querySelectorAll('.preview-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const fileId = e.currentTarget.getAttribute('data-id');
+                        this.previewFile(fileId);
+                    });
+                });
+
+                document.querySelectorAll('.download-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const fileId = e.currentTarget.getAttribute('data-id');
+                        this.downloadFile(fileId);
+                    });
+                });
+
+                document.querySelectorAll('.delete-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const fileId = e.currentTarget.getAttribute('data-id');
+                        this.deleteFile(fileId);
+                    });
+                });
+            }
+
+            previewFile(fileId) {
+                const file = this.files.find(f => f.id == fileId);
+                if (!file) return;
+
+                const modal = document.getElementById('previewModal');
+                const title = document.getElementById('previewTitle');
+                const content = document.getElementById('previewContent');
+
+                title.textContent = file.name;
+                content.innerHTML = '';
+
+                if (file.type === 'image') {
+                    content.innerHTML = `<img src="${file.data}" alt="${file.name}" class="mx-auto max-h-full">`;
+                } else if (file.type === 'excel') {
+                    this.previewExcelFile(file, content);
+                } else if (file.type === 'pdf') {
+                    content.innerHTML = `
+                        <div class="text-center py-8">
+                            <i class="fas fa-file-pdf text-5xl text-red-500 mb-4"></i>
+                            <p class="text-gray-600 dark:text-gray-300">PDF preview is not available in this demo.</p>
+                            <p class="text-gray-500 dark:text-gray-400 text-sm mt-2">You can download the file to view it.</p>
+                        </div>
+                    `;
+                } else {
+                    content.innerHTML = `
+                        <div class="text-center py-8">
+                            <i class="fas fa-file text-5xl text-gray-500 mb-4"></i>
+                            <p class="text-gray-600 dark:text-gray-300">Preview not available for this file type.</p>
+                            <p class="text-gray-500 dark:text-gray-400 text-sm mt-2">You can download the file to view it.</p>
+                        </div>
+                    `;
+                }
+
+                modal.classList.remove('hidden');
+            }
+
+            previewExcelFile(file, contentElement) {
+                contentElement.innerHTML = '<p class="text-center py-4">Loading data...</p>';
+                
+                try {
+                    // Extract base64 data from data URL
+                    const base64Data = file.data.split(',')[1];
+                    const binaryData = atob(base64Data);
+                    const byteArray = new Uint8Array(binaryData.length);
+                    
+                    for (let i = 0; i < binaryData.length; i++) {
+                        byteArray[i] = binaryData.charCodeAt(i);
+                    }
+                    
+                    // Parse the Excel file
+                    const workbook = XLSX.read(byteArray, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    
+                    // Convert to JSON
+                    const data = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                    
+                    // Display first 10 rows
+                    const limitedData = data.slice(0, 11); // 10 rows + header
+                    
+                    if (limitedData.length === 0) {
+                        contentElement.innerHTML = '<p class="text-center py-4">No data found in the sheet.</p>';
+                        return;
+                    }
+                    
+                    let tableHTML = `
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                                <thead class="bg-gray-50 dark:bg-gray-700">
+                                    <tr>
+                    `;
+                    
+                    // Create header row
+                    limitedData[0].forEach(header => {
+                        tableHTML += `<th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">${header || ''}</th>`;
+                    });
+                    
+                    tableHTML += `
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    `;
+                    
+                    // Create data rows (skip header)
+                    for (let i = 1; i < limitedData.length; i++) {
+                        tableHTML += '<tr>';
+                        limitedData[i].forEach(cell => {
+                            tableHTML += `<td class="px-4 py-2 text-sm text-gray-800 dark:text-gray-200">${cell || ''}</td>`;
+                        });
+                        tableHTML += '</tr>';
+                    }
+                    
+                    tableHTML += `
+                                </tbody>
+                            </table>
+                        </div>
+                        <p class="text-sm text-gray-500 dark:text-gray-400 mt-4 text-center">
+                            Showing ${limitedData.length - 1} of ${data.length - 1} rows
+                        </p>
+                    `;
+                    
+                    contentElement.innerHTML = tableHTML;
+                } catch (error) {
+                    console.error('Error parsing Excel file:', error);
+                    contentElement.innerHTML = `
+                        <div class="text-center py-8">
+                            <i class="fas fa-exclamation-triangle text-yellow-500 text-4xl mb-4"></i>
+                            <p class="text-gray-600 dark:text-gray-300">Failed to parse the Excel file.</p>
+                            <p class="text-gray-500 dark:text-gray-400 text-sm mt-2">${error.message}</p>
+                        </div>
+                    `;
+                }
+            }
+
+            downloadFile(fileId) {
+                const file = this.files.find(f => f.id == fileId);
+                if (!file) return;
+
+                const a = document.createElement('a');
+                a.href = file.data;
+                a.download = file.name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                
+                this.showToast(`"${file.name}" downloaded successfully`);
+            }
+
+            deleteFile(fileId) {
+                if (!confirm('Are you sure you want to delete this file?')) return;
+                
+                const fileIndex = this.files.findIndex(f => f.id == fileId);
+                if (fileIndex === -1) return;
+                
+                const fileName = this.files[fileIndex].name;
+                this.files.splice(fileIndex, 1);
+                this.saveFiles();
+                this.filterFiles();
+                
+                this.showToast(`"${fileName}" deleted successfully`);
+            }
+
+            saveFiles() {
+                localStorage.setItem('fileDashboardFiles', JSON.stringify(this.files));
+            }
+
+            loadFiles() {
+                const storedFiles = localStorage.getItem('fileDashboardFiles');
+                if (storedFiles) {
+                    this.files = JSON.parse(storedFiles);
+                    this.filterFiles();
+                }
+            }
+
+            showToast(message) {
+                const toast = document.getElementById('toast');
+                const toastMessage = document.getElementById('toastMessage');
+                
+                toastMessage.textContent = message;
+                toast.classList.remove('translate-x-full');
+                
+                setTimeout(() => {
+                    toast.classList.add('translate-x-full');
+                }, 3000);
+            }
+
+            toggleTheme() {
+                const html = document.documentElement;
+                const themeToggle = document.getElementById('themeToggle');
+                
+                if (html.classList.contains('dark')) {
+                    html.classList.remove('dark');
+                    localStorage.setItem('theme', 'light');
+                    themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
+                } else {
+                    html.classList.add('dark');
+                    localStorage.setItem('theme', 'dark');
+                    themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
+                }
+            }
+
+            applyThemePreference() {
+                const savedTheme = localStorage.getItem('theme');
+                const themeToggle = document.getElementById('themeToggle');
+                
+                if (savedTheme === 'dark') {
+                    document.documentElement.classList.add('dark');
+                    themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
+                } else {
+                    document.documentElement.classList.remove('dark');
+                    themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
+                }
+            }
+        }
+
+        // Initialize the application when the DOM is loaded
+        document.addEventListener('DOMContentLoaded', () => {
+            new FileDashboard();
+        });
+    </script>
+</body>
+</html>
