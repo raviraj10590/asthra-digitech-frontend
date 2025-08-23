@@ -3,10 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>File Dashboard with Webhook</title>
+    <title>File Dashboard for n8n Webhook</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
         :root {
             --primary-color: #4361ee;
@@ -304,6 +303,19 @@
                 width: 100%;
             }
         }
+
+        .webhook-response {
+            background-color: #f8f9fa;
+            border-radius: var(--border-radius);
+            padding: 15px;
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .dark-mode .webhook-response {
+            background-color: #374151;
+        }
     </style>
 </head>
 <body>
@@ -312,7 +324,7 @@
         <div class="header">
             <div class="logo">
                 <i class="fas fa-server"></i>
-                <span>File Dashboard with Webhook</span>
+                <span>File Dashboard for n8n</span>
             </div>
             <button id="themeToggle" class="theme-toggle">
                 <i class="fas fa-moon"></i>
@@ -329,10 +341,10 @@
         <section class="upload-section">
             <div class="webhook-indicator">
                 <i class="fas fa-paper-plane"></i>
-                <span>Webhook Enabled</span>
+                <span>n8n Webhook</span>
             </div>
             <h2>Upload Your Files</h2>
-            <p class="text-muted">Files are stored locally with webhook notifications</p>
+            <p class="text-muted">Files are stored locally with webhook notifications to n8n</p>
             
             <div id="dropZone" class="drop-zone">
                 <i class="fas fa-cloud-upload-alt fa-3x mb-3" style="color: var(--primary-color);"></i>
@@ -350,7 +362,7 @@
 
         <!-- Webhook Settings -->
         <div class="webhook-settings">
-            <h5><i class="fas fa-cog me-2"></i>Webhook Settings</h5>
+            <h5><i class="fas fa-cog me-2"></i>n8n Webhook Settings</h5>
             <div class="mb-3">
                 <label for="webhookEndpoint" class="form-label">Webhook URL</label>
                 <input type="text" class="form-control" id="webhookEndpoint" value="https://primary-production-3b8c.up.railway.app/webhook/webhook-s">
@@ -359,6 +371,13 @@
                 <input class="form-check-input" type="checkbox" id="webhookEnabled" checked>
                 <label class="form-check-label" for="webhookEnabled">Enable webhook notifications</label>
             </div>
+            <button id="testWebhook" class="btn btn-sm btn-outline-primary mt-2">Test Webhook Connection</button>
+        </div>
+
+        <!-- Webhook Response -->
+        <div class="webhook-response d-none" id="webhookResponse">
+            <h6><i class="fas fa-reply me-2"></i>Webhook Response</h6>
+            <pre id="webhookResponseText" class="mb-0"></pre>
         </div>
 
         <!-- Search and Filter -->
@@ -405,7 +424,7 @@
 
         <!-- Storage Info -->
         <div class="storage-info">
-            <p><i class="fas fa-database me-2"></i> Files stored in browser with webhook integration</p>
+            <p><i class="fas fa-database me-2"></i> Files stored in browser with n8n webhook integration</p>
             <p class="small">Webhook notifications are sent for upload and delete events</p>
         </div>
     </div>
@@ -509,23 +528,58 @@
                     this.saveSettings();
                     this.updateWebhookStatus();
                 });
+
+                // Test webhook button
+                document.getElementById('testWebhook').addEventListener('click', () => {
+                    this.testWebhookConnection();
+                });
             }
 
             async testWebhookConnection() {
                 const statusIndicator = document.getElementById('webhookStatus');
+                const responseContainer = document.getElementById('webhookResponse');
+                const responseText = document.getElementById('webhookResponseText');
+                
                 statusIndicator.style.backgroundColor = '#f59e0b'; // yellow for testing
+                this.showToast('Testing webhook connection...');
                 
                 try {
-                    // Test the webhook with a simple HEAD request
+                    // Create a simple test payload
+                    const testPayload = {
+                        event: 'test',
+                        message: 'Testing connection to n8n webhook',
+                        timestamp: new Date().toISOString(),
+                        source: 'file-dashboard'
+                    };
+
+                    // Send test request to webhook
                     const response = await fetch(this.webhookUrl, {
-                        method: 'HEAD',
-                        mode: 'no-cors'
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(testPayload)
                     });
                     
-                    statusIndicator.style.backgroundColor = '#10b981'; // green for success
+                    // Show response details
+                    responseContainer.classList.remove('d-none');
+                    
+                    if (response.ok) {
+                        statusIndicator.style.backgroundColor = '#10b981'; // green for success
+                        const responseData = await response.text();
+                        responseText.textContent = `Webhook test successful!\n\nStatus: ${response.status}\nResponse: ${responseData}`;
+                        this.showToast('Webhook connection successful!');
+                    } else {
+                        statusIndicator.style.backgroundColor = '#ef4444'; // red for error
+                        responseText.textContent = `Webhook test failed with status: ${response.status}\n${await response.text()}`;
+                        this.showToast('Webhook test failed');
+                    }
                 } catch (error) {
-                    console.log('Webhook test failed (may be expected due to CORS):', error);
-                    statusIndicator.style.backgroundColor = '#10b981'; // Still green as CORS errors are expected
+                    statusIndicator.style.backgroundColor = '#ef4444'; // red for error
+                    responseContainer.classList.remove('d-none');
+                    responseText.textContent = `Error testing webhook: ${error.message}`;
+                    this.showToast('Webhook test failed');
+                    console.error('Webhook test error:', error);
                 }
             }
 
@@ -551,22 +605,29 @@
                             size: file.size,
                             uploadDate: file.uploadDate
                         },
-                        timestamp: new Date().toISOString()
+                        timestamp: new Date().toISOString(),
+                        source: 'file-dashboard'
                     };
 
-                    // Using fetch with no-cors mode to avoid CORS issues
-                    await fetch(this.webhookUrl, {
+                    // Send to webhook
+                    const response = await fetch(this.webhookUrl, {
                         method: 'POST',
-                        mode: 'no-cors',
                         headers: {
                             'Content-Type': 'application/json',
                         },
                         body: JSON.stringify(payload)
                     });
                     
-                    console.log(`Webhook notification sent for ${event} event`);
+                    if (response.ok) {
+                        console.log(`Webhook notification sent for ${event} event`);
+                        this.showToast(`Webhook notification sent for ${event}`);
+                    } else {
+                        console.error('Webhook responded with error:', response.status);
+                        this.showToast('Webhook notification failed');
+                    }
                 } catch (error) {
                     console.error('Error sending webhook notification:', error);
+                    this.showToast('Webhook notification failed');
                 }
             }
 
@@ -799,7 +860,6 @@
             }
 
             previewExcelFile(file) {
-                // This is a simplified version for demo purposes
                 return `
                     <div class="p-3">
                         <div class="alert alert-info">
