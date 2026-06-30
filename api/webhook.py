@@ -17,7 +17,8 @@ WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY", "")
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+def get_openai_client():
+    return OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 
 SYSTEM_PROMPT = """
 You are a smart, friendly WhatsApp sales assistant for Asthra Digitech, a digital marketing agency in Jayanagar, Bengaluru specialising in political and government social media.
@@ -46,7 +47,7 @@ REPLY RULES:
 
 def generate_reply(user_message: str) -> str:
     try:
-        response = openai_client.chat.completions.create(
+        response = get_openai_client().chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
