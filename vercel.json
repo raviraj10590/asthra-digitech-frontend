@@ -3,6 +3,10 @@
     {
       "src": "api/webhook.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/digest.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
@@ -13,6 +17,16 @@
     {
       "src": "/api/webhook",
       "dest": "api/webhook.py"
+    },
+    {
+      "src": "/api/digest",
+      "dest": "api/digest.py"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/digest",
+      "schedule": "30 3 * * *"
     }
   ]
 }

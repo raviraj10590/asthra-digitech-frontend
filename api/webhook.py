@@ -1,19 +1,25 @@
 """
 Asthra DigiTech — Kannada-First WhatsApp AI Assistant
-Version 2.0 — Production Ready
+Version 2.1 — Production Ready
 
 Features:
   - Kannada-first (Bengaluru/Mysuru/North Karnataka/Coastal dialects)
   - Kanglish (Kannada in English letters) understanding
   - Voice message transcription via OpenAI Whisper
-  - Interactive WhatsApp buttons (follow-up after brochure)
+  - Interactive WhatsApp buttons + services list menu
+  - Welcome menu for first-time contacts
   - Smart lead collection → Supabase
+  - Instant lead / VIP / election alerts to owner's WhatsApp
+  - Owner commands: #stop <phone> / #start <phone> (pause bot per chat)
+  - Duplicate webhook (Meta retry) protection
+  - Business-hours awareness (IST)
   - Typo-tolerant keyword detection
   - Conversation memory per phone number
   - Auto brochure PDF delivery
 """
 
 import json, os, re, time, tempfile, requests
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from openai import OpenAI
@@ -23,8 +29,11 @@ VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN",    "asthra_secret_2024")
 WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN",  "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://kpzprllzgqlqkqgcgrbp.supabase.co")
-SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtwenBybGx6Z3FscWtxZ2NncmJwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgzMTE1NDMsImV4cCI6MjA5Mzg4NzU0M30.zFO_b3HfNNEac7eoofZuL7jIMz3MR7MtQyCY948CzTw")
+SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in Vercel env vars
 BROCHURE_URL    = os.environ.get("BROCHURE_URL",    "")
+OWNER_PHONE     = os.environ.get("OWNER_PHONE",     "918884448141")  # Raviraj — lead alerts
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 def get_openai():
     return OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
@@ -125,6 +134,21 @@ MD      : ರವಿರಾಜ್ ಅವರು (ಪ್ರಮುಖ ಗ್ರಾಹ
 ಒಂದೇ ಸಲ ಎಲ್ಲ ಕೇಳಬೇಡಿ. ಸಂಭಾಷಣೆ ಹರಿವಿನ ಮಧ್ಯೆ ಕೇಳಿ.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👑 VIP / ರಾಜಕೀಯ ಗ್ರಾಹಕರು
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MLA / MP / ಮಂತ್ರಿ / ಪಕ್ಷದ ಕಚೇರಿ / ಸರ್ಕಾರಿ ಇಲಾಖೆ ಸಂಪರ್ಕಿಸಿದರೆ:
+• ಬೆಲೆ ಚರ್ಚೆ ಮಾಡಬೇಡಿ, ಮಾರಾಟದ ಒತ್ತಡ ಹಾಕಬೇಡಿ
+• ಗೌರವದಿಂದ: "MD ರವಿರಾಜ್ ಅವರು ನಿಮ್ಮನ್ನು ವೈಯಕ್ತಿಕವಾಗಿ ಸಂಪರ್ಕಿಸುತ್ತಾರೆ 🙏"
+• ನೇರ ನಂಬರ್ ಕೊಡಿ: +91 88844 48141
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 SELF-DEMO — ನೀವೇ ನಮ್ಮ ಉತ್ಪನ್ನ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ನೀವು ಸ್ವತಃ Asthra ನಿರ್ಮಿಸಿದ AI chatbot. ಸಂಭಾಷಣೆ ಚೆನ್ನಾಗಿ ಸಾಗಿ
+ಮುಗಿಯುವ ಹಂತದಲ್ಲಿ (ಒಮ್ಮೆ ಮಾತ್ರ, ಪ್ರತಿ ಸಂದೇಶದಲ್ಲೂ ಅಲ್ಲ) ಸೇರಿಸಿ:
+"ಈ ತರಹದ AI chatbot ನಿಮ್ಮ business ಗೂ ಬೇಕಾ? ನಾವೇ ಮಾಡಿಕೊಡುತ್ತೇವೆ 😊"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚡ ತ್ವರಿತ ಉತ್ತರಗಳು
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ಕರೆ ಮಾಡಿ     → "📞 +91 88844 48141 | +91 94493 56707"
@@ -185,6 +209,30 @@ def is_brochure_request(text: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# VIP / ELECTION LEAD DETECTION
+# ══════════════════════════════════════════════════════════════════════════════
+VIP_REGEXES = [
+    r'\bmla\b', r'\bmp\b', r'\bminister\b', r'\bcm\b', r"cm'?s office",
+    r'party office', r'\bmlc\b', r'\bias\b', r'\bips\b', r'corporator',
+]
+VIP_SUBSTRINGS = ['ಶಾಸಕ', 'ಸಂಸದ', 'ಮಂತ್ರಿ', 'ಮುಖ್ಯಮಂತ್ರಿ', 'ಸಚಿವ', 'ಪಕ್ಷದ ಕಚೇರಿ']
+
+ELECTION_REGEXES = [
+    r'\belection\b', r'\bcampaign\b', r'constituency', r'\bvoter',
+    r'\bticket\b', r'panchayat', r'\bpolls?\b',
+]
+ELECTION_SUBSTRINGS = ['ಚುನಾವಣೆ', 'ಕ್ಷೇತ್ರ', 'ಮತದಾರ', 'ಪ್ರಚಾರ']
+
+def is_vip_message(text: str) -> bool:
+    t = text.lower()
+    return any(re.search(p, t) for p in VIP_REGEXES) or any(s in t for s in VIP_SUBSTRINGS)
+
+def is_election_message(text: str) -> bool:
+    t = text.lower()
+    return any(re.search(p, t) for p in ELECTION_REGEXES) or any(s in t for s in ELECTION_SUBSTRINGS)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SUPABASE HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 def _supa_headers(prefer="return=minimal"):
@@ -198,12 +246,14 @@ def _supa_headers(prefer="return=minimal"):
     return h
 
 def fetch_history(phone: str, limit: int = 12) -> list:
+    """Chat history for the AI — user/assistant turns only (system rows excluded)."""
     try:
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
             headers=_supa_headers(""),
             params={
                 "phone":  f"eq.{phone}",
+                "role":   "in.(user,assistant)",
                 "order":  "created_at.desc",
                 "limit":  str(limit),
                 "select": "role,content",
@@ -215,6 +265,49 @@ def fetch_history(phone: str, limit: int = 12) -> list:
     except Exception as e:
         print(f"fetch_history error: {e}")
         return []
+
+def fetch_last_user_message(phone: str) -> dict:
+    """Most recent inbound message — used for Meta-retry deduplication."""
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+            headers=_supa_headers(""),
+            params={
+                "phone":  f"eq.{phone}",
+                "role":   "eq.user",
+                "order":  "created_at.desc",
+                "limit":  "1",
+                "select": "content,created_at",
+            },
+            timeout=5,
+        )
+        rows = r.json() if r.ok else []
+        return rows[0] if rows else {}
+    except Exception as e:
+        print(f"fetch_last_user_message error: {e}")
+        return {}
+
+def fetch_last_system_event(phone: str, marker: str) -> dict:
+    """Latest bot-control event (BOT_PAUSED / VIP_ALERTED / ...) for a phone."""
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+            headers=_supa_headers(""),
+            params={
+                "phone":   f"eq.{phone}",
+                "role":    "eq.system",
+                "content": f"like.{marker}*",
+                "order":   "created_at.desc",
+                "limit":   "1",
+                "select":  "content,created_at",
+            },
+            timeout=5,
+        )
+        rows = r.json() if r.ok else []
+        return rows[0] if rows else {}
+    except Exception as e:
+        print(f"fetch_last_system_event error: {e}")
+        return {}
 
 def save_message(phone: str, role: str, content: str):
     try:
@@ -241,6 +334,41 @@ def upsert_lead(phone: str, data: dict):
         print(f"lead upserted: {data}")
     except Exception as e:
         print(f"upsert_lead error: {e}")
+
+
+def _within_hours(iso_ts: str, hours: float) -> bool:
+    try:
+        ts = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) - ts < timedelta(hours=hours)
+    except Exception:
+        return False
+
+def is_bot_paused(phone: str) -> bool:
+    """Owner can pause the bot per chat (#stop) — auto-resumes after 24h."""
+    ev = fetch_last_system_event(phone, "BOT_")
+    if not ev:
+        return False
+    if ev["content"].startswith("BOT_PAUSED"):
+        return _within_hours(ev.get("created_at", ""), 24)
+    return False
+
+def is_duplicate_webhook(phone: str, text: str) -> bool:
+    """Meta retries webhooks — identical text within 60s is a retry, not a person."""
+    last = fetch_last_user_message(phone)
+    if not last:
+        return False
+    return last.get("content") == text and _within_hours(last.get("created_at", ""), 1 / 60)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BUSINESS HOURS (IST)
+# ══════════════════════════════════════════════════════════════════════════════
+def after_hours_note() -> str:
+    """Outside Mon–Sat 9am–7pm IST, set expectations for a human follow-up."""
+    now = datetime.now(IST)
+    if now.weekday() == 6 or not (9 <= now.hour < 19):
+        return "\n\n🕐 ನಮ್ಮ ತಂಡ ಕೆಲಸದ ಸಮಯದಲ್ಲಿ (ಸೋಮ–ಶನಿ, ಬೆಳಿಗ್ಗೆ 9 – ಸಂಜೆ 7) ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತದೆ 🙏"
+    return ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -341,7 +469,7 @@ def generate_reply(phone: str, user_message: str) -> str:
 
     try:
         resp = get_openai().chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=messages,
             max_tokens=400,
             temperature=0.75,
@@ -376,6 +504,15 @@ def send_text(to: str, message: str):
         "text": {"body": message, "preview_url": False},
     })
 
+def notify_owner(message: str):
+    """Instant WhatsApp alert to Raviraj. Note: outside the 24h customer-service
+    window with the owner's own number, Meta rejects free-form text — the owner
+    should message the bot number occasionally to keep the window open."""
+    try:
+        send_text(OWNER_PHONE, message)
+    except Exception as e:
+        print(f"notify_owner error: {e}")
+
 def send_brochure(to: str):
     """Send company profile PDF as a document message."""
     if not BROCHURE_URL:
@@ -394,6 +531,96 @@ def send_brochure(to: str):
             "filename": "Asthra_DigiTech_Company_Profile.pdf",
         },
     })
+
+def send_welcome_menu(to: str):
+    """First-contact greeting + tappable services list (free interactive message)."""
+    send_text(to,
+        "ನಮಸ್ಕಾರ 🙏 ಆಸ್ತ್ರ ಡಿಜಿಟೆಕ್‌ಗೆ ಸ್ವಾಗತ!\n\n"
+        "ನಾನು ಆಸ್ತ್ರ AI — ನಿಮ್ಮ ಡಿಜಿಟಲ್ ಮಾರ್ಕೆಟಿಂಗ್ ಸಹಾಯಕ.\n"
+        "ಕನ್ನಡ, English, ಹಿಂದಿ — ಯಾವ ಭಾಷೆಯಲ್ಲಾದರೂ ಮಾತನಾಡಿ!"
+    )
+    r = _wa_post({
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": "ನಿಮಗೆ ಯಾವ ಸೇವೆ ಬೇಕು? ಕೆಳಗೆ ಆಯ್ಕೆ ಮಾಡಿ 👇"},
+            "action": {
+                "button": "ಸೇವೆಗಳು 📋",
+                "sections": [
+                    {
+                        "title": "Asthra DigiTech",
+                        "rows": [
+                            {"id": "svc_social",   "title": "📱 Social Media",      "description": "Instagram, FB, YouTube ನಿರ್ವಹಣೆ"},
+                            {"id": "svc_website",  "title": "🌐 Website / App",     "description": "ವೆಬ್‌ಸೈಟ್ & ಮೊಬೈಲ್ ಆ್ಯಪ್"},
+                            {"id": "svc_election", "title": "🗳️ Election Campaign", "description": "MLA/MP ಚುನಾವಣಾ ಪ್ರಚಾರ"},
+                            {"id": "svc_chatbot",  "title": "🤖 AI Chatbot",        "description": "WhatsApp bot & automation"},
+                            {"id": "svc_ads",      "title": "📢 Digital Ads",       "description": "Google & Meta ಜಾಹೀರಾತು"},
+                            {"id": "svc_govt",     "title": "🏛️ Govt Schemes",      "description": "ಸರ್ಕಾರಿ ಇಲಾಖೆ ಪ್ರಚಾರ"},
+                            {"id": "svc_design",   "title": "🎨 Design & Branding", "description": "Logo, Poster, Brochure"},
+                            {"id": "svc_other",    "title": "💬 ಬೇರೆ / Other",      "description": "ನಿಮ್ಮ ಪ್ರಶ್ನೆ ಟೈಪ್ ಮಾಡಿ"},
+                        ],
+                    }
+                ],
+            },
+        },
+    })
+    # Fallback: plain text menu if list message fails
+    if not r.ok:
+        send_text(to,
+            "ನಮ್ಮ ಸೇವೆಗಳು:\n"
+            "1️⃣ Social Media ನಿರ್ವಹಣೆ\n"
+            "2️⃣ Website / App\n"
+            "3️⃣ Election Campaign 🗳️\n"
+            "4️⃣ AI Chatbot 🤖\n"
+            "5️⃣ Digital Ads\n"
+            "6️⃣ Govt Schemes\n"
+            "7️⃣ Design & Branding\n\n"
+            "ಯಾವುದು ಬೇಕು ಹೇಳಿ 😊"
+        )
+
+SERVICE_MENU_REPLIES = {
+    "svc_social": (
+        "Social Media ನಿರ್ವಹಣೆ",
+        "ಸೂಪರ್! 📱 Instagram, Facebook, YouTube, LinkedIn — ಎಲ್ಲಾ ನಾವು ನೋಡಿಕೊಳ್ಳುತ್ತೇವೆ.\n\n"
+        "ನಿಮ್ಮದು ಯಾವ ರೀತಿಯ business / ಸಂಸ್ಥೆ? ಈಗ social media ಇದೆಯಾ?"
+    ),
+    "svc_website": (
+        "Website / App",
+        "ಒಳ್ಳೆ ಆಯ್ಕೆ! 🌐 Business website, E-commerce, Government portal, Mobile app — ಎಲ್ಲಾ ಮಾಡುತ್ತೇವೆ.\n\n"
+        "ಯಾವ ರೀತಿಯ website/app ಬೇಕು? ಎಷ್ಟು ಪುಟ/features ಅಂದಾಜು?"
+    ),
+    "svc_election": (
+        "Election Campaign",
+        "ನಮಸ್ಕಾರ 🙏 ಚುನಾವಣಾ ಡಿಜಿಟಲ್ ಪ್ರಚಾರ ನಮ್ಮ ವಿಶೇಷತೆ — Karnataka ದಲ್ಲಿ ಹಲವು ನಾಯಕರ ಜೊತೆ ಕೆಲಸ ಮಾಡಿದ್ದೇವೆ.\n\n"
+        "ಯಾವ ಕ್ಷೇತ್ರ? ಯಾವ ಚುನಾವಣೆಗೆ ತಯಾರಿ? MD ರವಿರಾಜ್ ಅವರು ನಿಮ್ಮನ್ನು ವೈಯಕ್ತಿಕವಾಗಿ ಸಂಪರ್ಕಿಸುತ್ತಾರೆ."
+    ),
+    "svc_chatbot": (
+        "AI Chatbot",
+        "ಒಳ್ಳೆ ಪ್ರಶ್ನೆ! 🤖 ಈಗ ನೀವು ಮಾತನಾಡುತ್ತಿರುವುದೇ ನಮ್ಮ AI chatbot — ಇದೇ ತರಹ ನಿಮ್ಮ business ಗೂ ಮಾಡಿಕೊಡುತ್ತೇವೆ!\n\n"
+        "ನಿಮ್ಮ business ಯಾವುದು? ದಿನಕ್ಕೆ ಎಷ್ಟು customer messages ಬರುತ್ತವೆ?"
+    ),
+    "svc_ads": (
+        "Digital Ads",
+        "ಖಂಡಿತ! 📢 Google Ads, Facebook/Instagram Ads, YouTube Ads — ROI focus ನಲ್ಲಿ ನಡೆಸುತ್ತೇವೆ.\n\n"
+        "ಯಾವ product/service ಗೆ ads ಬೇಕು? ತಿಂಗಳ ad budget ಅಂದಾಜು ಎಷ್ಟು?"
+    ),
+    "svc_govt": (
+        "Govt Schemes",
+        "ನಮಸ್ಕಾರ 🙏 ಸರ್ಕಾರಿ ಇಲಾಖೆ / ಯೋಜನೆಗಳ ಪ್ರಚಾರದಲ್ಲಿ ನಮಗೆ ವಿಶೇಷ ಅನುಭವ (KSDC, India Skills ಇತ್ಯಾದಿ).\n\n"
+        "ಯಾವ ಇಲಾಖೆ / ಯೋಜನೆ? ವಿವರ ಹೇಳಿ, MD ರವಿರಾಜ್ ಅವರು ನೇರವಾಗಿ ಮಾತನಾಡುತ್ತಾರೆ."
+    ),
+    "svc_design": (
+        "Design & Branding",
+        "ಸೂಪರ್! 🎨 Logo, Brand identity, Poster, Brochure, Social media creatives — ಎಲ್ಲಾ ಮಾಡುತ್ತೇವೆ.\n\n"
+        "ಏನು design ಬೇಕು? ನಿಮ್ಮ ಕಂಪನಿ/ಸಂಸ್ಥೆ ಹೆಸರು ಹೇಳಿ."
+    ),
+    "svc_other": (
+        "Other",
+        "ಖಂಡಿತ! 😊 ನಿಮ್ಮ ಪ್ರಶ್ನೆ / ಅವಶ್ಯಕತೆ ಟೈಪ್ ಮಾಡಿ — ಕನ್ನಡ, English, ಹಿಂದಿ ಯಾವುದರಲ್ಲಾದರೂ ಸರಿ."
+    ),
+}
 
 def send_followup_buttons(to: str):
     """Send interactive quick-reply buttons after brochure (max 3)."""
@@ -434,6 +661,7 @@ def handle_button_reply(to: str, btn_id: str, btn_title: str):
             "3️⃣ ನಿಮ್ಮ ಬಜೆಟ್ ಅಂದಾಜು ಎಷ್ಟು?\n"
             "4️⃣ ಯಾವಾಗ ಬೇಕು? 📅"
         )
+        notify_owner(f"📋 Quotation request from wa.me/{to}")
     elif btn_id == "call":
         send_text(to,
             "📞 ನಮ್ಮ ತಂಡ ಮಾತನಾಡಲು ಸಿದ್ಧ!\n\n"
@@ -441,6 +669,7 @@ def handle_button_reply(to: str, btn_id: str, btn_title: str):
             "☎️ +91 94493 56707\n\n"
             "🕐 ಸೋಮ–ಶನಿ: ಬೆಳಿಗ್ಗೆ 9 – ರಾತ್ರಿ 7"
         )
+        notify_owner(f"📞 Call requested by wa.me/{to} — expect a call!")
     elif btn_id == "meeting":
         send_text(to,
             "🤝 ಮೀಟಿಂಗ್ ಫಿಕ್ಸ್ ಮಾಡೋಣ!\n\n"
@@ -448,10 +677,88 @@ def handle_button_reply(to: str, btn_id: str, btn_title: str):
             "🖥️ ವಿಡಿಯೋ ಕಾಲ್ ಸಹ ಆಗುತ್ತದೆ\n\n"
             "ನಿಮಗೆ ಯಾವ ದಿನ ಮತ್ತು ಸಮಯ ಅನುಕೂಲ? 📅"
         )
+        save_message(to, "system", "MEETING_REQUESTED")
+        notify_owner(f"🤝 Meeting requested by wa.me/{to} — check chat for their preferred time")
     else:
         # Unknown button — let AI handle
         reply = generate_reply(to, btn_title)
         send_text(to, reply)
+
+def handle_list_reply(to: str, row_id: str, row_title: str):
+    """Respond to welcome-menu service selection + capture as lead."""
+    service, reply = SERVICE_MENU_REPLIES.get(row_id, SERVICE_MENU_REPLIES["svc_other"])
+    save_message(to, "user", f"[ಆಯ್ಕೆ: {row_title}]")
+    send_text(to, reply)
+    save_message(to, "assistant", reply)
+    if row_id != "svc_other":
+        upsert_lead(to, {"service_needed": service})
+    if row_id in ("svc_election", "svc_govt"):
+        notify_owner(f"🗳️ HOT: wa.me/{to} selected *{service}* from the menu — follow up personally!")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OWNER COMMANDS  (#stop <phone> / #start <phone> — sent from OWNER_PHONE)
+# ══════════════════════════════════════════════════════════════════════════════
+def handle_owner_command(text: str) -> bool:
+    """Returns True if the message was an owner command (and was handled)."""
+    stripped = text.strip()
+    if stripped.lower() in ("#help", "#commands"):
+        send_text(OWNER_PHONE,
+            "🤖 Bot commands:\n\n"
+            "#stop 91XXXXXXXXXX — pause bot for that chat (24h)\n"
+            "#start 91XXXXXXXXXX — resume bot for that chat"
+        )
+        return True
+    m = re.match(r'^#(stop|start)\s+(\+?\d{10,15})\s*$', stripped, re.IGNORECASE)
+    if not m:
+        return False
+    action = m.group(1).lower()
+    target = m.group(2).lstrip("+")
+    if action == "stop":
+        save_message(target, "system", "BOT_PAUSED")
+        send_text(OWNER_PHONE, f"⏸️ Bot paused for wa.me/{target} (auto-resumes in 24h)")
+    else:
+        save_message(target, "system", "BOT_RESUMED")
+        send_text(OWNER_PHONE, f"▶️ Bot resumed for wa.me/{target}")
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LEAD / VIP ALERTS TO OWNER
+# ══════════════════════════════════════════════════════════════════════════════
+def maybe_alert_vip(sender: str, user_text: str):
+    """Instant owner alert for VIP / election messages — once per chat per 24h."""
+    vip      = is_vip_message(user_text)
+    election = is_election_message(user_text)
+    if not (vip or election):
+        return
+    ev = fetch_last_system_event(sender, "VIP_ALERTED")
+    if ev and _within_hours(ev.get("created_at", ""), 24):
+        return
+    save_message(sender, "system", "VIP_ALERTED")
+    tag = "👑 VIP" if vip else "🗳️ ELECTION"
+    notify_owner(
+        f"{tag} lead on WhatsApp bot!\n\n"
+        f"From: wa.me/{sender}\n"
+        f"Message: {user_text[:200]}\n\n"
+        f"⚡ Call them personally ASAP."
+    )
+
+def maybe_alert_lead(sender: str, lead: dict):
+    """Owner alert when meaningful lead info is captured — once per chat per 24h."""
+    meaningful = any(lead.get(k) for k in ("service_needed", "budget", "company"))
+    if not meaningful:
+        return
+    ev = fetch_last_system_event(sender, "LEAD_ALERTED")
+    if ev and _within_hours(ev.get("created_at", ""), 24):
+        return
+    save_message(sender, "system", "LEAD_ALERTED")
+    lines = ["🔥 New lead captured by bot!", "", f"From: wa.me/{sender}"]
+    for label, key in (("Name", "name"), ("Company", "company"),
+                       ("Service", "service_needed"), ("Budget", "budget"), ("City", "city")):
+        if lead.get(key):
+            lines.append(f"{label}: {lead[key]}")
+    notify_owner("\n".join(lines))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -500,17 +807,20 @@ class handler(BaseHTTPRequestHandler):
 
             print(f"📨 {msg_type} from {sender}")
 
-            # ── Interactive button reply ───────────────────────────────────
+            # ── Interactive replies (buttons + welcome-menu list) ─────────
             if msg_type == "interactive":
                 iact = msg.get("interactive", {})
                 if iact.get("type") == "button_reply":
                     btn = iact["button_reply"]
                     handle_button_reply(sender, btn["id"], btn["title"])
+                elif iact.get("type") == "list_reply":
+                    row = iact["list_reply"]
+                    handle_list_reply(sender, row["id"], row.get("title", ""))
                 self._ok(); return
 
             # ── Voice / Audio message ─────────────────────────────────────
             if msg_type == "audio":
-                media_id   = msg["audio"]["id"]
+                media_id    = msg["audio"]["id"]
                 transcribed = transcribe_audio(media_id)
                 if not transcribed:
                     send_text(sender,
@@ -519,9 +829,7 @@ class handler(BaseHTTPRequestHandler):
                     )
                     self._ok(); return
                 # Acknowledge voice with transcription
-                send_text(sender,
-                    f"🎤 ನಿಮ್ಮ ಧ್ವನಿ ಸಂದೇಶ:\n"{transcribed}""
-                )
+                send_text(sender, f'🎤 ನಿಮ್ಮ ಧ್ವನಿ ಸಂದೇಶ:\n"{transcribed}"')
                 user_text = transcribed
 
             # ── Text message ──────────────────────────────────────────────
@@ -538,8 +846,28 @@ class handler(BaseHTTPRequestHandler):
 
             print(f"💬 Text: {user_text[:80]}")
 
+            # ── Owner commands (#stop / #start) ───────────────────────────
+            if sender == OWNER_PHONE and handle_owner_command(user_text):
+                self._ok(); return
+
+            # ── Meta retry deduplication ──────────────────────────────────
+            if is_duplicate_webhook(sender, user_text):
+                print("↩️ duplicate webhook — skipped")
+                self._ok(); return
+
+            # ── First-time contact? (check BEFORE saving this message) ────
+            is_new_contact = not fetch_history(sender, 1)
+
             # Save user message to memory
             save_message(sender, "user", user_text)
+
+            # ── VIP / election detection → instant owner alert ────────────
+            maybe_alert_vip(sender, user_text)
+
+            # ── Human handoff: owner paused this chat ─────────────────────
+            if is_bot_paused(sender):
+                print(f"⏸️ bot paused for {sender} — staying silent")
+                self._ok(); return
 
             # ── Brochure request? ─────────────────────────────────────────
             if is_brochure_request(user_text):
@@ -550,12 +878,18 @@ class handler(BaseHTTPRequestHandler):
                 send_brochure(sender)
                 time.sleep(1)
                 send_followup_buttons(sender)
+                notify_owner(f"📄 Brochure sent to wa.me/{sender}")
+
+            # ── New contact: greet with services menu ─────────────────────
+            elif is_new_contact:
+                send_welcome_menu(sender)
+                save_message(sender, "assistant", "[ಸ್ವಾಗತ + ಸೇವೆಗಳ ಮೆನು ಕಳಿಸಲಾಯಿತು]")
 
             # ── Normal AI reply ───────────────────────────────────────────
             else:
                 reply = generate_reply(sender, user_text)
                 print(f"🤖 {reply[:80]}")
-                send_text(sender, reply)
+                send_text(sender, reply + after_hours_note())
                 save_message(sender, "assistant", reply)
 
                 # Extract & save lead info every few turns
@@ -564,6 +898,7 @@ class handler(BaseHTTPRequestHandler):
                     lead = extract_lead_info(history)
                     if lead:
                         upsert_lead(sender, lead)
+                        maybe_alert_lead(sender, lead)
 
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             print(f"Parse error: {e}")
