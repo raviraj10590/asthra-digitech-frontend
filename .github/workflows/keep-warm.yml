@@ -1,0 +1,21 @@
+name: Keep bot warm
+
+# Vercel serverless functions sleep after a few idle minutes; at low traffic
+# nearly every WhatsApp message paid a ~2.4s cold start. A ping every 5 min
+# keeps the function warm so replies start instantly.
+# (GitHub cron isn't exact — runs land every 5-12 min — still kills most cold starts.)
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping webhook
+        run: |
+          curl -s -o /dev/null -w "warm ping: %{http_code} in %{time_total}s\n" \
+            --max-time 20 \
+            "https://asthra-digitech-frontend.vercel.app/webhook?hub.mode=ping&hub.verify_token=warmup&hub.challenge=0"

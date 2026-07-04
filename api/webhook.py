@@ -23,7 +23,6 @@ import json, os, re, time, tempfile, requests
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
-from openai import OpenAI
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN",    "asthra_secret_2024")
@@ -37,6 +36,9 @@ OWNER_PHONE     = os.environ.get("OWNER_PHONE",     "918884448141")  # Raviraj �
 IST = timezone(timedelta(hours=5, minutes=30))
 
 def get_openai():
+    # Lazy import — the openai package costs ~0.5-1.5s at import time, which was
+    # paid on EVERY cold start even for messages that never call the AI.
+    from openai import OpenAI
     return OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 
 
@@ -497,6 +499,20 @@ def _wa_post(payload: dict):
     print(f"WA API {r.status_code}: {r.text[:120]}")
     return r
 
+def send_typing(message_id: str):
+    """Mark the incoming message read + show 'typing…' IMMEDIATELY, before any
+    AI or DB work. Costs ~200ms once; turns a silent 5-8s wait into a normal
+    'the other person is typing' wait."""
+    try:
+        _wa_post({
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id,
+            "typing_indicator": {"type": "text"},
+        })
+    except Exception as e:
+        print(f"send_typing error: {e}")
+
 def send_text(to: str, message: str):
     _wa_post({
         "messaging_product": "whatsapp",
@@ -797,6 +813,10 @@ class handler(BaseHTTPRequestHandler):
             msg_type = msg.get("type", "")
 
             print(f"📨 {msg_type} from {sender}")
+
+            # Blue ticks + typing… within ~1s, before the slow work starts
+            if msg.get("id") and msg_type in ("text", "audio", "interactive"):
+                send_typing(msg["id"])
 
             # ── Interactive replies (buttons + welcome-menu list) ─────────
             if msg_type == "interactive":
