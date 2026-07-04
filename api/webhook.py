@@ -32,6 +32,7 @@ SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://kpzprllzgqlqkqgcgrb
 SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in Vercel env vars
 BROCHURE_URL    = os.environ.get("BROCHURE_URL",    "")
 OWNER_PHONE     = os.environ.get("OWNER_PHONE",     "918884448141")  # Raviraj — lead alerts
+GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "")  # free tier — image understanding
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -449,6 +450,85 @@ def transcribe_audio(media_id: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MEDIA (image / video / document) HANDLING
+# ══════════════════════════════════════════════════════════════════════════════
+def download_wa_media(media_id: str, max_bytes: int = 5 * 1024 * 1024):
+    """Fetch a WhatsApp media file. Returns (bytes, mime_type) or (None, None)."""
+    try:
+        meta = requests.get(
+            f"https://graph.facebook.com/v19.0/{media_id}",
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+            timeout=8,
+        ).json()
+        url, mime = meta.get("url"), meta.get("mime_type", "image/jpeg")
+        if not url:
+            return None, None
+        r = requests.get(url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}, timeout=10)
+        if not r.ok or len(r.content) > max_bytes:
+            return None, None
+        return r.content, mime
+    except Exception as e:
+        print(f"download_wa_media error: {e}")
+        return None, None
+
+
+def analyze_image_with_gemini(image_bytes: bytes, mime: str, caption: str) -> str:
+    """Look at a customer image with Gemini (free tier) and reply as ಆಸ್ತ್ರ AI.
+    Returns the Kannada reply text, or '' on any failure."""
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        import base64
+        prompt = (
+            "ನೀವು Asthra DigiTech (ಡಿಜಿಟಲ್ ಮಾರ್ಕೆಟಿಂಗ್ ಏಜೆನ್ಸಿ, ಜಯನಗರ ಬೆಂಗಳೂರು) ಕಂಪನಿಯ "
+            "WhatsApp ಸಹಾಯಕ 'ಆಸ್ತ್ರ AI'. ಗ್ರಾಹಕರು ಈ ಚಿತ್ರ ಕಳುಹಿಸಿದ್ದಾರೆ"
+            + (f' (ಜೊತೆ ಸಂದೇಶ: "{caption}")' if caption else "")
+            + ". ಚಿತ್ರ ನೋಡಿ, 2-4 ಸಾಲಿನ ಸ್ನೇಹಪೂರ್ಣ ಕನ್ನಡ WhatsApp ಉತ್ತರ ಬರೆಯಿರಿ: "
+            "ಚಿತ್ರದಲ್ಲಿ ಏನಿದೆ ಗುರುತಿಸಿ, ಅದಕ್ಕೆ ಸಂಬಂಧಿಸಿದ ನಮ್ಮ ಸೇವೆ (design, poster, "
+            "social media, website, ads) ಪ್ರಸ್ತಾಪಿಸಿ, ಒಂದು ಪ್ರಶ್ನೆ ಕೇಳಿ. "
+            "ಬೆಲೆ ಹೇಳಬೇಡಿ. ರಾಜಕೀಯ ಅಭಿಪ್ರಾಯ ಬೇಡ. ಉತ್ತರ ಮಾತ್ರ ಕೊಡಿ."
+        )
+        body = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime, "data": base64.b64encode(image_bytes).decode()}},
+                ]
+            }]
+        }
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            json=body, timeout=15,
+        )
+        if not r.ok:
+            print(f"gemini vision {r.status_code}: {r.text[:120]}")
+            return ""
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        print(f"analyze_image_with_gemini error: {e}")
+        return ""
+
+
+def gemini_one_liner(image_bytes: bytes, mime: str) -> str:
+    """One-line English description for the owner alert. Best-effort."""
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        import base64
+        body = {"contents": [{"parts": [
+            {"text": "Describe this image in ONE short English line (max 12 words). Just the line."},
+            {"inline_data": {"mime_type": mime, "data": base64.b64encode(image_bytes).decode()}},
+        ]}]}
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            json=body, timeout=10,
+        )
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip() if r.ok else ""
+    except Exception:
+        return ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # AI REPLY GENERATION
 # ══════════════════════════════════════════════════════════════════════════════
 def generate_reply(phone: str, user_message: str, history: list = None) -> str:
@@ -815,7 +895,7 @@ class handler(BaseHTTPRequestHandler):
             print(f"📨 {msg_type} from {sender}")
 
             # Blue ticks + typing… within ~1s, before the slow work starts
-            if msg.get("id") and msg_type in ("text", "audio", "interactive"):
+            if msg.get("id") and msg_type in ("text", "audio", "interactive", "image", "video", "document"):
                 send_typing(msg["id"])
 
             # ── Interactive replies (buttons + welcome-menu list) ─────────
@@ -846,7 +926,41 @@ class handler(BaseHTTPRequestHandler):
             elif msg_type == "text":
                 user_text = msg["text"]["body"]
 
+            # ── Image: Gemini vision (free) looks at it and replies in Kannada ──
+            elif msg_type == "image":
+                media_id = msg.get("image", {}).get("id", "")
+                caption  = msg.get("image", {}).get("caption", "")
+                img, mime = download_wa_media(media_id) if media_id else (None, None)
+                reply = analyze_image_with_gemini(img, mime, caption) if img else ""
+                if reply:
+                    send_text(sender, reply)
+                    save_messages([(sender, "user", f"[ಚಿತ್ರ ಕಳುಹಿಸಿದ್ದಾರೆ{': ' + caption if caption else ''}]"),
+                                   (sender, "assistant", reply)])
+                    desc = gemini_one_liner(img, mime)
+                    notify_owner(f"📸 Image from wa.me/{sender}" + (f" — {desc}" if desc else "") + "\nBot replied with vision analysis.")
+                else:
+                    send_text(sender,
+                        "ಚಿತ್ರ ಸಿಕ್ಕಿದೆ 🙏 ನಮ್ಮ ತಂಡ ನೋಡುತ್ತದೆ. "
+                        "ಜೊತೆಗೆ ನಿಮ್ಮ ಅವಶ್ಯಕತೆ ಟೈಪ್ ಮಾಡಿದರೆ ತಕ್ಷಣ ಸಹಾಯ ಮಾಡುತ್ತೇವೆ."
+                    )
+                    save_message(sender, "user", "[ಚಿತ್ರ ಕಳುಹಿಸಿದ್ದಾರೆ]")
+                    notify_owner(f"📸 Image from wa.me/{sender} — open WhatsApp to view (vision unavailable).")
+                self._ok(); return
+
+            # ── Video / document: warm ack + instant owner alert ────────────
+            elif msg_type in ("video", "document"):
+                label = "ವಿಡಿಯೋ" if msg_type == "video" else "ಡಾಕ್ಯುಮೆಂಟ್"
+                send_text(sender,
+                    f"{label} ಸಿಕ್ಕಿದೆ 🙏 ನಮ್ಮ ತಂಡ ಈಗಲೇ ನೋಡುತ್ತದೆ. "
+                    "ಜೊತೆಗೆ ನಿಮ್ಮ ಅವಶ್ಯಕತೆ ಸಂಕ್ಷಿಪ್ತವಾಗಿ ಟೈಪ್ ಮಾಡಿ."
+                )
+                save_message(sender, "user", f"[{label} ಕಳುಹಿಸಿದ್ದಾರೆ]")
+                emoji = "🎥" if msg_type == "video" else "📎"
+                notify_owner(f"{emoji} {msg_type.capitalize()} from wa.me/{sender} — open WhatsApp to view. Reply personally!")
+                self._ok(); return
+
             else:
+                # Sticker, contact, location etc. — acknowledge
                 send_text(sender,
                     "ನಿಮ್ಮ ಸಂದೇಶ ಸ್ವೀಕರಿಸಿದ್ದೇವೆ 🙏 "
                     "ಪ್ರಶ್ನೆ ಅಥವಾ ವಿವರ ಟೈಪ್ ಮಾಡಿ."
