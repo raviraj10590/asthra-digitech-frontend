@@ -31,7 +31,11 @@ PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://kpzprllzgqlqkqgcgrbp.supabase.co")
 SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in Vercel env vars
 BROCHURE_URL    = os.environ.get("BROCHURE_URL",    "")
-OWNER_PHONE     = os.environ.get("OWNER_PHONE",     "918884448141")  # Raviraj — lead alerts
+# Lead/alert recipients — comma-separated, so alerts can go to multiple people.
+# Owner commands (#stop/#start) are also accepted from any number in this list.
+OWNER_PHONES = [p.strip() for p in
+    os.environ.get("OWNER_PHONE", "918884448141,918861369951").split(",") if p.strip()]
+OWNER_PHONE  = OWNER_PHONES[0]  # kept for any code that still expects a single primary number
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "")  # free tier — image understanding
 WELCOME_IMAGE   = os.environ.get("WELCOME_IMAGE",   "https://kpzprllzgqlqkqgcgrbp.supabase.co/storage/v1/object/public/documents/adt-welcome.png")
 
@@ -633,13 +637,15 @@ def send_text(to: str, message: str):
     })
 
 def notify_owner(message: str):
-    """Instant WhatsApp alert to Raviraj. Note: outside the 24h customer-service
-    window with the owner's own number, Meta rejects free-form text — the owner
-    should message the bot number occasionally to keep the window open."""
-    try:
-        send_text(OWNER_PHONE, message)
-    except Exception as e:
-        print(f"notify_owner error: {e}")
+    """Instant WhatsApp alert to every number in OWNER_PHONES. Note: outside the
+    24h customer-service window with an owner's own number, Meta rejects
+    free-form text — each owner should message the bot number occasionally
+    to keep their window open."""
+    for phone in OWNER_PHONES:
+        try:
+            send_text(phone, message)
+        except Exception as e:
+            print(f"notify_owner error ({phone}): {e}")
 
 def send_brochure(to: str):
     """Send company profile PDF as a document message."""
@@ -829,13 +835,14 @@ def handle_list_reply(to: str, row_id: str, row_title: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# OWNER COMMANDS  (#stop <phone> / #start <phone> — sent from OWNER_PHONE)
+# OWNER COMMANDS  (#stop <phone> / #start <phone> — sent from any OWNER_PHONES number)
 # ══════════════════════════════════════════════════════════════════════════════
-def handle_owner_command(text: str) -> bool:
-    """Returns True if the message was an owner command (and was handled)."""
+def handle_owner_command(text: str, from_number: str) -> bool:
+    """Returns True if the message was an owner command (and was handled).
+    Replies go back to whichever owner number issued the command."""
     stripped = text.strip()
     if stripped.lower() in ("#help", "#commands"):
-        send_text(OWNER_PHONE,
+        send_text(from_number,
             "🤖 Bot commands:\n\n"
             "#stop 91XXXXXXXXXX — pause bot for that chat (24h)\n"
             "#start 91XXXXXXXXXX — resume bot for that chat"
@@ -848,10 +855,10 @@ def handle_owner_command(text: str) -> bool:
     target = m.group(2).lstrip("+")
     if action == "stop":
         save_message(target, "system", "BOT_PAUSED")
-        send_text(OWNER_PHONE, f"⏸️ Bot paused for wa.me/{target} (auto-resumes in 24h)")
+        send_text(from_number, f"⏸️ Bot paused for wa.me/{target} (auto-resumes in 24h)")
     else:
         save_message(target, "system", "BOT_RESUMED")
-        send_text(OWNER_PHONE, f"▶️ Bot resumed for wa.me/{target}")
+        send_text(from_number, f"▶️ Bot resumed for wa.me/{target}")
     return True
 
 
@@ -1009,7 +1016,7 @@ class handler(BaseHTTPRequestHandler):
             print(f"💬 Text: {user_text[:80]}")
 
             # ── Owner commands (#stop / #start) ───────────────────────────
-            if sender == OWNER_PHONE and handle_owner_command(user_text):
+            if sender in OWNER_PHONES and handle_owner_command(user_text, sender):
                 self._ok(); return
 
             # ── ONE context fetch for everything below ────────────────────
