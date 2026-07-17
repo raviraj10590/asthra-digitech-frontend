@@ -38,6 +38,12 @@ OWNER_PHONES = [p.strip() for p in
 OWNER_PHONE  = OWNER_PHONES[0]  # kept for any code that still expects a single primary number
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "")  # free tier — image understanding
 WELCOME_IMAGE   = os.environ.get("WELCOME_IMAGE",   "https://kpzprllzgqlqkqgcgrbp.supabase.co/storage/v1/object/public/documents/adt-welcome.png")
+# Asthra CRM (byras.shop) — mirror outbound bot replies so conversations appear
+# complete there. All three must be set or logging is a silent no-op.
+# RLS on the CRM side only permits anon INSERTs that are outbound + this user_id.
+CRM_SUPABASE_URL      = os.environ.get("CRM_SUPABASE_URL",      "")
+CRM_SUPABASE_ANON_KEY = os.environ.get("CRM_SUPABASE_ANON_KEY", "")
+CRM_OWNER_USER_ID     = os.environ.get("CRM_OWNER_USER_ID",     "")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -628,6 +634,35 @@ def send_typing(message_id: str):
     except Exception as e:
         print(f"send_typing error: {e}")
 
+def log_reply_to_crm(phone: str, body: str):
+    """Mirror an outbound bot reply into the Asthra CRM's whatsapp_messages.
+    Fire-and-forget: any failure is printed and swallowed — CRM logging must
+    never delay or break a customer reply."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_ANON_KEY and CRM_OWNER_USER_ID):
+        return
+    try:
+        requests.post(
+            f"{CRM_SUPABASE_URL}/rest/v1/whatsapp_messages",
+            headers={
+                "apikey": CRM_SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {CRM_SUPABASE_ANON_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json={
+                "user_id": CRM_OWNER_USER_ID,
+                "phone": phone,
+                "direction": "outbound",
+                "message_type": "text",
+                "body": body,
+                "status": "sent",
+                "metadata": {"source": "asthra_ai_bot"},
+            },
+            timeout=3,
+        )
+    except Exception as e:
+        print(f"log_reply_to_crm error: {e}")
+
 def send_text(to: str, message: str):
     _wa_post({
         "messaging_product": "whatsapp",
@@ -635,6 +670,9 @@ def send_text(to: str, message: str):
         "type": "text",
         "text": {"body": message, "preview_url": False},
     })
+    # Owner alerts are internal notifications, not customer conversation — skip.
+    if to not in OWNER_PHONES:
+        log_reply_to_crm(to, message)
 
 def notify_owner(message: str):
     """Instant WhatsApp alert to every number in OWNER_PHONES. Note: outside the
