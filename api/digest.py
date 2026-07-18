@@ -67,22 +67,26 @@ def build_digest() -> str:
 def send_to_owner(text: str):
     ok_any = False
     for phone in OWNER_PHONES:
-        r = requests.post(
-            f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages",
-            headers={
-                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "messaging_product": "whatsapp",
-                "to": phone,
-                "type": "text",
-                "text": {"body": text, "preview_url": False},
-            },
-            timeout=10,
-        )
-        print(f"digest WA send to {phone} {r.status_code}: {r.text[:120]}")
-        ok_any = ok_any or r.ok
+        # One phone failing (network error, bad number) must not block the rest.
+        try:
+            r = requests.post(
+                f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages",
+                headers={
+                    "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "messaging_product": "whatsapp",
+                    "to": phone,
+                    "type": "text",
+                    "text": {"body": text, "preview_url": False},
+                },
+                timeout=10,
+            )
+            print(f"digest WA send to {phone} {r.status_code}: {r.text[:120]}")
+            ok_any = ok_any or r.ok
+        except Exception as e:
+            print(f"digest WA send to {phone} FAILED: {e}")
     return ok_any
 
 
