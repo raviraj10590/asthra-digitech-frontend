@@ -16,7 +16,9 @@ WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN",  "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://kpzprllzgqlqkqgcgrbp.supabase.co")
 SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in Vercel env vars
-OWNER_PHONE     = os.environ.get("OWNER_PHONE",     "918884448141")
+# OWNER_PHONE may be a comma-separated list (same env var the webhook uses).
+OWNER_PHONES    = [p.strip() for p in
+    os.environ.get("OWNER_PHONE", "918884448141").split(",") if p.strip()]
 
 
 def _supa_get(table: str, params: dict) -> list:
@@ -63,22 +65,25 @@ def build_digest() -> str:
 
 
 def send_to_owner(text: str):
-    r = requests.post(
-        f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages",
-        headers={
-            "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "messaging_product": "whatsapp",
-            "to": OWNER_PHONE,
-            "type": "text",
-            "text": {"body": text, "preview_url": False},
-        },
-        timeout=10,
-    )
-    print(f"digest WA send {r.status_code}: {r.text[:120]}")
-    return r.ok
+    ok_any = False
+    for phone in OWNER_PHONES:
+        r = requests.post(
+            f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages",
+            headers={
+                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "messaging_product": "whatsapp",
+                "to": phone,
+                "type": "text",
+                "text": {"body": text, "preview_url": False},
+            },
+            timeout=10,
+        )
+        print(f"digest WA send to {phone} {r.status_code}: {r.text[:120]}")
+        ok_any = ok_any or r.ok
+    return ok_any
 
 
 class handler(BaseHTTPRequestHandler):

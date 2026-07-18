@@ -19,7 +19,7 @@ v2.3 performance changes (no user-visible behavior change):
   - Deploy region pinned to sin1 (same region as Supabase)
 """
 
-import json, os, re, time, tempfile, requests
+import hashlib, hmac, json, os, re, time, tempfile, requests
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
@@ -675,12 +675,36 @@ def send_text(to: str, message: str):
         log_reply_to_crm(to, message)
 
 def notify_owner(message: str):
-    """Instant WhatsApp alert to every number in OWNER_PHONES. Note: outside the
-    24h customer-service window with an owner's own number, Meta rejects
-    free-form text — each owner should message the bot number occasionally
-    to keep their window open."""
+    """Instant WhatsApp alert to every number in OWNER_PHONES.
+
+    Free-form texts are rejected by Meta outside the 24h customer-service
+    window, so when OWNER_ALERT_TEMPLATE is configured (an approved template
+    with a single {{1}} body parameter) we send that instead — templates
+    deliver at any time. Falls back to free-form when the template is unset
+    or its send fails, and logs every outcome so silent loss is impossible."""
+    template = os.environ.get("OWNER_ALERT_TEMPLATE", "").strip()
+    # Meta rejects template parameters containing newlines/tabs.
+    flat = " | ".join(part.strip() for part in message.splitlines() if part.strip())
     for phone in OWNER_PHONES:
         try:
+            if template:
+                r = _wa_post({
+                    "messaging_product": "whatsapp",
+                    "to": phone,
+                    "type": "template",
+                    "template": {
+                        "name": template,
+                        "language": {"code": "en"},
+                        "components": [{
+                            "type": "body",
+                            "parameters": [{"type": "text", "text": flat[:1000]}],
+                        }],
+                    },
+                })
+                if r.ok:
+                    print(f"owner alert -> {phone}: template ok")
+                    continue
+                print(f"owner alert -> {phone}: template FAILED, falling back to text")
             send_text(phone, message)
         except Exception as e:
             print(f"notify_owner error ({phone}): {e}")
@@ -958,6 +982,20 @@ class handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body   = self.rfile.read(length)
 
+        # Webhook authenticity: when META_APP_SECRET is configured, reject any
+        # payload whose X-Hub-Signature-256 doesn't match — otherwise anyone who
+        # discovers this URL can forge messages (including owner commands, since
+        # those trust the payload's 'from' field) and drive WhatsApp sends.
+        app_secret = os.environ.get("META_APP_SECRET", "")
+        if app_secret:
+            sig = self.headers.get("X-Hub-Signature-256", "")
+            expected = "sha256=" + hmac.new(app_secret.encode(), body, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(sig, expected):
+                print("⛔ webhook signature mismatch — payload rejected")
+                self.send_response(403)
+                self.end_headers()
+                return
+
         try:
             data    = json.loads(body)
             entry   = data["entry"][0]
@@ -1118,12 +1156,14 @@ class handler(BaseHTTPRequestHandler):
                 save_messages([(sender, "user", user_text),
                                (sender, "assistant", reply)])
 
-                # Lead extraction every 2nd turn (upsert merges, nothing lost)
+                # Lead extraction: EVERY turn while the chat is short (early
+                # drop-offs are exactly the leads we must not lose), then every
+                # 2nd turn once the conversation is established.
                 history = ctx["history"] + [
                     {"role": "user", "content": user_text},
                     {"role": "assistant", "content": reply},
                 ]
-                if len(history) >= 4 and (len(history) // 2) % 2 == 0:
+                if len(history) >= 4 and (len(history) < 8 or (len(history) // 2) % 2 == 0):
                     lead = extract_lead_info(history)
                     if lead:
                         upsert_lead(sender, lead)
