@@ -217,7 +217,7 @@ def fetch_context(phone: str) -> dict:
     AI history, last inbound message (dedupe), pause state, alert markers.
     Replaces the 5-7 separate queries v2.2 made per message."""
     ctx = {"history": [], "last_user": {}, "paused": False,
-           "vip_alerted": False, "lead_alerted": False}
+           "vip_alerted": False, "lead_alerted": False, "recent_sys": []}
     try:
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
@@ -239,6 +239,9 @@ def fetch_context(phone: str) -> dict:
     for row in rows:  # newest first
         role, content = row.get("role"), row.get("content", "")
         if role == "system":
+            # Generic marker log for the workflow dispatcher's 24h dedupe.
+            if _within_hours(row.get("created_at", ""), 24):
+                ctx["recent_sys"].append(content)
             if content.startswith("BOT_") and not pause_seen:
                 pause_seen = True
                 ctx["paused"] = content == "BOT_PAUSED" and _within_hours(row.get("created_at", ""), 24)
@@ -445,13 +448,21 @@ def extract_lead_info(history: list) -> dict:
                         "summary: ONE short English sentence — who they are, what they want, where the deal stands. "
                         "next_action: ONE imperative sentence telling the salesperson the single best next move "
                         "(e.g. 'Call today and confirm the 30k budget, then send the jewellery portfolio'). "
+                        "actions: an object included ONLY when the customer's recent messages clearly show it, "
+                        "with these optional fields: meeting_requested (bool) + meeting_time (str), "
+                        "callback_requested (bool) + callback_time (str), "
+                        "quotation_requested (bool — they asked for a quote/estimate/proposal), "
+                        "brochure_requested (bool), "
+                        "followup_date (YYYY-MM-DD — they asked to be contacted later; resolve relative "
+                        "dates like 'next week' using the current date), "
+                        "unhappy (bool — frustration, complaint or dissatisfaction) + unhappy_reason (str). "
                         "Only include fields clearly supported by the conversation. "
                         "Return {} if nothing found."
                     ),
                 },
-                {"role": "user", "content": conv},
+                {"role": "user", "content": f"Current date: {datetime.now(IST).strftime('%Y-%m-%d')}\n\n{conv}"},
             ],
-            max_tokens=300,
+            max_tokens=380,
             temperature=0,
         )
         raw = resp.choices[0].message.content.strip()
@@ -981,6 +992,70 @@ def _score_badge(lead: dict):
     badge = "🔥 HOT" if n >= 80 else "🌤 WARM" if n >= 50 else "❄️ COLD"
     return badge, f"{n}/100"
 
+def _assign_owner(lead: dict) -> str:
+    """Deterministic lead routing: political/govt or high-value/hot → primary owner
+    (Raviraj); everyone else → secondary owner when one exists. No AI, no latency."""
+    svc = (lead.get("service_needed") or "").lower()
+    score = _pct(lead.get("lead_score")) or 0
+    hot_or_gov = score >= 80 or any(w in svc for w in ("election", "govt", "government", "political", "campaign"))
+    if hot_or_gov or len(OWNER_PHONES) < 2:
+        return OWNER_PHONES[0]
+    return OWNER_PHONES[1]
+
+def run_workflows(sender: str, lead: dict, ctx: dict):
+    """Execute business workflows the analyst detected. Each fires at most once
+    per chat per 24h via a system marker, so Meta retries and multi-turn chats
+    never double-book. Runs AFTER the customer reply is sent — zero added
+    customer latency. Best-effort: any single workflow failing is logged, not fatal."""
+    actions = lead.get("actions") or {}
+    if not isinstance(actions, dict):
+        return
+    done = set(ctx.get("recent_sys", []))
+
+    def once(marker: str) -> bool:
+        if marker in done:
+            return False
+        done.add(marker)
+        save_message(sender, "system", marker)
+        return True
+
+    try:
+        # 1. Book a meeting
+        if actions.get("meeting_requested") and once("WF_MEETING"):
+            when = actions.get("meeting_time") or "time TBD"
+            notify_owner(f"📅 MEETING requested\nwa.me/{sender} — {when}\n👉 Confirm the slot with them.")
+
+        # 2. Schedule a callback
+        if actions.get("callback_requested") and once("WF_CALLBACK"):
+            when = actions.get("callback_time") or "time TBD"
+            notify_owner(f"📞 CALLBACK requested\nwa.me/{sender} — {when}\n👉 Call them back.")
+
+        # 3. Generate a quotation request
+        if actions.get("quotation_requested") and once("WF_QUOTE"):
+            svc = lead.get("service_needed") or "—"
+            bud = lead.get("budget") or "not stated"
+            notify_owner(f"🧾 QUOTATION request\nwa.me/{sender}\nService: {svc} · Budget: {bud}\n👉 Prepare and send a quote.")
+            log_reply_to_crm(sender, f"🤖 Task: prepare quotation — {svc} (budget {bud})")
+
+        # 5. Create a CRM task (mirrored as an internal note) + 7. schedule follow-up
+        fdate = actions.get("followup_date")
+        if fdate and once("WF_FOLLOWUP"):
+            notify_owner(f"⏰ FOLLOW-UP scheduled\nwa.me/{sender} — {fdate}\n👉 Reach out on that date.")
+            log_reply_to_crm(sender, f"🤖 Task: follow up with this lead on {fdate}")
+
+        # 9. Detect unhappy customer → escalate immediately
+        if actions.get("unhappy") and once("WF_UNHAPPY"):
+            reason = actions.get("unhappy_reason") or "dissatisfaction detected"
+            notify_owner(f"⚠️ UNHAPPY customer\nwa.me/{sender}\nReason: {reason}\n👉 Personal call ASAP — do not let this escalate.")
+
+        # 4. Brochure fallback: analyst caught a brochure ask the regex missed.
+        # (The regex path in do_POST already handles the common case and sends
+        # the PDF; here we only alert so a missed one still reaches a human.)
+        if actions.get("brochure_requested") and "[ಬ್ರೋಚರ್ PDF ಕಳಿಸಲಾಯಿತು]" not in done and once("WF_BROCHURE_FLAG"):
+            notify_owner(f"📄 Customer asked for brochure/details\nwa.me/{sender}\n👉 Confirm they received it.")
+    except Exception as e:
+        print(f"run_workflows error: {e}")
+
 def maybe_alert_lead(sender: str, lead: dict, already_alerted: bool):
     """Owner alert when meaningful lead info is captured — once per chat per 24h.
     Carries the 0-100 sales score, the intent/urgency/authority/budget/close
@@ -1010,6 +1085,9 @@ def maybe_alert_lead(sender: str, lead: dict, already_alerted: bool):
         lines += ["", f"Summary: {lead['summary']}"]
     if lead.get("next_action"):
         lines += [f"👉 Next: {lead['next_action']}"]
+    # 6. Lead assignment — show the routed owner when there's more than one.
+    if len(OWNER_PHONES) > 1:
+        lines += [f"🧑‍💼 Assigned: {_assign_owner(lead)}"]
     notify_owner("\n".join(lines))
 
     # Make the lead readable inside the CRM conversation as an internal note.
@@ -1239,6 +1317,9 @@ class handler(BaseHTTPRequestHandler):
                         upsert_lead(sender, {k: v for k, v in lead.items()
                                              if k in ("name", "company", "service_needed", "budget", "city")})
                         maybe_alert_lead(sender, lead, ctx["lead_alerted"])
+                        # Business workflows the analyst detected (meeting, callback,
+                        # quote, follow-up, unhappy, …). Deduped, best-effort, post-reply.
+                        run_workflows(sender, lead, ctx)
 
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             print(f"Parse error: {e}")
