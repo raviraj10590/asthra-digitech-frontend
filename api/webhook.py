@@ -36,6 +36,14 @@ BROCHURE_URL    = os.environ.get("BROCHURE_URL",    "")
 OWNER_PHONES = [p.strip() for p in
     os.environ.get("OWNER_PHONE", "918884448141,918861369951").split(",") if p.strip()]
 OWNER_PHONE  = OWNER_PHONES[0]  # kept for any code that still expects a single primary number
+# Hierarchical memory (customer profile / rolling summary / business history).
+# One row per phone in MEMORY_TABLE. Entirely env-gated: unset → the bot behaves
+# exactly as before (no reads, no writes, no behaviour change).
+MEMORY_TABLE = os.environ.get("MEMORY_TABLE", "").strip()  # e.g. "customer_memory"
+# A profile fact older than this many days is "stale" — the bot may re-confirm it.
+MEMORY_STALE_DAYS = int(os.environ.get("MEMORY_STALE_DAYS", "30"))
+# Raw turns beyond this get compressed into the rolling summary to save tokens.
+MEMORY_HISTORY_COMPRESS_AT = 8
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "")  # free tier — image understanding
 WELCOME_IMAGE   = os.environ.get("WELCOME_IMAGE",   "https://kpzprllzgqlqkqgcgrbp.supabase.co/storage/v1/object/public/documents/adt-welcome.png")
 # Asthra CRM (byras.shop) — mirror outbound bot replies so conversations appear
@@ -211,6 +219,133 @@ def _within_hours(iso_ts: str, hours: float) -> bool:
         return datetime.now(timezone.utc) - ts < timedelta(hours=hours)
     except Exception:
         return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HIERARCHICAL MEMORY  (profile · rolling summary · business history)
+# Pure helpers below are fully unit-tested; the two I/O functions are env-gated
+# no-ops until MEMORY_TABLE is configured, so nothing changes without a table.
+# ══════════════════════════════════════════════════════════════════════════════
+PROFILE_FIELDS = ("name", "company", "service_needed", "budget", "timeline", "requirements", "city")
+# Volatile facts a customer may revise; refreshed the moment newer info arrives.
+REFRESHABLE = ("budget", "timeline", "requirements", "service_needed")
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def merge_profile(old: dict, new: dict, now: str = None) -> dict:
+    """Merge freshly-extracted lead facts into the stored profile.
+
+    - Each fact is stored as {value, ts}.
+    - A new non-empty value for a REFRESHABLE field ALWAYS overwrites (customer
+      gave newer budget/timeline/requirements) and its ts is bumped.
+    - Non-refreshable facts (name, company, city) fill only if missing.
+    - Untouched facts keep their old value AND old ts (so staleness is real).
+    Pure: no I/O, deterministic given `now`."""
+    now = now or _now_iso()
+    merged = dict(old or {})
+    for k in PROFILE_FIELDS:
+        nv = new.get(k)
+        if nv is None or (isinstance(nv, str) and not nv.strip()):
+            continue
+        cur = merged.get(k)
+        cur_val = cur.get("value") if isinstance(cur, dict) else cur
+        if k in REFRESHABLE:
+            if str(nv) != str(cur_val):          # genuinely newer info
+                merged[k] = {"value": nv, "ts": now}
+        else:
+            if not cur_val:                       # fill-once identity facts
+                merged[k] = {"value": nv, "ts": now}
+    return merged
+
+def profile_value(profile: dict, field: str):
+    v = (profile or {}).get(field)
+    return v.get("value") if isinstance(v, dict) else v
+
+def is_stale(profile: dict, field: str, stale_days: int = None, now: str = None) -> bool:
+    """True if the fact is missing OR older than the stale window — i.e. the bot
+    is allowed to (re-)ask. Fresh known facts return False → never re-asked."""
+    stale_days = MEMORY_STALE_DAYS if stale_days is None else stale_days
+    v = (profile or {}).get(field)
+    if not isinstance(v, dict) or not v.get("value"):
+        return True
+    try:
+        ts = datetime.fromisoformat(str(v["ts"]).replace("Z", "+00:00"))
+        ref = datetime.fromisoformat((now or _now_iso()).replace("Z", "+00:00"))
+        return (ref - ts) > timedelta(days=stale_days)
+    except Exception:
+        return True
+
+def build_memory_context(memory: dict, now: str = None) -> str:
+    """Render the compact MEMORY block injected into the reply prompt. Only
+    known, fresh facts are surfaced (so the model won't re-ask them); stale ones
+    are flagged as confirmable. Empty string when there is nothing worth adding."""
+    if not memory:
+        return ""
+    profile = memory.get("profile") or {}
+    known, confirm = [], []
+    for k in PROFILE_FIELDS:
+        val = profile_value(profile, k)
+        if not val:
+            continue
+        (confirm if is_stale(profile, k, now=now) else known).append(f"{k}={val}")
+    parts = []
+    if known:
+        parts.append("KNOWN (do NOT ask again): " + ", ".join(known))
+    if confirm:
+        parts.append("MAY re-confirm (stale): " + ", ".join(confirm))
+    summary = (memory.get("summary") or "").strip()
+    if summary:
+        parts.append("PRIOR SUMMARY: " + summary)
+    hist = memory.get("history") or []
+    if isinstance(hist, list) and hist:
+        parts.append("BUSINESS HISTORY: " + "; ".join(str(h) for h in hist[-3:]))
+    if not parts:
+        return ""
+    return "CUSTOMER MEMORY —\n" + "\n".join(parts)
+
+def compress_history(history: list, prior_summary: str, new_summary: str) -> tuple:
+    """Decide what to keep raw vs. fold into the summary. Once a chat exceeds
+    MEMORY_HISTORY_COMPRESS_AT turns, older turns live only in the summary,
+    cutting prompt tokens. Returns (summary_to_store, keep_last_n_raw)."""
+    summary = (new_summary or prior_summary or "").strip()
+    if len(history) <= MEMORY_HISTORY_COMPRESS_AT:
+        return summary, len(history)
+    return summary, MEMORY_HISTORY_COMPRESS_AT
+
+def fetch_memory(phone: str) -> dict:
+    """One indexed GET by phone (~50ms same-region). No-op ({}) unless configured."""
+    if not MEMORY_TABLE:
+        return {}
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{MEMORY_TABLE}",
+            headers=_supa_headers(""),
+            params={"phone": f"eq.{phone}", "select": "profile,summary,history", "limit": "1"},
+            timeout=3,
+        )
+        rows = r.json() if r.ok else []
+        return rows[0] if rows else {}
+    except Exception as e:
+        print(f"fetch_memory error: {e}")
+        return {}
+
+def update_memory(phone: str, lead: dict, new_summary: str, history: list, existing: dict):
+    """Merge profile + roll summary, then upsert. Post-reply, best-effort, gated."""
+    if not MEMORY_TABLE:
+        return
+    try:
+        profile = merge_profile(existing.get("profile") or {}, lead or {})
+        summary, _ = compress_history(history, existing.get("summary") or "", new_summary or "")
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/{MEMORY_TABLE}",
+            headers=_supa_headers("resolution=merge-duplicates"),
+            json={"phone": phone, "profile": profile, "summary": summary,
+                  "updated_at": _now_iso()},
+            timeout=3,
+        )
+    except Exception as e:
+        print(f"update_memory error: {e}")
 
 def fetch_context(phone: str) -> dict:
     """ONE query returns everything the handler needs for this chat:
@@ -602,11 +737,17 @@ def gemini_one_liner(image_bytes: bytes, mime: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # AI REPLY GENERATION
 # ══════════════════════════════════════════════════════════════════════════════
-def generate_reply(phone: str, user_message: str, history: list = None) -> str:
+def generate_reply(phone: str, user_message: str, history: list = None, memory: dict = None) -> str:
     if history is None:  # rare path (unknown button) — fetch on demand
         history = fetch_context(phone)["history"]
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # Hierarchical memory: known/fresh facts + prior summary, so the bot never
+    # re-asks answered questions. Injected after the static prompt (cache-safe).
+    mem_ctx = build_memory_context(memory) if memory else ""
+    if mem_ctx:
+        messages.append({"role": "system", "content": mem_ctx})
 
     # Political intelligence: constituency facts + live headlines when relevant.
     # Injected AFTER the static prompt so OpenAI's automatic prefix caching
@@ -618,7 +759,10 @@ def generate_reply(phone: str, user_message: str, history: list = None) -> str:
     if intel:
         messages.append({"role": "system", "content": intel})
 
-    messages.extend(history[-10:])
+    # When memory holds a summary of older turns, only the most recent raw turns
+    # are needed — the summary carries the rest, cutting tokens on long chats.
+    keep = MEMORY_HISTORY_COMPRESS_AT if (memory and (memory.get("summary") or "").strip()) else 10
+    messages.extend(history[-keep:])
     messages.append({"role": "user", "content": user_message})
 
     try:
@@ -1243,6 +1387,7 @@ class handler(BaseHTTPRequestHandler):
 
             # ── ONE context fetch for everything below ────────────────────
             ctx = fetch_context(sender)
+            memory = fetch_memory(sender)  # env-gated: {} until MEMORY_TABLE is set
 
             # ── Meta retry deduplication ──────────────────────────────────
             if is_duplicate_webhook(ctx, user_text):
@@ -1296,7 +1441,7 @@ class handler(BaseHTTPRequestHandler):
 
             # ── Normal AI reply ───────────────────────────────────────────
             else:
-                reply = generate_reply(sender, user_text, history=ctx["history"])
+                reply = generate_reply(sender, user_text, history=ctx["history"], memory=memory)
                 print(f"🤖 {reply[:80]}")
                 send_text(sender, reply + after_hours_note())
                 save_messages([(sender, "user", user_text),
@@ -1320,6 +1465,9 @@ class handler(BaseHTTPRequestHandler):
                         # Business workflows the analyst detected (meeting, callback,
                         # quote, follow-up, unhappy, …). Deduped, best-effort, post-reply.
                         run_workflows(sender, lead, ctx)
+                        # Hierarchical memory: merge fresh facts + roll summary.
+                        # Post-reply, env-gated, best-effort — never blocks the customer.
+                        update_memory(sender, lead, lead.get("summary", ""), history, memory)
 
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             print(f"Parse error: {e}")

@@ -8,6 +8,10 @@
     {
       "src": "api/digest.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/evaluate.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
@@ -22,12 +26,20 @@
     {
       "src": "/api/digest",
       "dest": "api/digest.py"
+    },
+    {
+      "src": "/api/evaluate",
+      "dest": "api/evaluate.py"
     }
   ],
   "crons": [
     {
       "path": "/api/digest",
       "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/evaluate",
+      "schedule": "0 4 * * *"
     }
   ]
 }
