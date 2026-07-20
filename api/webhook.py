@@ -1372,10 +1372,19 @@ class handler(BaseHTTPRequestHandler):
                 self._ok(); return
 
             else:
-                # Sticker, contact, location etc. — acknowledge
+                # Sticker, contact, location, poll, view-once, or Meta's
+                # "unsupported" type. We cannot read the content — so we must
+                # both RECORD it (else it is invisible in CRM/history/digest)
+                # and ALERT the owner (else a real customer is silently lost).
                 send_text(sender,
                     "ನಿಮ್ಮ ಸಂದೇಶ ಸ್ವೀಕರಿಸಿದ್ದೇವೆ 🙏 "
                     "ಪ್ರಶ್ನೆ ಅಥವಾ ವಿವರ ಟೈಪ್ ಮಾಡಿ."
+                )
+                save_message(sender, "user", f"[{msg_type} ಸಂದೇಶ — ಬಾಟ್ ಓದಲಾಗಲಿಲ್ಲ]")
+                notify_owner(
+                    f"❓ Unreadable message ({msg_type}) from wa.me/{sender}\n"
+                    "The bot could not read it and sent a generic reply.\n"
+                    "⚡ Open WhatsApp to see what they actually sent."
                 )
                 self._ok(); return
 
