@@ -554,18 +554,7 @@ def after_hours_note() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # LEAD EXTRACTION (GPT-4o-mini — every 2nd turn; upsert merges so nothing lost)
 # ══════════════════════════════════════════════════════════════════════════════
-def extract_lead_info(history: list) -> dict:
-    """Extract structured lead info from conversation history."""
-    if len(history) < 3:
-        return {}
-    try:
-        conv = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in history[-10:])
-        resp = get_openai().chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
+EXTRACTION_SYSTEM_PROMPT = (
                         "You are a sales analyst. Extract lead intelligence from this WhatsApp "
                         "sales conversation. Return ONLY a valid JSON object with these optional fields: "
                         "name, company, service_needed, budget, city, timeline, requirements, "
@@ -593,8 +582,22 @@ def extract_lead_info(history: list) -> dict:
                         "unhappy (bool — frustration, complaint or dissatisfaction) + unhappy_reason (str). "
                         "Only include fields clearly supported by the conversation. "
                         "Return {} if nothing found."
-                    ),
-                },
+)
+
+
+def extract_lead_info(history: list) -> dict:
+    """Extract structured lead info from conversation history.
+    Tries OpenAI, then falls back to Gemini so lead capture survives an
+    OpenAI outage or quota exhaustion."""
+    if len(history) < 3:
+        return {}
+    conv = ""
+    try:
+        conv = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in history[-10:])
+        resp = get_openai().chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
                 {"role": "user", "content": f"Current date: {datetime.now(IST).strftime('%Y-%m-%d')}\n\n{conv}"},
             ],
             max_tokens=380,
@@ -604,8 +607,23 @@ def extract_lead_info(history: list) -> dict:
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         return json.loads(match.group()) if match else {}
     except Exception as e:
-        print(f"extract_lead_info error: {e}")
-        return {}
+        print(f"extract_lead_info error (openai): {e}")
+
+    # Fallback to Gemini so lead capture, scoring and alerts keep working even
+    # when OpenAI is down — a silent loss of leads is worse than a slower path.
+    try:
+        gem_msgs = [
+            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": conv},
+        ]
+        raw = generate_reply_gemini(gem_msgs)
+        match = re.search(r'\{.*\}', raw or "", re.DOTALL)
+        if match:
+            print("↪️ lead extraction via Gemini fallback")
+            return json.loads(match.group())
+    except Exception as e:
+        print(f"extract_lead_info error (gemini): {e}")
+    return {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -774,11 +792,70 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"generate_reply error: {e}")
-        return (
-            "ನಮಸ್ಕಾರ 🙏 ಸ್ವಲ್ಪ ತಾಂತ್ರಿಕ ಸಮಸ್ಯೆ ಆಗಿದೆ. "
-            "ತುರ್ತಿಗಾಗಿ ಕರೆ ಮಾಡಿ: +91 88844 48141"
+        print(f"generate_reply error (openai): {e}")
+
+    # ── Fallback: Gemini ──────────────────────────────────────────────────
+    # OpenAI can fail for reasons outside our control (quota exhausted, key
+    # rotated, outage). Rather than telling a live customer "technical problem",
+    # retry the same conversation on Gemini. Only if BOTH fail do we apologise.
+    gem = generate_reply_gemini(messages)
+    if gem:
+        print("↪️ replied via Gemini fallback")
+        return gem
+
+    print("generate_reply: both providers failed")
+    return (
+        "ನಮಸ್ಕಾರ 🙏 ಸ್ವಲ್ಪ ತಾಂತ್ರಿಕ ಸಮಸ್ಯೆ ಆಗಿದೆ. "
+        "ತುರ್ತಿಗಾಗಿ ಕರೆ ಮಾಡಿ: +91 88844 48141"
+    )
+
+
+def _to_gemini_payload(messages: list) -> dict:
+    """Convert OpenAI-style messages to Gemini's generateContent format.
+
+    system → systemInstruction (merged), assistant → 'model', user → 'user'.
+    Pure function: no I/O, unit-tested."""
+    sys_parts, contents = [], []
+    for m in messages:
+        role, content = m.get("role"), (m.get("content") or "")
+        if not content:
+            continue
+        if role == "system":
+            sys_parts.append(content)
+        else:
+            contents.append({
+                "role": "model" if role == "assistant" else "user",
+                "parts": [{"text": content}],
+            })
+    payload = {
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": 400, "temperature": 0.75},
+    }
+    if sys_parts:
+        payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(sys_parts)}]}
+    return payload
+
+
+def generate_reply_gemini(messages: list) -> str:
+    """Same conversation, Gemini 2.5 Flash. Returns '' on any failure so the
+    caller can fall through to the apology text."""
+    if not GEMINI_API_KEY:
+        print("gemini fallback unavailable: GEMINI_API_KEY not set")
+        return ""
+    try:
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            json=_to_gemini_payload(messages),
+            timeout=15,
         )
+        if not r.ok:
+            print(f"gemini fallback {r.status_code}: {r.text[:160]}")
+            return ""
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        print(f"gemini fallback error: {e}")
+        return ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
