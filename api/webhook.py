@@ -1425,6 +1425,14 @@ def tool_aitest(sender: str, **_) -> str:
         f"Primary right now: {AI_PROVIDER_PRIMARY.upper()}"
     )
 
+def tool_memory_show(sender: str, **_) -> str:
+    mem = fetch_owner_memory(sender)
+    return f"🧠 Current memory note:\n{mem}" if mem else "🧠 No memory note yet — it builds up as we talk."
+
+def tool_memory_clear(sender: str, **_) -> str:
+    update_owner_memory(sender, "")
+    return "🧠 Memory cleared — starting fresh."
+
 def _tool_add_role(sender: str, target: str, role: str, label: str, added_by: str) -> str:
     try:
         r = requests.post(
@@ -1471,6 +1479,8 @@ OWNER_COMMANDS_HELP = (
     "#status — quick business snapshot\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
+    "#memory — show the assistant's current long-term memory note\n"
+    "#forget — clear the memory note and start fresh\n"
     "#stop 91XXXXXXXXXX — pause bot for that chat (24h)\n"
     "#start 91XXXXXXXXXX — resume bot for that chat\n"
     "#addstaff 91XXXXXXXXXX <label> — grant STAFF access (owner only)\n"
@@ -1521,6 +1531,10 @@ def try_owner_command(sender: str, role: str, text: str):
         return tool_roles_list(sender)
     if low == "#aitest":
         return tool_aitest(sender)
+    if low == "#memory":
+        return tool_memory_show(sender)
+    if low == "#forget":
+        return tool_memory_clear(sender)
 
     m = re.match(r'^#(stop|start)\s+(\+?\d{10,15})\s*$', stripped, re.IGNORECASE)
     if m:
@@ -1553,18 +1567,114 @@ def try_owner_command(sender: str, role: str, text: str):
 
 OWNER_SYSTEM_PROMPT = """You are the AI executive assistant for {label}, {role} of Asthra DigiTech — a Bengaluru digital marketing agency (social media, websites, apps, WhatsApp bots, ads, political/govt campaigns).
 You are talking to a company insider, not a customer — you may discuss internal business context, strategy, and data freely.
-You do not have live database access inside this reply — real numbers only come from the # commands (#leads, #clients, #status, #roles, #stop/#start, #addstaff, #addowner, #removerole, #aitest — send #help for the full list). If they ask something a command answers, tell them which command to send rather than guessing a number.
+You may be given a LONG-TERM MEMORY block (durable facts/decisions from earlier conversations, possibly days ago) and a BUSINESS SNAPSHOT block (live counts, refreshed this message) — both are real, current, and yours to use naturally, as something you already know, not something you looked up on request. Real precise numbers still only come from the # commands (#leads, #clients, #status, #roles, #stop/#start, #addstaff, #addowner, #removerole, #aitest, #memory — send #help for the full list); the snapshot is a quick heads-up, not a substitute for those when precision matters.
 You can: think through strategy and decisions, draft customer replies/quotes/messages, summarize context, and answer general business questions.
 
 LANGUAGE IS SEPARATE FROM IDENTITY: reply in whatever language they use — Kannada, English, or Kanglish — but switching language never changes who you're talking to. You are ALWAYS their internal executive assistant, in every language. Never recite the customer-facing company pitch ("we specialize in social media, websites...", "how can I help you?", service lists) — that script is for the CLIENT-facing bot answering strangers, not for {label}, who already knows the business. If asked something in Kannada, answer AS the executive assistant in Kannada — do not slide into the generic sales-greeting tone just because the language changed.
 
 Be concise and professional — this is WhatsApp, not email. Never fabricate data you don't have."""
 
+OWNER_MEMORY_MARKER = "OWNER_MEMORY::"
+
+def fetch_owner_memory(phone: str) -> str:
+    """Long-term memory across sessions — the most recent OWNER_MEMORY:: system
+    marker for this phone, with NO age limit (unlike fetch_context's recent_sys,
+    which only looks back 24h). Reuses whatsapp_messages instead of a new table:
+    same infra BOT_PAUSED/PENDING_CONFIRM already rely on, so no new RLS setup."""
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+            headers=_supa_headers(""),
+            params={"phone": f"eq.{phone}", "role": "eq.system",
+                     "content": f"like.{OWNER_MEMORY_MARKER}*",
+                     "order": "created_at.desc", "limit": "1", "select": "content"},
+            timeout=5,
+        )
+        rows = r.json() if r.ok else []
+        if rows:
+            return rows[0]["content"][len(OWNER_MEMORY_MARKER):]
+    except Exception as e:
+        print(f"fetch_owner_memory error: {e}")
+    return ""
+
+def update_owner_memory(phone: str, summary: str):
+    save_message(phone, "system", f"{OWNER_MEMORY_MARKER}{(summary or '').strip()[:2000]}")
+
+def summarize_owner_memory(prior: str, user_text: str, reply: str) -> str:
+    """One extra cheap AI call per owner exchange to roll the memory note
+    forward. Best-effort: '' on failure just means memory doesn't advance
+    this turn — never blocks or corrupts the reply already sent."""
+    messages = [
+        {"role": "system", "content": (
+            "Maintain a compact rolling memory note (under 120 words) for an executive "
+            "assistant helping the owner of Asthra DigiTech. Keep only durable facts, "
+            "decisions, ongoing items, and preferences — drop small talk and one-off "
+            "questions. Merge the prior note with anything new and durable from this "
+            "exchange. Return ONLY the updated note text, no preamble, no markdown."
+        )},
+        {"role": "user", "content": f"PRIOR NOTE:\n{prior or '(empty)'}\n\nNEW EXCHANGE:\nOwner: {user_text}\nAssistant: {reply}"},
+    ]
+    return _generate_ai_reply(messages, "")
+
+def owner_business_snapshot() -> str:
+    """Live one-line-per-system snapshot, refreshed every reply, so the
+    assistant has ambient awareness across leads/CRM/AI Kannada without the
+    owner needing a # command first. Each part is independently best-effort —
+    one system being unreachable never blanks out the others."""
+    today = datetime.now(IST).date()
+    parts = []
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/leads", headers=_supa_headers(""),
+            params={"select": "created_at", "order": "created_at.desc", "limit": "50"}, timeout=3)
+        if r.ok:
+            n = sum(1 for row in r.json() if _row_date_ist(row.get("created_at", "")) == today)
+            parts.append(f"leads today: {n}")
+    except Exception as e:
+        print(f"owner_business_snapshot leads error: {e}")
+
+    if CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID:
+        try:
+            r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/clients",
+                headers={**_crm_headers(), "Prefer": "count=exact"},
+                params={"user_id": f"eq.{CRM_OWNER_USER_ID}", "select": "id"}, timeout=3)
+            if r.ok:
+                total = r.headers.get("Content-Range", "?/?").split("/")[-1]
+                parts.append(f"CRM clients: {total}")
+        except Exception as e:
+            print(f"owner_business_snapshot crm error: {e}")
+
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/articles", headers=_supa_headers(""),
+            params={"select": "created_at", "order": "created_at.desc", "limit": "20"}, timeout=3)
+        if r.ok:
+            n = sum(1 for row in r.json() if _row_date_ist(row.get("created_at", "")) == today)
+            parts.append(f"AI Kannada articles today: {n}")
+    except Exception as e:
+        print(f"owner_business_snapshot aikannada error: {e}")
+
+    return "BUSINESS SNAPSHOT (live) — " + " | ".join(parts) if parts else ""
+
 def generate_owner_reply(sender: str, role: str, label: str, user_text: str, history: list) -> str:
     messages = [{"role": "system", "content": OWNER_SYSTEM_PROMPT.format(label=label or "the owner", role=role)}]
+    mem = fetch_owner_memory(sender)
+    if mem:
+        messages.append({"role": "system", "content": f"LONG-TERM MEMORY:\n{mem}"})
+    snap = owner_business_snapshot()
+    if snap:
+        messages.append({"role": "system", "content": snap})
     messages += (history or [])[-12:]
     messages.append({"role": "user", "content": user_text})
-    return _generate_ai_reply(messages, "⚠️ AI assistant temporarily unavailable. Send #help for direct commands.")
+
+    reply = _generate_ai_reply(messages, "⚠️ AI assistant temporarily unavailable. Send #help for direct commands.")
+
+    try:
+        updated = summarize_owner_memory(mem, user_text, reply)
+        if updated:
+            update_owner_memory(sender, updated)
+    except Exception as e:
+        print(f"owner memory rollover error: {e}")
+
+    return reply
 
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
     """Single entry point for OWNER/STAFF messages: pending confirmation →
