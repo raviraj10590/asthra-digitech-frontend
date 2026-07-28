@@ -59,6 +59,11 @@ MEMORY_STALE_DAYS = int(os.environ.get("MEMORY_STALE_DAYS", "30"))
 # Raw turns beyond this get compressed into the rolling summary to save tokens.
 MEMORY_HISTORY_COMPRESS_AT = 8
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "")  # free tier — image understanding
+# Which provider tries first for text replies (both pipelines): "openai" or
+# "gemini". Flip via this env var alone — no code change/redeploy logic needed
+# — e.g. set to "gemini" while OpenAI quota/billing is being sorted out, then
+# back to "openai" once restored. The other provider is always the fallback.
+AI_PROVIDER_PRIMARY = os.environ.get("AI_PROVIDER_PRIMARY", "openai").strip().lower()
 WELCOME_IMAGE   = os.environ.get("WELCOME_IMAGE",   "https://kpzprllzgqlqkqgcgrbp.supabase.co/storage/v1/object/public/documents/adt-welcome.png")
 # Asthra CRM (byras.shop) — separate Supabase project. Mirrors conversations
 # into whatsapp_messages AND syncs qualified leads into clients, so nothing
@@ -867,31 +872,9 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
     messages.extend(history[-keep:])
     messages.append({"role": "user", "content": user_message})
 
-    try:
-        resp = get_openai().chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            max_tokens=400,
-            temperature=0.75,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"generate_reply error (openai): {e}")
-
-    # ── Fallback: Gemini ──────────────────────────────────────────────────
-    # OpenAI can fail for reasons outside our control (quota exhausted, key
-    # rotated, outage). Rather than telling a live customer "technical problem",
-    # retry the same conversation on Gemini. Only if BOTH fail do we apologise.
-    gem = generate_reply_gemini(messages)
-    if gem:
-        print("↪️ replied via Gemini fallback")
-        return gem
-
-    print("generate_reply: both providers failed")
-    return (
+    return _generate_ai_reply(messages,
         "ನಮಸ್ಕಾರ 🙏 ಸ್ವಲ್ಪ ತಾಂತ್ರಿಕ ಸಮಸ್ಯೆ ಆಗಿದೆ. "
-        "ತುರ್ತಿಗಾಗಿ ಕರೆ ಮಾಡಿ: +91 88844 48141"
-    )
+        "ತುರ್ತಿಗಾಗಿ ಕರೆ ಮಾಡಿ: +91 88844 48141")
 
 
 def _to_gemini_payload(messages: list) -> dict:
@@ -940,6 +923,34 @@ def generate_reply_gemini(messages: list) -> str:
     except Exception as e:
         print(f"gemini fallback error: {e}")
         return ""
+
+def _call_openai(messages: list) -> str:
+    """Same contract as generate_reply_gemini: '' on any failure, so callers
+    can treat both providers identically."""
+    try:
+        resp = get_openai().chat.completions.create(
+            model="gpt-4o-mini", messages=messages, max_tokens=400, temperature=0.75,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"openai error: {e}")
+        return ""
+
+def _generate_ai_reply(messages: list, apology: str) -> str:
+    """Try both text providers in the order AI_PROVIDER_PRIMARY sets, and only
+    fall back to `apology` if both fail. One place to hold provider order and
+    failure logging — generate_reply and generate_owner_reply both call this
+    instead of each carrying its own duplicate OpenAI/Gemini try-fallback."""
+    providers = ([_call_openai, generate_reply_gemini] if AI_PROVIDER_PRIMARY != "gemini"
+                 else [generate_reply_gemini, _call_openai])
+    for i, provider in enumerate(providers):
+        result = provider(messages)
+        if result:
+            if i > 0:
+                print(f"↪️ replied via fallback provider ({provider.__name__})")
+            return result
+    print("_generate_ai_reply: both providers failed")
+    return apology
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1395,6 +1406,20 @@ def tool_roles_list(sender: str, **_) -> str:
         lines.append(f"• {row['role']}: wa.me/{row['phone']}" + (f" ({row['label']})" if row.get("label") else ""))
     return "\n".join(lines)
 
+def tool_aitest(sender: str, **_) -> str:
+    """Calls both text providers directly (bypassing AI_PROVIDER_PRIMARY
+    ordering) so a status check is possible regardless of which one is
+    currently primary — useful right after a quota/billing change."""
+    probe = [{"role": "user", "content": "Reply with exactly one word: OK"}]
+    openai_result = _call_openai(probe)
+    gemini_result = generate_reply_gemini(probe)
+    return (
+        "🧪 AI provider test:\n"
+        f"OpenAI: {'✅ ' + openai_result[:30] if openai_result else '❌ failed (see Vercel logs)'}\n"
+        f"Gemini: {'✅ ' + gemini_result[:30] if gemini_result else '❌ failed (see Vercel logs)'}\n"
+        f"Primary right now: {AI_PROVIDER_PRIMARY.upper()}"
+    )
+
 def _tool_add_role(sender: str, target: str, role: str, label: str, added_by: str) -> str:
     try:
         r = requests.post(
@@ -1440,6 +1465,7 @@ OWNER_COMMANDS_HELP = (
     "#clients — CRM client count + latest\n"
     "#status — quick business snapshot\n"
     "#roles — list OWNER/STAFF numbers\n"
+    "#aitest — check OpenAI + Gemini are both reachable right now\n"
     "#stop 91XXXXXXXXXX — pause bot for that chat (24h)\n"
     "#start 91XXXXXXXXXX — resume bot for that chat\n"
     "#addstaff 91XXXXXXXXXX <label> — grant STAFF access (owner only)\n"
@@ -1488,6 +1514,8 @@ def try_owner_command(sender: str, role: str, text: str):
         return tool_status(sender)
     if low == "#roles":
         return tool_roles_list(sender)
+    if low == "#aitest":
+        return tool_aitest(sender)
 
     m = re.match(r'^#(stop|start)\s+(\+?\d{10,15})\s*$', stripped, re.IGNORECASE)
     if m:
@@ -1528,25 +1556,7 @@ def generate_owner_reply(sender: str, role: str, label: str, user_text: str, his
     messages = [{"role": "system", "content": OWNER_SYSTEM_PROMPT.format(label=label or "the owner", role=role)}]
     messages += (history or [])[-12:]
     messages.append({"role": "user", "content": user_text})
-
-    try:
-        resp = get_openai().chat.completions.create(
-            model="gpt-4o-mini", messages=messages, temperature=0.4, max_tokens=400,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"generate_owner_reply error (openai): {e}")
-
-    # Same OpenAI→Gemini resilience the customer pipeline already has (see
-    # generate_reply) — an owner shouldn't see "technical problem" any more
-    # than a customer should when a working fallback provider is available.
-    gem = generate_reply_gemini(messages)
-    if gem:
-        print("↪️ owner reply via Gemini fallback")
-        return gem
-
-    print("generate_owner_reply: both providers failed")
-    return "⚠️ AI assistant temporarily unavailable. Send #help for direct commands."
+    return _generate_ai_reply(messages, "⚠️ AI assistant temporarily unavailable. Send #help for direct commands.")
 
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
     """Single entry point for OWNER/STAFF messages: pending confirmation →
