@@ -46,12 +46,19 @@ MEMORY_STALE_DAYS = int(os.environ.get("MEMORY_STALE_DAYS", "30"))
 MEMORY_HISTORY_COMPRESS_AT = 8
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "")  # free tier — image understanding
 WELCOME_IMAGE   = os.environ.get("WELCOME_IMAGE",   "https://kpzprllzgqlqkqgcgrbp.supabase.co/storage/v1/object/public/documents/adt-welcome.png")
-# Asthra CRM (byras.shop) — mirror outbound bot replies so conversations appear
-# complete there. All three must be set or logging is a silent no-op.
-# RLS on the CRM side only permits anon INSERTs that are outbound + this user_id.
-CRM_SUPABASE_URL      = os.environ.get("CRM_SUPABASE_URL",      "")
-CRM_SUPABASE_ANON_KEY = os.environ.get("CRM_SUPABASE_ANON_KEY", "")
-CRM_OWNER_USER_ID     = os.environ.get("CRM_OWNER_USER_ID",     "")
+# Asthra CRM (byras.shop) — separate Supabase project. Mirrors conversations
+# into whatsapp_messages AND syncs qualified leads into clients, so nothing
+# captured by the bot has to be re-typed by hand.
+# NOTE (2026-07-28 fix): CRM RLS only allows the `anon` role to insert
+# whatsapp_messages rows where direction='inbound' — every previous outbound
+# mirror call using the anon key was silently rejected (caught by the bare
+# except and swallowed). All CRM writes now use the service_role key, which
+# bypasses RLS entirely — this project's clients table also requires a
+# NOT NULL user_id with no anon-write policy at all, so service_role is the
+# only way to write leads regardless.
+CRM_SUPABASE_URL         = os.environ.get("CRM_SUPABASE_URL",         "")
+CRM_SUPABASE_SERVICE_KEY = os.environ.get("CRM_SUPABASE_SERVICE_KEY", "")
+CRM_OWNER_USER_ID        = os.environ.get("CRM_OWNER_USER_ID",        "")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -410,7 +417,8 @@ def save_messages(items: list):
         print(f"save_messages error: {e}")
 
 def upsert_lead(phone: str, data: dict):
-    """Insert or update lead info (merge on phone)."""
+    """Insert or update lead info (merge on phone). Also mirrors into the
+    Asthra CRM's clients table so every captured lead reaches the CRM."""
     if not data:
         return
     try:
@@ -423,6 +431,7 @@ def upsert_lead(phone: str, data: dict):
         print(f"lead upserted: {data}")
     except Exception as e:
         print(f"upsert_lead error: {e}")
+    sync_lead_to_crm(phone, data)
 
 def is_duplicate_webhook(ctx: dict, text: str) -> bool:
     """Meta retries webhooks — identical text within 60s is a retry, not a person."""
@@ -885,21 +894,23 @@ def send_typing(message_id: str):
     except Exception as e:
         print(f"send_typing error: {e}")
 
+def _crm_headers():
+    return {
+        "apikey": CRM_SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {CRM_SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+
 def log_reply_to_crm(phone: str, body: str):
     """Mirror an outbound bot reply into the Asthra CRM's whatsapp_messages.
     Fire-and-forget: any failure is printed and swallowed — CRM logging must
     never delay or break a customer reply."""
-    if not (CRM_SUPABASE_URL and CRM_SUPABASE_ANON_KEY and CRM_OWNER_USER_ID):
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
         return
     try:
-        requests.post(
+        r = requests.post(
             f"{CRM_SUPABASE_URL}/rest/v1/whatsapp_messages",
-            headers={
-                "apikey": CRM_SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {CRM_SUPABASE_ANON_KEY}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            },
+            headers={**_crm_headers(), "Prefer": "return=minimal"},
             json={
                 "user_id": CRM_OWNER_USER_ID,
                 "phone": phone,
@@ -911,8 +922,75 @@ def log_reply_to_crm(phone: str, body: str):
             },
             timeout=3,
         )
+        if not r.ok:
+            print(f"log_reply_to_crm failed: {r.status_code} {r.text}")
     except Exception as e:
         print(f"log_reply_to_crm error: {e}")
+
+def sync_lead_to_crm(phone: str, data: dict):
+    """Upsert a captured lead into the Asthra CRM's clients table so every
+    lead the bot qualifies shows up in the CRM without manual re-entry.
+    Fire-and-forget: never let CRM sync delay or break a customer reply.
+    clients has no unique constraint on phone, so this is a query-then-
+    insert-or-update rather than a Prefer:resolution=merge-duplicates upsert."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID) or not data:
+        return
+    try:
+        notes_parts = []
+        if data.get("service_needed"):
+            notes_parts.append(f"Service: {data['service_needed']}")
+        if data.get("budget"):
+            notes_parts.append(f"Budget: {data['budget']}")
+        if data.get("city"):
+            notes_parts.append(f"City: {data['city']}")
+        if data.get("company"):
+            notes_parts.append(f"Company: {data['company']}")
+        notes = " | ".join(notes_parts)
+
+        existing = requests.get(
+            f"{CRM_SUPABASE_URL}/rest/v1/clients",
+            headers=_crm_headers(),
+            params={"phone": f"eq.{phone}", "user_id": f"eq.{CRM_OWNER_USER_ID}", "select": "id,notes"},
+            timeout=3,
+        )
+        if not existing.ok:
+            print(f"sync_lead_to_crm lookup failed: {existing.status_code} {existing.text}")
+            return
+        rows = existing.json()
+
+        if rows:
+            patch = {}
+            if data.get("name"):
+                patch["name"] = data["name"]
+            if notes:
+                prior = rows[0].get("notes") or ""
+                patch["notes"] = f"{prior}\n{notes}".strip() if prior and notes not in prior else (prior or notes)
+            if patch:
+                r = requests.patch(
+                    f"{CRM_SUPABASE_URL}/rest/v1/clients",
+                    headers={**_crm_headers(), "Prefer": "return=minimal"},
+                    params={"id": f"eq.{rows[0]['id']}"},
+                    json=patch,
+                    timeout=3,
+                )
+                if not r.ok:
+                    print(f"sync_lead_to_crm update failed: {r.status_code} {r.text}")
+        else:
+            r = requests.post(
+                f"{CRM_SUPABASE_URL}/rest/v1/clients",
+                headers={**_crm_headers(), "Prefer": "return=minimal"},
+                json={
+                    "user_id": CRM_OWNER_USER_ID,
+                    "name": data.get("name") or f"WhatsApp Lead {phone}",
+                    "phone": phone,
+                    "notes": notes or "Captured via WhatsApp AI bot",
+                },
+                timeout=3,
+            )
+            if not r.ok:
+                print(f"sync_lead_to_crm insert failed: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"sync_lead_to_crm error: {e}")
 
 def send_text(to: str, message: str):
     _wa_post({
