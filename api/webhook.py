@@ -64,6 +64,11 @@ GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "")  # free tier — image u
 # — e.g. set to "gemini" while OpenAI quota/billing is being sorted out, then
 # back to "openai" once restored. The other provider is always the fallback.
 AI_PROVIDER_PRIMARY = os.environ.get("AI_PROVIDER_PRIMARY", "openai").strip().lower()
+# Chat completion model for both pipelines (not lead extraction/Whisper, which
+# stay on mini — see _call_openai). Defaults to the flagship covered by the
+# complimentary 250k-tokens/day data-sharing tier; override here if that
+# tier's model list changes instead of hunting down the literal in code.
+OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-5.4").strip()
 WELCOME_IMAGE   = os.environ.get("WELCOME_IMAGE",   "https://kpzprllzgqlqkqgcgrbp.supabase.co/storage/v1/object/public/documents/adt-welcome.png")
 # Asthra CRM (byras.shop) — separate Supabase project. Mirrors conversations
 # into whatsapp_messages AND syncs qualified leads into clients, so nothing
@@ -929,7 +934,7 @@ def _call_openai(messages: list) -> str:
     can treat both providers identically."""
     try:
         resp = get_openai().chat.completions.create(
-            model="gpt-4o-mini", messages=messages, max_tokens=400, temperature=0.75,
+            model=OPENAI_CHAT_MODEL, messages=messages, max_tokens=400, temperature=0.75,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
