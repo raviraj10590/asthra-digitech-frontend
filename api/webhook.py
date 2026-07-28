@@ -1525,18 +1525,28 @@ You can: think through strategy and decisions, draft customer replies/quotes/mes
 Be concise and professional — this is WhatsApp, not email. Never fabricate data you don't have."""
 
 def generate_owner_reply(sender: str, role: str, label: str, user_text: str, history: list) -> str:
+    messages = [{"role": "system", "content": OWNER_SYSTEM_PROMPT.format(label=label or "the owner", role=role)}]
+    messages += (history or [])[-12:]
+    messages.append({"role": "user", "content": user_text})
+
     try:
-        client = get_openai()
-        messages = [{"role": "system", "content": OWNER_SYSTEM_PROMPT.format(label=label or "the owner", role=role)}]
-        messages += (history or [])[-12:]
-        messages.append({"role": "user", "content": user_text})
-        resp = client.chat.completions.create(
+        resp = get_openai().chat.completions.create(
             model="gpt-4o-mini", messages=messages, temperature=0.4, max_tokens=400,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"generate_owner_reply error: {e}")
-        return "⚠️ AI assistant temporarily unavailable. Send #help for direct commands."
+        print(f"generate_owner_reply error (openai): {e}")
+
+    # Same OpenAI→Gemini resilience the customer pipeline already has (see
+    # generate_reply) — an owner shouldn't see "technical problem" any more
+    # than a customer should when a working fallback provider is available.
+    gem = generate_reply_gemini(messages)
+    if gem:
+        print("↪️ owner reply via Gemini fallback")
+        return gem
+
+    print("generate_owner_reply: both providers failed")
+    return "⚠️ AI assistant temporarily unavailable. Send #help for direct commands."
 
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
     """Single entry point for OWNER/STAFF messages: pending confirmation →
