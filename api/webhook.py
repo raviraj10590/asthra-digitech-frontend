@@ -1600,21 +1600,19 @@ def fetch_owner_memory(phone: str) -> str:
 def update_owner_memory(phone: str, summary: str):
     save_message(phone, "system", f"{OWNER_MEMORY_MARKER}{(summary or '').strip()[:2000]}")
 
-def summarize_owner_memory(prior: str, user_text: str, reply: str) -> str:
-    """One extra cheap AI call per owner exchange to roll the memory note
-    forward. Best-effort: '' on failure just means memory doesn't advance
-    this turn — never blocks or corrupts the reply already sent."""
-    messages = [
-        {"role": "system", "content": (
-            "Maintain a compact rolling memory note (under 120 words) for an executive "
-            "assistant helping the owner of Asthra DigiTech. Keep only durable facts, "
-            "decisions, ongoing items, and preferences — drop small talk and one-off "
-            "questions. Merge the prior note with anything new and durable from this "
-            "exchange. Return ONLY the updated note text, no preamble, no markdown."
-        )},
-        {"role": "user", "content": f"PRIOR NOTE:\n{prior or '(empty)'}\n\nNEW EXCHANGE:\nOwner: {user_text}\nAssistant: {reply}"},
-    ]
-    return _generate_ai_reply(messages, "")
+def _parse_json_block(raw: str) -> dict:
+    """Same tolerant extraction extract_lead_info already uses: find the first
+    {...} block (handles markdown-fenced or chatty output) and parse it."""
+    try:
+        match = re.search(r'\{.*\}', raw or "", re.DOTALL)
+        return json.loads(match.group()) if match else {}
+    except Exception:
+        return {}
+
+OWNER_TURN_INSTRUCTIONS = """Respond with ONLY a JSON object (no markdown fences, no text outside it), shaped exactly like:
+{"reply": "<your reply to send, in the language they used>", "memory": "<updated long-term memory note>"}
+
+memory rules: under 120 words, organized loosely as Decisions / Preferences / Open items when there's enough to justify it. Keep only durable facts, decisions, ongoing items, and preferences — drop small talk and one-off questions that don't matter later. Merge the prior note with anything new and durable from this exchange. The "memory" field must always be present — repeat the prior note unchanged if nothing new/durable happened this turn."""
 
 def owner_business_snapshot() -> str:
     """Live one-line-per-system snapshot, refreshed every reply, so the
@@ -1655,24 +1653,30 @@ def owner_business_snapshot() -> str:
     return "BUSINESS SNAPSHOT (live) — " + " | ".join(parts) if parts else ""
 
 def generate_owner_reply(sender: str, role: str, label: str, user_text: str, history: list) -> str:
-    messages = [{"role": "system", "content": OWNER_SYSTEM_PROMPT.format(label=label or "the owner", role=role)}]
+    """One structured call produces the reply AND the rolled-forward memory
+    note together — half the AI calls of doing them as two requests, and
+    atomic: memory only ever advances alongside a reply that was actually
+    sent, never out of sync with it. If the model doesn't return valid JSON
+    (either provider can ignore the instruction), the raw text becomes the
+    reply and memory simply doesn't advance this turn — never a crash."""
     mem = fetch_owner_memory(sender)
+    messages = [{"role": "system", "content": OWNER_SYSTEM_PROMPT.format(label=label or "the owner", role=role)}]
     if mem:
         messages.append({"role": "system", "content": f"LONG-TERM MEMORY:\n{mem}"})
     snap = owner_business_snapshot()
     if snap:
         messages.append({"role": "system", "content": snap})
+    messages.append({"role": "system", "content": OWNER_TURN_INSTRUCTIONS})
     messages += (history or [])[-12:]
     messages.append({"role": "user", "content": user_text})
 
-    reply = _generate_ai_reply(messages, "⚠️ AI assistant temporarily unavailable. Send #help for direct commands.")
+    raw = _generate_ai_reply(messages, "")
+    parsed = _parse_json_block(raw)
+    reply = parsed.get("reply") or raw or "⚠️ AI assistant temporarily unavailable. Send #help for direct commands."
 
-    try:
-        updated = summarize_owner_memory(mem, user_text, reply)
-        if updated:
-            update_owner_memory(sender, updated)
-    except Exception as e:
-        print(f"owner memory rollover error: {e}")
+    new_mem = parsed.get("memory")
+    if new_mem and new_mem != mem:
+        update_owner_memory(sender, new_mem)
 
     return reply
 
