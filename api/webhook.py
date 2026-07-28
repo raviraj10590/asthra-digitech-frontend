@@ -17,6 +17,16 @@ v2.3 performance changes (no user-visible behavior change):
   - Lead extraction runs every 2nd turn instead of every turn
   - System prompt compressed ~60% (all rules kept)
   - Deploy region pinned to sin1 (same region as Supabase)
+
+v2.7 — OWNER / STAFF / CLIENT role system (2026-07-28):
+  - get_role() is the single source of truth for permission mode. OWNER_PHONES
+    (env) is the bootstrap/fallback list; the bot_roles table (Supabase) is the
+    extensible source — add STAFF/OWNER numbers there without a redeploy.
+  - OWNER/STAFF get an executive-assistant pipeline (# commands + NL chat,
+    business-tool registry in OWNER_TOOLS, confirm-before-irreversible via
+    #confirm/#cancel). Everyone else keeps the unchanged sales/support pipeline.
+  - Requires the bot_roles table to exist (see repo notes) — role checks
+    degrade to CLIENT gracefully if it's missing/unreachable.
 """
 
 import hashlib, hmac, json, os, re, time, tempfile, requests
@@ -32,10 +42,14 @@ SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://kpzprllzgqlqkqgcgrb
 SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in Vercel env vars
 BROCHURE_URL    = os.environ.get("BROCHURE_URL",    "")
 # Lead/alert recipients — comma-separated, so alerts can go to multiple people.
-# Owner commands (#stop/#start) are also accepted from any number in this list.
+# This is the OWNER bootstrap/fallback list: always OWNER role even if the
+# bot_roles table is empty or unreachable, so admin access is never a single
+# point of failure. Additional OWNER/STAFF numbers are added via the
+# bot_roles table (see get_role below) — no redeploy needed for those.
 OWNER_PHONES = [p.strip() for p in
     os.environ.get("OWNER_PHONE", "918884448141,918861369951").split(",") if p.strip()]
 OWNER_PHONE  = OWNER_PHONES[0]  # kept for any code that still expects a single primary number
+ROLES_TABLE  = "bot_roles"      # phone, role (OWNER/STAFF/CLIENT), label, active, added_by
 # Hierarchical memory (customer profile / rolling summary / business history).
 # One row per phone in MEMORY_TABLE. Entirely env-gated: unset → the bot behaves
 # exactly as before (no reads, no writes, no behaviour change).
@@ -226,6 +240,67 @@ def _within_hours(iso_ts: str, hours: float) -> bool:
         return datetime.now(timezone.utc) - ts < timedelta(hours=hours)
     except Exception:
         return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROLE RESOLUTION  (OWNER / STAFF / CLIENT) — the single source of truth for
+# "what mode does this sender get". Nothing else in the file should compare a
+# phone number to OWNER_PHONES directly for permission purposes — call
+# get_role() instead, so a role change (DB or env) takes effect everywhere at
+# once instead of needing every call site hunted down and edited.
+# ══════════════════════════════════════════════════════════════════════════════
+_role_cache = {}          # phone -> (role, label, expires_at)
+ROLE_CACHE_TTL = 300       # 5 min — short enough that a role change (e.g. #confirm
+                            # granting access) is visible to that same warm instance
+                            # almost immediately, long enough to save a query per turn.
+
+def get_role(phone: str) -> tuple:
+    """Resolve (role, label) for a phone. OWNER_PHONES (env) is the bootstrap/
+    fallback list — always OWNER, works even if bot_roles is empty or the DB
+    is unreachable. bot_roles is the extensible source for STAFF/OWNER
+    additions made later via #addstaff/#addowner or directly in the table.
+    Any phone not listed anywhere is CLIENT — the zero-config default."""
+    if phone in OWNER_PHONES:
+        return "OWNER", None
+    cached = _role_cache.get(phone)
+    if cached and cached[2] > time.time():
+        return cached[0], cached[1]
+    role, label = "CLIENT", None
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{ROLES_TABLE}",
+            headers=_supa_headers(""),
+            params={"phone": f"eq.{phone}", "active": "eq.true", "select": "role,label"},
+            timeout=3,
+        )
+        if r.ok and r.json():
+            row = r.json()[0]
+            if row.get("role") in ("OWNER", "STAFF"):
+                role, label = row["role"], row.get("label")
+    except Exception as e:
+        print(f"get_role error: {e}")
+    _role_cache[phone] = (role, label, time.time() + ROLE_CACHE_TTL)
+    return role, label
+
+def staff_and_owner_numbers() -> list:
+    """OWNER_PHONES (bootstrap) unioned with active OWNER/STAFF rows from
+    bot_roles — used for proactive business alerts, so a number added to the
+    table starts receiving them immediately, no redeploy required."""
+    nums = list(OWNER_PHONES)
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{ROLES_TABLE}",
+            headers=_supa_headers(""),
+            params={"active": "eq.true", "role": "in.(OWNER,STAFF)", "select": "phone"},
+            timeout=3,
+        )
+        if r.ok:
+            for row in r.json():
+                if row["phone"] not in nums:
+                    nums.append(row["phone"])
+    except Exception as e:
+        print(f"staff_and_owner_numbers error: {e}")
+    return nums
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -999,12 +1074,15 @@ def send_text(to: str, message: str):
         "type": "text",
         "text": {"body": message, "preview_url": False},
     })
-    # Owner alerts are internal notifications, not customer conversation — skip.
-    if to not in OWNER_PHONES:
+    # Owner/staff replies are internal, not customer conversation — skip the CRM
+    # mirror for them (role-based, not just the bootstrap list, so DB-added
+    # staff numbers are excluded too).
+    if get_role(to)[0] == "CLIENT":
         log_reply_to_crm(to, message)
 
 def notify_owner(message: str):
-    """Instant WhatsApp alert to every number in OWNER_PHONES.
+    """Instant WhatsApp alert to every active OWNER/STAFF number (bootstrap
+    list + bot_roles table — see staff_and_owner_numbers()).
 
     Free-form texts are rejected by Meta outside the 24h customer-service
     window, so when OWNER_ALERT_TEMPLATE is configured (an approved template
@@ -1014,7 +1092,7 @@ def notify_owner(message: str):
     template = os.environ.get("OWNER_ALERT_TEMPLATE", "").strip()
     # Meta rejects template parameters containing newlines/tabs.
     flat = " | ".join(part.strip() for part in message.splitlines() if part.strip())
-    for phone in OWNER_PHONES:
+    for phone in staff_and_owner_numbers():
         try:
             if template:
                 r = _wa_post({
@@ -1226,31 +1304,272 @@ def handle_list_reply(to: str, row_id: str, row_title: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# OWNER COMMANDS  (#stop <phone> / #start <phone> — sent from any OWNER_PHONES number)
+# OWNER / STAFF MODE — modular business-tool registry + executive-assistant chat.
+#
+# Adding a capability = registering a tool function below (with the role it
+# requires and whether it's irreversible) — never scatter a new
+# `if sender == OWNER_PHONE` check somewhere else in the file. Deterministic
+# `#` commands cover the common, safe operations at zero AI cost; anything
+# else falls through to a natural-language executive-assistant reply.
+# Irreversible tools (granting/revoking access) are staged and require a
+# separate #confirm before they run — never executed on the first message.
 # ══════════════════════════════════════════════════════════════════════════════
-def handle_owner_command(text: str, from_number: str) -> bool:
-    """Returns True if the message was an owner command (and was handled).
-    Replies go back to whichever owner number issued the command."""
-    stripped = text.strip()
-    if stripped.lower() in ("#help", "#commands"):
-        send_text(from_number,
-            "🤖 Bot commands:\n\n"
-            "#stop 91XXXXXXXXXX — pause bot for that chat (24h)\n"
-            "#start 91XXXXXXXXXX — resume bot for that chat"
+
+def _row_date_ist(iso_ts: str):
+    try:
+        ts = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        return ts.astimezone(IST).date()
+    except Exception:
+        return None
+
+def tool_leads(sender: str, **_) -> str:
+    """Today's captured leads from the AI Kannada leads table."""
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/leads",
+            headers=_supa_headers(""),
+            params={"order": "created_at.desc", "limit": "50",
+                     "select": "name,company,service_needed,budget,city,created_at"},
+            timeout=5,
         )
-        return True
+        rows = r.json() if r.ok else []
+    except Exception as e:
+        return f"⚠️ Couldn't fetch leads: {e}"
+    today = datetime.now(IST).date()
+    today_rows = [row for row in rows if _row_date_ist(row.get("created_at", "")) == today]
+    lines = [f"📊 Leads today: {len(today_rows)}"]
+    for row in today_rows[:5]:
+        lines.append(f"• {row.get('name') or 'unnamed'} — {row.get('service_needed') or '—'} ({row.get('city') or '—'})")
+    if not today_rows:
+        lines.append("No leads captured today yet.")
+    return "\n".join(lines)
+
+def tool_clients(sender: str, **_) -> str:
+    """CRM client count + latest 5, from the Asthra CRM's clients table."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        return "⚠️ CRM sync isn't configured yet."
+    try:
+        rows_r = requests.get(
+            f"{CRM_SUPABASE_URL}/rest/v1/clients",
+            headers=_crm_headers(),
+            params={"user_id": f"eq.{CRM_OWNER_USER_ID}", "order": "created_at.desc",
+                     "limit": "5", "select": "name,phone,created_at"},
+            timeout=5,
+        )
+        rows = rows_r.json() if rows_r.ok else []
+        count_r = requests.get(
+            f"{CRM_SUPABASE_URL}/rest/v1/clients",
+            headers={**_crm_headers(), "Prefer": "count=exact"},
+            params={"user_id": f"eq.{CRM_OWNER_USER_ID}", "select": "id"},
+            timeout=5,
+        )
+        total = count_r.headers.get("Content-Range", "?/?").split("/")[-1] if count_r.ok else "?"
+    except Exception as e:
+        return f"⚠️ Couldn't fetch CRM clients: {e}"
+    lines = [f"🗂️ CRM clients: {total} total"]
+    for row in rows:
+        lines.append(f"• {row.get('name')} — wa.me/{row.get('phone')}")
+    return "\n".join(lines)
+
+def tool_status(sender: str, **_) -> str:
+    return "✅ Bot online\n\n" + tool_leads(sender) + "\n\n" + tool_clients(sender)
+
+def tool_roles_list(sender: str, **_) -> str:
+    lines = ["👥 Access list:"]
+    for p in OWNER_PHONES:
+        lines.append(f"• OWNER (bootstrap): wa.me/{p}")
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{ROLES_TABLE}",
+            headers=_supa_headers(""),
+            params={"active": "eq.true", "select": "phone,role,label", "order": "role"},
+            timeout=5,
+        )
+        rows = r.json() if r.ok else []
+    except Exception as e:
+        rows = []
+        lines.append(f"(DB lookup failed: {e})")
+    for row in rows:
+        if row["phone"] in OWNER_PHONES:
+            continue
+        lines.append(f"• {row['role']}: wa.me/{row['phone']}" + (f" ({row['label']})" if row.get("label") else ""))
+    return "\n".join(lines)
+
+def _tool_add_role(sender: str, target: str, role: str, label: str, added_by: str) -> str:
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/{ROLES_TABLE}",
+            headers=_supa_headers("resolution=merge-duplicates"),
+            json={"phone": target, "role": role, "label": label or None,
+                   "active": True, "added_by": added_by},
+            timeout=5,
+        )
+        if not r.ok:
+            return f"⚠️ Failed: {r.status_code} {r.text}"
+    except Exception as e:
+        return f"⚠️ Failed: {e}"
+    _role_cache.pop(target, None)
+    return f"✅ wa.me/{target} is now {role}" + (f" ({label})" if label else "")
+
+def _tool_remove_role(sender: str, target: str) -> str:
+    try:
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/{ROLES_TABLE}",
+            headers=_supa_headers("return=minimal"),
+            params={"phone": f"eq.{target}"},
+            json={"active": False},
+            timeout=5,
+        )
+        if not r.ok:
+            return f"⚠️ Failed: {r.status_code} {r.text}"
+    except Exception as e:
+        return f"⚠️ Failed: {e}"
+    _role_cache.pop(target, None)
+    return f"✅ Access revoked for wa.me/{target}"
+
+# Irreversible actions live here, keyed by name — _stage_confirm() stores the
+# name + args, #confirm looks it up and calls it. Nothing runs on the first ask.
+OWNER_TOOLS = {
+    "add_role":    lambda sender, **a: _tool_add_role(sender, **a),
+    "remove_role": lambda sender, **a: _tool_remove_role(sender, **a),
+}
+
+OWNER_COMMANDS_HELP = (
+    "🤖 Owner/staff commands:\n\n"
+    "#leads — today's captured leads\n"
+    "#clients — CRM client count + latest\n"
+    "#status — quick business snapshot\n"
+    "#roles — list OWNER/STAFF numbers\n"
+    "#stop 91XXXXXXXXXX — pause bot for that chat (24h)\n"
+    "#start 91XXXXXXXXXX — resume bot for that chat\n"
+    "#addstaff 91XXXXXXXXXX <label> — grant STAFF access (owner only)\n"
+    "#addowner 91XXXXXXXXXX <label> — grant OWNER access (owner only)\n"
+    "#removerole 91XXXXXXXXXX — revoke access (owner only)\n"
+    "#confirm / #cancel — approve or discard a pending action\n\n"
+    "Anything else is answered by the AI executive assistant."
+)
+
+def _stage_confirm(sender: str, tool: str, args: dict, prompt: str) -> str:
+    expiry = time.time() + 300
+    save_message(sender, "system", f"PENDING_CONFIRM::{expiry}::{tool}::{json.dumps(args)}")
+    return f"⚠️ {prompt}\nReply #confirm to proceed or #cancel to discard. (expires in 5 min)"
+
+def _find_pending_confirm(ctx: dict):
+    """The most recent system marker IS the current pending state (or lack of
+    one) — anything older is stale by definition, so only [0] is checked."""
+    sys_list = ctx.get("recent_sys", [])
+    if not sys_list or not sys_list[0].startswith("PENDING_CONFIRM::"):
+        return None
+    try:
+        _, expiry, tool, args_json = sys_list[0].split("::", 3)
+        if float(expiry) > time.time():
+            return tool, json.loads(args_json)
+    except Exception:
+        pass
+    return None
+
+CONFIRM_WORDS = {"#confirm", "confirm", "yes", "ok", "haudu", "ಹೌದು"}
+CANCEL_WORDS  = {"#cancel", "cancel", "no", "ಬೇಡ"}
+
+def try_owner_command(sender: str, role: str, text: str):
+    """Returns the reply text if `text` was a recognized # command, else None
+    (falls through to natural-language handling)."""
+    if not text.startswith("#"):
+        return None
+    stripped = text.strip()
+    low = stripped.lower()
+    if low in ("#help", "#commands"):
+        return OWNER_COMMANDS_HELP
+    if low == "#leads":
+        return tool_leads(sender)
+    if low == "#clients":
+        return tool_clients(sender)
+    if low == "#status":
+        return tool_status(sender)
+    if low == "#roles":
+        return tool_roles_list(sender)
+
     m = re.match(r'^#(stop|start)\s+(\+?\d{10,15})\s*$', stripped, re.IGNORECASE)
-    if not m:
-        return False
-    action = m.group(1).lower()
-    target = m.group(2).lstrip("+")
-    if action == "stop":
-        save_message(target, "system", "BOT_PAUSED")
-        send_text(from_number, f"⏸️ Bot paused for wa.me/{target} (auto-resumes in 24h)")
-    else:
+    if m:
+        action, target = m.group(1).lower(), m.group(2).lstrip("+")
+        if action == "stop":
+            save_message(target, "system", "BOT_PAUSED")
+            return f"⏸️ Bot paused for wa.me/{target} (auto-resumes in 24h)"
         save_message(target, "system", "BOT_RESUMED")
-        send_text(from_number, f"▶️ Bot resumed for wa.me/{target}")
-    return True
+        return f"▶️ Bot resumed for wa.me/{target}"
+
+    m = re.match(r'^#(addowner|addstaff)\s+(\+?\d{10,15})\s+(.+)$', stripped, re.IGNORECASE)
+    if m:
+        if role != "OWNER":
+            return "🚫 Only OWNER numbers can grant access."
+        new_role = "OWNER" if m.group(1).lower() == "addowner" else "STAFF"
+        target, label = m.group(2).lstrip("+"), m.group(3).strip()
+        return _stage_confirm(sender, "add_role",
+            {"target": target, "role": new_role, "label": label, "added_by": sender},
+            f"Grant {new_role} access to wa.me/{target} ({label})?")
+
+    m = re.match(r'^#removerole\s+(\+?\d{10,15})\s*$', stripped, re.IGNORECASE)
+    if m:
+        if role != "OWNER":
+            return "🚫 Only OWNER numbers can revoke access."
+        target = m.group(1).lstrip("+")
+        return _stage_confirm(sender, "remove_role", {"target": target},
+            f"Revoke bot access for wa.me/{target}?")
+
+    return "❓ Unknown command. Send #help for the list."
+
+OWNER_SYSTEM_PROMPT = """You are the AI executive assistant for {label}, {role} of Asthra DigiTech — a Bengaluru digital marketing agency (social media, websites, apps, WhatsApp bots, ads, political/govt campaigns).
+You are talking to a company insider, not a customer — you may discuss internal business context, strategy, and data freely.
+You do not have live database access inside this reply — real numbers only come from the # commands (#leads, #clients, #status, #roles, #stop/#start, #addstaff, #addowner, #removerole — send #help for the full list). If they ask something a command answers, tell them which command to send rather than guessing a number.
+You can: think through strategy and decisions, draft customer replies/quotes/messages, summarize context, and answer general business questions.
+Be concise and professional — this is WhatsApp, not email. Never fabricate data you don't have."""
+
+def generate_owner_reply(sender: str, role: str, label: str, user_text: str, history: list) -> str:
+    try:
+        client = get_openai()
+        messages = [{"role": "system", "content": OWNER_SYSTEM_PROMPT.format(label=label or "the owner", role=role)}]
+        messages += (history or [])[-12:]
+        messages.append({"role": "user", "content": user_text})
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini", messages=messages, temperature=0.4, max_tokens=400,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"generate_owner_reply error: {e}")
+        return "⚠️ AI assistant temporarily unavailable. Send #help for direct commands."
+
+def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
+    """Single entry point for OWNER/STAFF messages: pending confirmation →
+    deterministic # command → keyword-routed read-only lookup → AI chat."""
+    stripped = user_text.strip()
+    low = stripped.lower()
+
+    pending = _find_pending_confirm(ctx)
+    if pending and low in CONFIRM_WORDS:
+        tool, args = pending
+        save_message(sender, "system", "PENDING_CLEARED")
+        fn = OWNER_TOOLS.get(tool)
+        return fn(sender, **args) if fn else "⚠️ Pending action no longer valid."
+    if pending and low in CANCEL_WORDS:
+        save_message(sender, "system", "PENDING_CLEARED")
+        return "❌ Cancelled."
+
+    cmd_result = try_owner_command(sender, role, stripped)
+    if cmd_result is not None:
+        return cmd_result
+
+    # Natural-language read-only lookups — deterministic, zero AI cost, covers
+    # the common asks before falling through to the general assistant chat.
+    if any(w in low for w in ("lead", "ಲೀಡ್")):
+        return tool_leads(sender)
+    if any(w in low for w in ("client", "ಗ್ರಾಹಕ", "crm")):
+        return tool_clients(sender)
+    if any(w in low for w in ("status", "health", "online", "snapshot")):
+        return tool_status(sender)
+    if "role" in low and any(w in low for w in ("list", "who", "show")):
+        return tool_roles_list(sender)
+
+    return generate_owner_reply(sender, role, label, user_text, ctx.get("history"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1545,18 +1864,25 @@ class handler(BaseHTTPRequestHandler):
 
             print(f"💬 Text: {user_text[:80]}")
 
-            # ── Owner commands (#stop / #start) ───────────────────────────
-            if sender in OWNER_PHONES and handle_owner_command(user_text, sender):
-                self._ok(); return
-
             # ── ONE context fetch for everything below ────────────────────
             ctx = fetch_context(sender)
-            memory = fetch_memory(sender)  # env-gated: {} until MEMORY_TABLE is set
 
             # ── Meta retry deduplication ──────────────────────────────────
             if is_duplicate_webhook(ctx, user_text):
                 print("↩️ duplicate webhook — skipped")
                 self._ok(); return
+
+            # ── Mode split: OWNER/STAFF get the executive-assistant pipeline,
+            # everyone else gets the customer-facing sales pipeline below.
+            # See get_role() — this is the ONLY place the two modes fork.
+            role, label = get_role(sender)
+            if role in ("OWNER", "STAFF"):
+                reply = handle_owner_text(sender, role, label, user_text, ctx)
+                send_text(sender, reply)
+                save_messages([(sender, "user", user_text), (sender, "assistant", reply)])
+                self._ok(); return
+
+            memory = fetch_memory(sender)  # env-gated: {} until MEMORY_TABLE is set
 
             is_new_contact = not ctx["history"]
 
