@@ -48,8 +48,8 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from bic import (brain as bic_brain, config as bic_config,
-                     contract as bic_contract, policy as bic_policy,
-                     replay as bic_replay)
+                     contract as bic_contract, identity as bic_identity,
+                     policy as bic_policy, replay as bic_replay)
     from adapters import whatsapp as wa_adapter
     BIC_AVAILABLE = True
     print("BIC: package import OK")
@@ -301,38 +301,68 @@ def _within_hours(iso_ts: str, hours: float) -> bool:
 # get_role() instead, so a role change (DB or env) takes effect everywhere at
 # once instead of needing every call site hunted down and edited.
 # ══════════════════════════════════════════════════════════════════════════════
-_role_cache = {}          # phone -> (role, label, expires_at)
 ROLE_CACHE_TTL = 300       # 5 min — short enough that a role change (e.g. #confirm
                             # granting access) is visible to that same warm instance
                             # almost immediately, long enough to save a query per turn.
 
+def _fetch_role_row(phone: str):
+    """Read one bot_roles row. THE only role lookup query in the system.
+
+    Uses the anon key, which is correct: bot_roles is a PRE-BIC table carrying
+    its own anon-select policy. Reserving the service-role key for the
+    deny-by-default bic_* tables keeps this on least privilege.
+    """
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/{ROLES_TABLE}",
+        headers=_supa_headers(""),
+        params={"phone": f"eq.{phone}", "active": "eq.true", "select": "role,label"},
+        timeout=3,
+    )
+    if r.ok:
+        rows = r.json()
+        return rows[0] if rows else None
+    raise RuntimeError(f"bot_roles lookup {r.status_code}")
+
+
+# Install the fetcher into the canonical resolver. From here on there is ONE
+# resolver, ONE cache and ONE lookup query, shared by the legacy path and the
+# Brain — which is what makes Decision Replay meaningful (a disagreement can
+# only be a real logic difference, not two implementations differing).
+if BIC_AVAILABLE:
+    bic_identity.configure(_fetch_role_row)
+
+
+def _invalidate_role(phone: str) -> None:
+    """Drop a cached role after a grant/revoke, so the change takes effect on
+    the next message rather than after the TTL."""
+    if BIC_AVAILABLE:
+        bic_identity.invalidate(phone)
+
+
 def get_role(phone: str) -> tuple:
-    """Resolve (role, label) for a phone. OWNER_PHONES (env) is the bootstrap/
-    fallback list — always OWNER, works even if bot_roles is empty or the DB
-    is unreachable. bot_roles is the extensible source for STAFF/OWNER
-    additions made later via #addstaff/#addowner or directly in the table.
-    Any phone not listed anywhere is CLIENT — the zero-config default."""
+    """Resolve (role, label) for a phone.
+
+    Delegates to bic.identity — the canonical resolver. Signature and semantics
+    are unchanged: OWNER_PHONES (env) is the bootstrap list and always wins,
+    bot_roles supplies STAFF/OWNER additions, and anything unlisted is CLIENT.
+
+    Falls back to a local inline lookup ONLY if the BIC package failed to
+    import, so a bundling failure degrades to the previous behaviour instead of
+    breaking role resolution outright.
+    """
+    if BIC_AVAILABLE:
+        return bic_identity.resolve_legacy(phone)
+
+    # ── Fallback: BIC unavailable ────────────────────────────────────────────
     if phone in OWNER_PHONES:
         return "OWNER", None
-    cached = _role_cache.get(phone)
-    if cached and cached[2] > time.time():
-        return cached[0], cached[1]
-    role, label = "CLIENT", None
     try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/{ROLES_TABLE}",
-            headers=_supa_headers(""),
-            params={"phone": f"eq.{phone}", "active": "eq.true", "select": "role,label"},
-            timeout=3,
-        )
-        if r.ok and r.json():
-            row = r.json()[0]
-            if row.get("role") in ("OWNER", "STAFF"):
-                role, label = row["role"], row.get("label")
+        row = _fetch_role_row(phone)
+        if row and row.get("role") in ("OWNER", "STAFF"):
+            return row["role"], row.get("label")
     except Exception as e:
-        print(f"get_role error: {e}")
-    _role_cache[phone] = (role, label, time.time() + ROLE_CACHE_TTL)
-    return role, label
+        print(f"get_role fallback error: {e}")
+    return "CLIENT", None
 
 def staff_and_owner_numbers() -> list:
     """OWNER_PHONES (bootstrap) unioned with active OWNER/STAFF rows from
@@ -1551,7 +1581,9 @@ def _tool_add_role(sender: str, target: str, role: str, label: str, added_by: st
             return f"⚠️ Failed: {r.status_code} {r.text}"
     except Exception as e:
         return f"⚠️ Failed: {e}"
-    _role_cache.pop(target, None)
+    # Invalidate the canonical cache so the change is visible immediately
+    # to BOTH the legacy path and the Brain — there is only one cache now.
+    _invalidate_role(target)
     return f"✅ wa.me/{target} is now {role}" + (f" ({label})" if label else "")
 
 def _tool_remove_role(sender: str, target: str) -> str:
@@ -1567,7 +1599,9 @@ def _tool_remove_role(sender: str, target: str) -> str:
             return f"⚠️ Failed: {r.status_code} {r.text}"
     except Exception as e:
         return f"⚠️ Failed: {e}"
-    _role_cache.pop(target, None)
+    # Invalidate the canonical cache so the change is visible immediately
+    # to BOTH the legacy path and the Brain — there is only one cache now.
+    _invalidate_role(target)
     return f"✅ Access revoked for wa.me/{target}"
 
 # Irreversible actions live here, keyed by name — _stage_confirm() stores the

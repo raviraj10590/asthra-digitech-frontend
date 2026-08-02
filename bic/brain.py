@@ -16,7 +16,7 @@ rewritten.
 from dataclasses import dataclass
 from typing import Callable
 
-from . import policy
+from . import identity, policy
 from .contract import BrainRequest, BrainResponse
 
 # A flow takes the resolved identity plus the normalised request and returns a
@@ -44,8 +44,13 @@ def handle(request: BrainRequest, flows: Flows) -> BrainResponse:
     from the transport's verified payload — never from message text
     (Article II.1). The Brain cannot enforce that on its own; it is asserted in
     the adapter and covered by characterization tests.
+
+    Resolution goes through bic.identity — the ONE canonical resolver shared
+    with the legacy path. That is what makes Decision Replay meaningful: a
+    disagreement can only indicate a real logic difference, never two lookup
+    implementations differing.
     """
-    principal = policy.resolve_principal(request.sender_id, channel=request.channel)
+    principal = identity.resolve(request.sender_id, channel=request.channel)
 
     internal = principal.role in INTERNAL_ROLES
     flow = flows.owner if internal else flows.client
