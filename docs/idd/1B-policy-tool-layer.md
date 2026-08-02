@@ -1,7 +1,15 @@
 # IDD — Slice 1B: Policy Gate + Tool Registry + Invocation Logging
 
-**Status:** Awaiting approval · **Governs:** BIC v1.0 Articles II, VI, VIII
-**Prerequisite:** Slice 1A COMPLETE ✅ · Deployment item D3 required before release
+**Status:** IMPLEMENTED — awaiting acceptance · **Governs:** BIC v1.0 Articles II, VI, VIII
+**Prerequisite:** Slice 1A COMPLETE ✅
+
+> **SCOPE CORRECTION (owner, 2026-08-02).** An earlier revision of this IDD
+> planned to wire tools into `webhook.py` and, later, to pull the
+> `BrainRequest`/`BrainResponse` contract forward. **Both were rejected.**
+> 1B solves exactly one problem: the security boundary. All integration —
+> adapter, contract, routing, handler wiring — is 1C. Sections below that
+> describe editing `api/webhook.py` or registering real handlers are
+> **superseded and were not implemented**; `webhook.py` is unchanged.
 
 ---
 

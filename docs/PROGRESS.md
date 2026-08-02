@@ -66,11 +66,65 @@ be designed and built against it; it cannot go to production without it.
 
 ---
 
-### Slice 1B — Policy Gate · Tool Registry · Invocation logging
-**Status: 📋 IDD WRITTEN — awaiting approval** → `docs/idd/1B-policy-tool-layer.md`
+### Slice 1B — Security Boundary
+**Status: ✅ CODE COMPLETE — awaiting acceptance**
 
-### Slice 1C — BrainRequest/BrainResponse · WhatsApp adapter
-**Status: ⬜ NOT STARTED**
+**Scope (owner-fixed):** 1B solves exactly one problem — the security boundary.
+
+| Scope item | Status |
+|---|---|
+| Policy Layer | ✅ `bic/policy.py` |
+| Tool Registry | ✅ `bic/tools.py` |
+| Tool Invocation Logging | ✅ `bic/tools.py::_audit` |
+| Authorization | ✅ `policy.may_invoke` |
+| Characterization tests | ✅ 20 tests, mutation-verified |
+| Feature flag | ✅ `BIC_POLICY_ENABLED` (defined, consumed in 1C) |
+
+**Explicitly NOT in 1B** (deferred to 1C, owner directive 2026-08-02):
+`BrainRequest` · `BrainResponse` · Webhook Adapter · routing refactor ·
+conversation-flow changes · **tool handler wiring**.
+
+> A merge of 1B and 1C was proposed and **rejected**. Rationale recorded because
+> the temptation will recur: pulling future work forward because it is
+> convenient makes review, rollback, testing and debugging all harder. Each
+> phase solves exactly one problem.
+> 1A = Database Foundation · 1B = Security Boundary · 1C = Request Architecture
+> · 1D = Knowledge Integration
+
+**Tests:** 45 total, offline, green (25 policy/registry + 20 characterization).
+
+**`api/webhook.py` unchanged.** Production behaviour is byte-identical.
+
+**⚠️ Known state — the layer is NOT running in production.** Vercel's Python
+builder bundles what the entrypoint imports; nothing imports `bic/`, so it ships
+in git but not in the Lambda. This is *correct* for 1B (no integration), but it
+means:
+- 1B is verified by unit tests, not by production execution
+- **1C prerequisite:** confirm `bic/` is bundled the first time an `api/*.py`
+  module imports it. If Vercel does not pick it up automatically, add
+  `includeFiles` to `vercel.json`. Deliberately not pre-configured here — it
+  cannot be verified without an import, and unverifiable config is a liability.
+
+**Registry rows exist for 5 tools; handlers are intentionally unregistered.**
+1B delivers the enforcement mechanism (proven against mock handlers, including
+"registry row without handler → explicit failure"). Connecting real handlers is
+integration work and belongs to 1C.
+
+### Slice 1C — Request Architecture
+**Status: ⬜ NOT STARTED** — begins only after 1B is accepted
+
+Contains: `BrainRequest` · `BrainResponse` · Webhook Adapter · routing
+migration · feature-flag rollout · old-vs-new behaviour comparison
+(response text, memory updates, tool execution, CRM updates, latency).
+
+**Prerequisites:**
+1. D3 — `SUPABASE_SERVICE_ROLE_KEY` in bot Vercel env. Once the new path is
+   live every invocation writes to `bic_tool_invocations`; without the key those
+   writes fail and the rollout runs blind, with no data for the behaviour
+   comparison.
+2. Confirm `bic/` is bundled by Vercel on first import (see 1B note).
+3. Wire the 5 approved tool handlers to existing business functions —
+   **wrap, never rewrite**.
 
 ### Slice 1D — Knowledge backfill · Retention · Golden set · Docs
 **Status: ⬜ NOT STARTED**
