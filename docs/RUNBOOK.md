@@ -62,6 +62,32 @@ are additive only and never touch another system's tables.
 
 ---
 
+## Running ad-hoc SQL (verification, inspection)
+
+⚠️ **Do not use the dashboard SQL editor** — it has proven unreliable (blank
+renders, hangs, stale cache). Use the Management API. See ADR 0002.
+
+```bash
+cat > /tmp/q.sql <<'SQL'
+select count(*) from bic_facts;
+SQL
+python3 -c "import json;print(json.dumps({'query':open('/tmp/q.sql').read()}))" > /tmp/q.json
+curl -s -X POST "https://api.supabase.com/v1/projects/kpzprllzgqlqkqgcgrbp/database/query" \
+  -H "Authorization: Bearer $(cat ~/.supabase/access-token)" \
+  -H "Content-Type: application/json" --data-binary @/tmp/q.json
+rm -f /tmp/q.sql /tmp/q.json
+```
+
+Two traps, both hit for real:
+- **Build the JSON with Python, never inline in the shell.** Shell quoting
+  strips SQL string literals and you get `trailing junk after numeric literal`.
+- **Use curl, not Python `urllib`.** Cloudflare rejects urllib's TLS
+  fingerprint with a 403 (error 1010).
+
+Wrap any write test in `begin; … rollback;` and confirm row counts afterwards.
+
+---
+
 ## Rollback
 
 | Layer | How |
