@@ -12,6 +12,10 @@
     {
       "src": "api/evaluate.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/lead.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
@@ -30,6 +34,10 @@
     {
       "src": "/api/evaluate",
       "dest": "api/evaluate.py"
+    },
+    {
+      "src": "/api/lead",
+      "dest": "api/lead.py"
     }
   ],
   "crons": [
