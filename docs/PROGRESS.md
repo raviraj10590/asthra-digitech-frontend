@@ -125,7 +125,7 @@ integration work and belongs to 1C.
 | Webhook Adapter | ✅ `adapters/whatsapp.py` (built, **not wired**) |
 | Adapter wiring into `do_POST` | ⬜ next session |
 | Feature-flag routing | ⬜ |
-| **Shadow Mode** | ⬜ ⚠️ design decision required — see below |
+| **Decision Replay Mode** | ⬜ design settled — ADR 0004 |
 | Old vs new comparison | ⬜ |
 
 **Tests:** 68 offline, green. **`webhook.py` routing untouched** — only the
@@ -137,40 +137,34 @@ its own messages and return `BrainResponse(text="")`. Accepted for 1C only
 
 ---
 
-#### ⚠️ Shadow Mode — hazard to resolve BEFORE implementation
+#### Decision Replay Mode — design settled (ADR 0004)
 
-Owner requirement: run both paths per message, compare, and give the customer
-the legacy reply.
+"Shadow Mode" (execute both pipelines) was **rejected**: neither path is a pure
+function, so a second execution would duplicate CRM rows, double AI spend, and
+send the customer the same message twice.
 
-**Taken literally, this causes DOUBLE SIDE EFFECTS.** The paths are not pure
-functions — running the new path a second time would also re-run everything it
-does:
+**Replaced by Decision Replay Mode.** The legacy path remains the only
+production path. The new pipeline **predicts what it would do and does not
+execute**. No sends, no writes, no mutations — intended operations are recorded
+instead:
 
-| Side effect | Consequence of naive shadowing |
-|---|---|
-| `generate_reply()` | **2× AI calls** — doubles tokens/cost, on a provider already hitting quota |
-| `sync_lead_to_crm()` | **Duplicate CRM writes** — real rows in a real customer database |
-| `update_owner_memory()` | Memory rolled forward twice; second pass sees the first's output |
-| `send_text` / `send_brochure` | **Customer receives the message twice** |
-| `notify_owner` | Duplicate owner alerts |
-| `save_messages` | Duplicate conversation history, corrupting later context |
+```
+legacy:  send_brochure(client)
+replay:  record {tool: "send_brochure", arguments: {...}}
+```
 
-Shadowing is only safe if the shadow run is **side-effect-free**. Options for
-the next session:
+Safety is **structural**: in replay mode the flow is injected with recorders in
+place of the real sender/writers, so it holds no reference to anything that can
+mutate state. It cannot write even if a future edit tries to.
 
-- **A — Injected no-op collaborators (recommended).** Run the shadow flow with
-  stubbed `send_text` / CRM writer / memory writer / `save_messages`, capturing
-  intended calls instead of performing them. Compares *decisions* rather than
-  re-executing effects. Still costs one extra AI call per message unless the AI
-  call is also stubbed or cached.
-- **B — Compare decisions only.** Shadow just the routing/classification
-  outcome (which flow, which branch, which tool), not reply generation. Zero
-  extra cost and zero risk, but does not compare reply text.
-- **C — Shadow OWNER path only.** Two known numbers, no customer exposure, and
-  `handle_owner_text` returns text cleanly. Lowest blast radius.
+**Compare:** route · selected tools · intended side effects · assembled prompt.
+**Do not compare generated reply text** — LLM output is non-deterministic, so
+identical-and-correct pipelines would still differ on every message and the
+harness would be abandoned as noise. Compare the *inputs* to the model; the AI
+call is stubbed in replay mode (zero added cost). Rationale in ADR 0004.
 
-**Do not implement shadow mode until this is decided.** A naive implementation
-would create duplicate CRM rows and double AI spend on the first live message.
+**Acceptance:** enable `BIC_POLICY_ENABLED` once both pipelines consistently
+produce equivalent DECISIONS across a representative sample.
 
 **✅ Prerequisite 2 RESOLVED — `bic/` bundles correctly.**
 Confirmed in production, not assumed: the deployed Lambda logs
