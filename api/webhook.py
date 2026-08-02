@@ -64,11 +64,28 @@ GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY",  "")  # free tier — image u
 # — e.g. set to "gemini" while OpenAI quota/billing is being sorted out, then
 # back to "openai" once restored. The other provider is always the fallback.
 AI_PROVIDER_PRIMARY = os.environ.get("AI_PROVIDER_PRIMARY", "openai").strip().lower()
+# Ordered provider chain, highest priority first. Supersedes AI_PROVIDER_PRIMARY
+# (kept for backward compatibility — see _provider_chain). A comma-separated env
+# var means adding, reordering or dropping a provider is a config change, never
+# a deploy.
+AI_PROVIDER_ORDER = os.environ.get("AI_PROVIDER_ORDER", "").strip().lower()
 # Chat completion model for both pipelines (not lead extraction/Whisper, which
 # stay on mini — see _call_openai). Defaults to the flagship covered by the
 # complimentary 250k-tokens/day data-sharing tier; override here if that
 # tier's model list changes instead of hunting down the literal in code.
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-5.4").strip()
+
+# ── DeepSeek ────────────────────────────────────────────────────────────────
+# OpenAI-compatible API, so it reuses the same SDK with a different base_url.
+# deepseek-v4-pro is a REASONING model: it spends completion tokens thinking
+# before it writes. Measured 114-180 reasoning tokens on short WhatsApp-style
+# prompts, so the 400-token budget used for OpenAI can leave little (or nothing)
+# for the actual reply — an empty reply is a real failure mode here, verified
+# live. Hence its own, larger budget.
+DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL      = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip()
+DEEPSEEK_BASE_URL   = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
+DEEPSEEK_MAX_TOKENS = int(os.environ.get("DEEPSEEK_MAX_TOKENS", "1200"))
 WELCOME_IMAGE   = os.environ.get("WELCOME_IMAGE",   "https://kpzprllzgqlqkqgcgrbp.supabase.co/storage/v1/object/public/documents/adt-welcome.png")
 # Asthra CRM (byras.shop) — separate Supabase project. Mirrors conversations
 # into whatsapp_messages AND syncs qualified leads into clients, so nothing
@@ -949,20 +966,72 @@ def _call_openai(messages: list) -> str:
         print(f"openai error: {e}")
         return ""
 
+def _call_deepseek(messages: list) -> str:
+    """DeepSeek via the OpenAI-compatible endpoint. Same '' -on-failure contract
+    as the other providers so callers treat them identically."""
+    if not DEEPSEEK_API_KEY:
+        return ""
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+        resp = client.chat.completions.create(
+            model=DEEPSEEK_MODEL, messages=messages,
+            max_tokens=DEEPSEEK_MAX_TOKENS, temperature=0.75,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            # Reasoning models can spend the entire token budget thinking and
+            # return empty content. That is a FAILURE, not a valid reply —
+            # returning '' lets the chain fall through instead of sending a
+            # blank WhatsApp message.
+            usage = getattr(resp, "usage", None)
+            print(f"deepseek returned empty content (likely reasoning-token exhaustion); usage={usage}")
+            return ""
+        return content
+    except Exception as e:
+        print(f"deepseek error: {e}")
+        return ""
+
+# Provider registry — name → callable. Adding a provider means one entry here
+# plus its config block; ordering is env-driven and needs no code change.
+_PROVIDERS = {
+    "deepseek": _call_deepseek,
+    "openai":   _call_openai,
+    "gemini":   generate_reply_gemini,
+}
+
+def _provider_chain() -> list:
+    """Resolve the ordered provider chain.
+
+    AI_PROVIDER_ORDER (comma-separated) wins when set. Otherwise fall back to
+    the legacy AI_PROVIDER_PRIMARY behaviour so existing deployments keep
+    working unchanged. Unknown names are ignored rather than crashing, and any
+    configured provider missing from the order is appended — so a typo degrades
+    to a worse ordering, never to "no providers at all".
+    """
+    if AI_PROVIDER_ORDER:
+        names = [n.strip() for n in AI_PROVIDER_ORDER.split(",") if n.strip() in _PROVIDERS]
+    else:
+        primary = AI_PROVIDER_PRIMARY if AI_PROVIDER_PRIMARY in _PROVIDERS else "openai"
+        names = [primary]
+    for n in _PROVIDERS:
+        if n not in names:
+            names.append(n)
+    return [(n, _PROVIDERS[n]) for n in names]
+
 def _generate_ai_reply(messages: list, apology: str) -> str:
-    """Try both text providers in the order AI_PROVIDER_PRIMARY sets, and only
-    fall back to `apology` if both fail. One place to hold provider order and
-    failure logging — generate_reply and generate_owner_reply both call this
-    instead of each carrying its own duplicate OpenAI/Gemini try-fallback."""
-    providers = ([_call_openai, generate_reply_gemini] if AI_PROVIDER_PRIMARY != "gemini"
-                 else [generate_reply_gemini, _call_openai])
-    for i, provider in enumerate(providers):
+    """Try each provider in configured order; fall back to `apology` only if all
+    fail. One place holds provider order and failure logging — generate_reply
+    and generate_owner_reply both call this rather than each carrying its own
+    duplicate try-fallback."""
+    chain = _provider_chain()
+    for i, (name, provider) in enumerate(chain):
         result = provider(messages)
         if result:
             if i > 0:
-                print(f"↪️ replied via fallback provider ({provider.__name__})")
+                print(f"↪️ replied via fallback provider ({name})")
             return result
-    print("_generate_ai_reply: both providers failed")
+    print(f"_generate_ai_reply: all providers failed ({[n for n, _ in chain]})")
     return apology
 
 
@@ -1420,18 +1489,23 @@ def tool_roles_list(sender: str, **_) -> str:
     return "\n".join(lines)
 
 def tool_aitest(sender: str, **_) -> str:
-    """Calls both text providers directly (bypassing AI_PROVIDER_PRIMARY
-    ordering) so a status check is possible regardless of which one is
-    currently primary — useful right after a quota/billing change."""
+    """Probe every registered provider directly, bypassing chain ordering, with
+    per-provider latency. Works regardless of which is primary — the point is to
+    answer "what is actually reachable right now" after a quota/billing/key
+    change, without reading Vercel logs."""
     probe = [{"role": "user", "content": "Reply with exactly one word: OK"}]
-    openai_result = _call_openai(probe)
-    gemini_result = generate_reply_gemini(probe)
-    return (
-        "🧪 AI provider test:\n"
-        f"OpenAI: {'✅ ' + openai_result[:30] if openai_result else '❌ failed (see Vercel logs)'}\n"
-        f"Gemini: {'✅ ' + gemini_result[:30] if gemini_result else '❌ failed (see Vercel logs)'}\n"
-        f"Primary right now: {AI_PROVIDER_PRIMARY.upper()}"
-    )
+    chain = _provider_chain()
+    lines = ["🧪 AI provider test:"]
+    for name, provider in chain:
+        started = time.time()
+        result = provider(probe)
+        ms = int((time.time() - started) * 1000)
+        lines.append(
+            f"{name}: " + (f"✅ {result[:24]} ({ms}ms)" if result else f"❌ failed ({ms}ms)")
+        )
+    lines.append("")
+    lines.append("Order: " + " → ".join(n for n, _ in chain))
+    return "\n".join(lines)
 
 def tool_memory_show(sender: str, **_) -> str:
     mem = fetch_owner_memory(sender)
