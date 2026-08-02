@@ -126,9 +126,10 @@ integration work and belongs to 1C.
 | Adapter wiring (OWNER path) | ✅ behind fail-safe flag |
 | Adapter wiring (CLIENT path) | ⬜ **required — see migration plan** |
 | Feature-flag routing | ✅ fail-safe, defaults FALSE |
-| Decision Replay Mode | ✅ deployed — ⚠️ **currently vacuous, see below** |
-| Old vs new comparison | ⬜ blocked on ADR 0005 |
-| Duplicate role resolution removed | ⬜ ADR 0005 (proposed) |
+| Decision Replay Mode | ✅ deployed, structured logging, **no longer vacuous** |
+| Old vs new comparison | 🟡 unblocked — awaiting live samples |
+| Duplicate role resolution removed | ✅ ADR 0005 IMPLEMENTED |
+| Latency instrumentation | ✅ measurement only |
 
 ---
 
@@ -140,8 +141,8 @@ Recorded here with an explicit removal plan so it cannot become permanent.
 | Stage | State | Exit condition |
 |---|---|---|
 | **S1** ✅ | OWNER via Brain (flag-gated); CLIENT legacy | flag fail-safe verified |
-| **S2** ⬜ | Role resolution unified (ADR 0005 B+C) | one resolver, one cache |
-| **S3** ⬜ | Replay produces non-vacuous evidence | ≥20 non-degraded samples, 0 diffs |
+| **S2** ✅ | Role resolution unified (ADR 0005) | one resolver, one cache — done |
+| **S3** 🟡 | Replay produces genuine evidence | ≥20 non-degraded samples, 0 diffs |
 | **S4** ⬜ | `BIC_POLICY_ENABLED=true` for OWNER | replies verified identical |
 | **S5** ⬜ | CLIENT path wrapped and routed through Brain | characterization green |
 | **S6** ⬜ | Split removed — one pipeline | ADR 0003 superseded |
@@ -157,26 +158,22 @@ marked superseded.
 
 ---
 
-#### ⚠️ Replay is deployed but currently VACUOUS — do not count it as evidence
+#### Replay status — genuine, with one honest caveat
 
-`webhook.get_role()` reads `bot_roles` with the **anon** key (works).
-`bic.policy.resolve_principal()` reads it with the **service-role** key, which
-is **not set** (D3) — so it fails closed to CLIENT.
+`bic.identity` is now the ONE resolver used by both the legacy path and the
+Brain (ADR 0005). Both perform the same real lookup with the same cache, so a
+`BIC_REPLAY_DIFF` can only mean a real logic difference.
 
-| Sender | Legacy | Replay | Verdict |
-|---|---|---|---|
-| Bootstrap owner | OWNER | OWNER | ✅ real match |
-| STAFF in `bot_roles` | STAFF | CLIENT (degraded) | ✅ real DIFF |
-| Unknown number | CLIENT | CLIENT *(because lookup failed)* | ⚠️ **FALSE MATCH** |
+⚠️ **Route comparison is now tautological** — both sides call the same function,
+so route can never disagree. That is the intended end state, but it means route
+matches are **not independent evidence**. Genuine divergence signal arrives with
+tool selection at S5.
 
-The most common case agrees **by accident**. `BIC_REPLAY_MATCH` on client
-traffic is **not evidence** until ADR 0005 lands. Degraded samples
-(`Principal.degraded`) must be excluded from any tally.
+Degraded samples (`"degraded": true`) are excluded from any tally.
 
 Full specification: `docs/REPLAY-SPEC.md`.
 
-**Tests:** 68 offline, green. **`webhook.py` routing untouched** — only the
-guarded BIC import probe.
+**Tests:** 104 offline, green.
 
 **Client-flow bridge is TEMPORARY** — see ADR 0003. The client flow will send
 its own messages and return `BrainResponse(text="")`. Accepted for 1C only
@@ -241,10 +238,10 @@ migration · feature-flag rollout · old-vs-new behaviour comparison
 |---|---|---|---|
 | 1 | Adapter wired | 🟡 OWNER only | S5 completes it |
 | 2 | Feature flag operational | ✅ | verified unset/false/true/TRUE/1/off/garbage |
-| 3 | Decision Replay implemented | ✅ | `bic/replay.py`, 17 tests |
-| 4 | Replay accuracy evidence | ❌ | **vacuous — blocked on ADR 0005** |
-| 5 | Latency measured | ❌ | not yet measured |
-| 6 | Zero regressions | ✅ | 85 tests green, characterization mutation-verified |
+| 3 | Decision Replay implemented | ✅ | `bic/replay.py` + structured logging |
+| 4 | Replay accuracy evidence | 🟡 | unblocked (ADR 0005); awaiting live samples |
+| 5 | Latency measured | 🟡 | instrumented; needs production samples |
+| 6 | Zero regressions | ✅ | 104 tests green, characterization + cache mutation-verified |
 | 7 | Rollback verified | 🟡 | flag logic verified; not yet exercised in production |
 | 8 | Routing correctness | 🟡 | owner proven; client unproven |
 | 9 | No customer-visible change | ✅ | flag unset ⇒ legacy path serves everyone |
@@ -252,7 +249,8 @@ migration · feature-flag rollout · old-vs-new behaviour comparison
 | 11 | Documentation updated | ✅ | REPLAY-SPEC, ADR 0003/0004/0005, this tracker |
 | 12 | Progress tracker updated | ✅ | this file |
 
-**1C is NOT accepted.** Criteria 4, 5 blocked; 1, 7, 8 partial.
+**1C is NOT accepted — approximately 65% complete.** Criteria 4, 5 await
+production samples; 1, 7, 8 partial pending S4-S6.
 
 **Target architecture** (unchanged; ADR 0003 records the one temporary deviation):
 ```

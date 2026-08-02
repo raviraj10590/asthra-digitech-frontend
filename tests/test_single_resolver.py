@@ -155,5 +155,71 @@ class TestNoDuplication(unittest.TestCase):
         self.assertNotIn("OWNER_PHONE\"", src)
 
 
+
+class TestLatencyInstrumentation(unittest.TestCase):
+    """Performance Rules: measure before optimising. Measurement only."""
+
+    def setUp(self):
+        identity.clear_cache()
+        identity.reset_stats()
+
+    def test_counters_classify_correctly(self):
+        identity.configure(lambda p: {"role": "STAFF", "label": "x"} if p == STAFF else None)
+        identity.resolve(OWNER)          # bootstrap — no lookup
+        identity.resolve(STAFF)          # miss
+        identity.resolve(STAFF)          # hit
+        s = identity.stats()
+        self.assertEqual((s["bootstrap"], s["misses"], s["hits"]), (1, 1, 1))
+        self.assertEqual(s["total_resolutions"], 3)
+
+    def test_averages_are_none_until_sampled(self):
+        """An unsampled counter must not look like a genuine 0 ms."""
+        s = identity.stats()
+        self.assertIsNone(s["hit_ms_avg"])
+        self.assertIsNone(s["miss_ms_avg"])
+
+    def test_degraded_is_counted(self):
+        def boom(phone):
+            raise RuntimeError("down")
+        identity.configure(boom)
+        identity.resolve(UNKNOWN)
+        self.assertEqual(identity.stats()["degraded"], 1)
+
+    def test_measurement_does_not_alter_resolution(self):
+        identity.configure(lambda p: {"role": "STAFF", "label": "x"})
+        before = identity.resolve(STAFF).role
+        identity.reset_stats()
+        self.assertEqual(identity.resolve(STAFF).role, before)
+
+
+class TestDecisionHash(unittest.TestCase):
+    def test_same_decision_same_hash(self):
+        from bic import replay
+        a = replay.Decision(route="owner", role="OWNER")
+        b = replay.Decision(route="owner", role="OWNER")
+        self.assertEqual(replay.decision_hash(a), replay.decision_hash(b))
+
+    def test_different_decision_different_hash(self):
+        from bic import replay
+        a = replay.Decision(route="owner", role="OWNER")
+        b = replay.Decision(route="client", role="CLIENT")
+        self.assertNotEqual(replay.decision_hash(a), replay.decision_hash(b))
+
+
+class TestDeprecatedResolver(unittest.TestCase):
+    def test_policy_resolve_principal_is_marked_deprecated(self):
+        from bic import policy
+        doc = policy.resolve_principal.__doc__ or ""
+        self.assertIn("@deprecated", doc)
+        self.assertIn("bic.identity", doc)
+        self.assertIn("REMOVAL CONDITIONS", doc)
+
+    def test_production_path_does_not_call_deprecated_resolver(self):
+        import inspect
+        self.assertNotIn("resolve_principal", inspect.getsource(w.get_role))
+        from bic import brain
+        self.assertNotIn("policy.resolve_principal", open(brain.__file__).read())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

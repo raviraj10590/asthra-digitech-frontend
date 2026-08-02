@@ -67,36 +67,37 @@ non-determinism, not a migration defect.
 
 ---
 
-## ⚠️ Current limitation — the comparison is presently VACUOUS
+## Identity resolution — ONE canonical resolver
 
-**Status: replay is deployed but its client-path result is not yet meaningful.**
+Both pipelines resolve identity through **`bic.identity.resolve()`**
+(ADR 0005). One resolver, one cache, one lookup query, one bootstrap list.
 
-Root cause: the two role lookups use different credentials.
+```
+                    ┌──────────────────────┐
+webhook.get_role() ─┤                      │
+                    │  bic.identity        │──► injected fetcher ──► bot_roles
+bic.brain.handle() ─┤  (THE cache)         │      (anon key)
+                    └──────────────────────┘
+```
 
-| Path | Reads `bot_roles` with | Works today? |
-|---|---|---|
-| `webhook.get_role()` | `SUPABASE_KEY` (anon) | ✅ yes |
-| `bic.policy.resolve_principal()` | `SUPABASE_SERVICE_ROLE_KEY` via `bic.db` | ❌ **key not set (D3)** |
+This is what makes replay meaningful. A disagreement can now only indicate a
+**real logic difference** — never two lookup implementations differing.
 
-Consequence, per sender type:
-
-| Sender | Legacy result | Replay result | Verdict |
+| Sender | Legacy | Replay | Verdict |
 |---|---|---|---|
-| Bootstrap owner | OWNER (env, no DB) | OWNER (env, no DB) | ✅ real match |
-| Number in `bot_roles` as STAFF | STAFF | CLIENT (lookup failed → degraded) | ✅ real DIFF, correctly flagged |
-| Unknown number | CLIENT | CLIENT (**because the lookup failed**) | ⚠️ **FALSE MATCH** |
+| Bootstrap owner | OWNER (env, no lookup) | OWNER (same path) | ✅ genuine |
+| Staff in `bot_roles` | STAFF | STAFF (same lookup) | ✅ genuine |
+| Unknown number | CLIENT (real lookup, no row) | CLIENT (same lookup) | ✅ genuine |
+| DB unavailable | CLIENT, degraded | CLIENT, degraded | ✅ identical degradation |
 
-The unknown-number case — by far the most common — agrees **by accident**, not
-by verification. Both sides land on CLIENT for different reasons.
+**Consequence to be honest about:** route comparison is now *tautological* —
+both sides call the same function, so route can never disagree. That is the
+intended end state, not a weakness in the harness, but it means route matches
+are **not independent evidence**. Real divergence must come from tool selection
+and intended side effects, which arrive when the handlers are wrapped (S5).
 
-**Therefore `BIC_REPLAY_MATCH` on client traffic is currently not evidence.**
-It must not be counted toward acceptance until the credential issue is resolved
-(see ADR 0005).
-
-`Principal.degraded` is set on the failing path, so degraded samples are
-identifiable and must be **excluded** from any acceptance tally.
-
----
+Degraded resolutions are flagged (`Principal.degraded`, `"degraded": true` in
+the log) and must be excluded from any acceptance tally.
 
 ## Acceptance evidence required before `BIC_POLICY_ENABLED=true`
 
@@ -115,9 +116,19 @@ Evidence is recorded in `docs/PROGRESS.md` before the flag is flipped.
 
 ## Log format
 
+One structured JSON line per turn, greppable and machine-parseable:
+
 ```
-BIC_REPLAY_MATCH route=<owner|client> role=<ROLE>
-BIC_REPLAY_DIFF  sender=<last4> [field: legacy=… replay=…]
+BIC_REPLAY_MATCH {"route":"owner","role":"OWNER","flow":"owner","tools":[],
+                  "decision_hash":"a1b2…","degraded":false,"sender":"9951"}
+BIC_REPLAY_DIFF  {…same fields…, "diffs":["route: legacy='client' replay='owner'"]}
 ```
+
+`decision_hash` is a stable hash of the whole Decision, so "did anything
+change?" is answerable without diffing fields, and an accepted baseline is
+citable as a single value.
+
+`tools` is present but empty until the handlers are wrapped (S5) — the field
+exists now so the log shape does not change when they arrive.
 
 Replay failures are swallowed and logged; they must never affect a live turn.

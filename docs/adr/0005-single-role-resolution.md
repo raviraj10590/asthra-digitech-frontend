@@ -1,6 +1,6 @@
 # ADR 0005 — One source of truth for role resolution
 
-**Status:** PROPOSED — needs owner approval (touches closed Slice 1B)
+**Status:** ✅ IMPLEMENTED — owner-approved 2026-08-02
 **Date:** 2026-08-02 · **Raised by:** owner review of Slice 1C, point 4
 
 ## Problem
@@ -23,11 +23,12 @@ today, because `SUPABASE_SERVICE_ROLE_KEY` is not set (deployment item D3).
 This violates the intent of Article II: there should be exactly one place that
 decides who someone is.
 
-## Consequence today
+## Consequence at the time (now RESOLVED)
 
-`bic.policy` cannot read `bot_roles` at all, so it fails closed to CLIENT.
-That makes the Slice 1C replay comparison **vacuous for unknown senders** —
-both sides say CLIENT, for different reasons. Detailed in `docs/REPLAY-SPEC.md`.
+`bic.policy` could not read `bot_roles` at all, so it failed closed to CLIENT.
+That made the Slice 1C replay comparison **vacuous for unknown senders** — both
+sides said CLIENT for different reasons. Fixed by this ADR: the fetcher is now
+injected, so both paths perform the same real lookup.
 
 ## Options
 
@@ -64,6 +65,42 @@ Two authorities on identity, drifting independently. The security boundary
 built in 1B is only meaningful if it is the one that actually decides — a
 second resolver that production trusts instead makes 1B decorative.
 
-## Status
+## What was implemented
 
-Awaiting approval. **No code written for this ADR.**
+`bic/identity.py` — a NEW module (1C integration; 1B untouched):
+
+- **Reuses** `Principal`, `ROLE_ORDER` and `BOOTSTRAP_OWNERS` from `bic.policy`;
+  bootstrap logic is imported, never redefined.
+- Holds **the** cache. `webhook._role_cache` is deleted.
+- Takes an **injected row fetcher**, so `bot_roles` is read with the anon key
+  its own RLS policy already permits (option B), removing the hidden
+  service-role dependency.
+- `resolve_legacy()` returns `(role, label)` so `webhook.get_role()` delegates
+  without changing its signature or semantics (option C).
+- `bic.brain` resolves through it too, so BOTH paths share one implementation.
+
+`bic.policy.resolve_principal()` is marked `@deprecated` with explicit removal
+conditions. It is not called in production, so its cache is never populated.
+
+**Deviation from the original sequencing:** the ADR proposed doing this AFTER
+1C. The owner directed it be done as 1C integration instead, because the replay
+evidence 1C depends on is meaningless until the duplication is gone. The
+concern that motivated the original ordering — ambiguous replay mismatches
+during a routing migration — does not apply, since no routing has migrated yet.
+
+**Caught during implementation:** `#addstaff` / `#removerole` still referenced
+the deleted `webhook._role_cache` and would have raised `NameError` on any role
+grant. Both now call `_invalidate_role()`.
+
+## Verification
+
+11 equivalence tests prove legacy == Brain for bootstrap owner, staff, unknown
+sender and DB-unavailable (both degrade to CLIENT; neither escalates), plus one
+shared cache, correct invalidation, and degraded results not being cached.
+Mutation-tested: disabling the shared cache fails 2 tests.
+
+## Removal of the deprecated function
+
+See the `@deprecated` docstring in `bic/policy.py` for the three conditions.
+Summary: 1C accepted, no callers remain, and a slice is open that may modify
+`bic/policy.py` — 1B is closed, so removal needs an explicit phase.

@@ -106,6 +106,15 @@ def fingerprint(messages: Any) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def decision_hash(decision: "Decision") -> str:
+    """Stable hash of a Decision — one token that says "same decision or not".
+
+    Lets log scanning answer "did anything change?" without diffing fields, and
+    makes an accepted baseline citable as a single value.
+    """
+    return fingerprint(decision.to_dict())
+
+
 def compare(legacy: Decision, replay: Decision) -> List[str]:
     """Field-by-field diff. Empty list means the pipelines agree.
 

@@ -2133,20 +2133,35 @@ def _bic_replay_compare(sender: str, legacy_role: str) -> None:
     if not BIC_AVAILABLE:
         return
     try:
-        principal = bic_policy.resolve_principal(sender, channel="whatsapp")
+        # Same canonical resolver the legacy path used (ADR 0005), so this is a
+        # cache hit and adds no query.
+        principal = bic_identity.resolve(sender, channel="whatsapp")
         legacy_route = "owner" if legacy_role in ("OWNER", "STAFF") else "client"
         replay_route = "owner" if principal.role in bic_brain.INTERNAL_ROLES else "client"
 
-        diffs = bic_replay.compare(
-            bic_replay.Decision(route=legacy_route, role=legacy_role),
-            bic_replay.Decision(route=replay_route, role=principal.role),
-        )
+        legacy_d = bic_replay.Decision(route=legacy_route, role=legacy_role)
+        replay_d = bic_replay.Decision(route=replay_route, role=principal.role)
+        diffs = bic_replay.compare(legacy_d, replay_d)
+
+        # Structured, greppable, one line per turn. Tools are empty until the
+        # handlers are wrapped (S5) — the field exists so the log shape does not
+        # change when they arrive.
+        record = {
+            "route": replay_route,
+            "role": principal.role,
+            "flow": replay_route,
+            "tools": [],
+            "decision_hash": bic_replay.decision_hash(replay_d),
+            "degraded": principal.degraded,
+            "sender": sender[-4:],
+        }
         if diffs:
             # A route disagreement is the one difference that actually matters:
             # it would mean a customer could receive the internal pipeline.
-            print(f"BIC_REPLAY_DIFF sender={sender[-4:]} {diffs}")
+            record["diffs"] = diffs
+            print(f"BIC_REPLAY_DIFF {json.dumps(record)}")
         else:
-            print(f"BIC_REPLAY_MATCH route={legacy_route} role={legacy_role}")
+            print(f"BIC_REPLAY_MATCH {json.dumps(record)}")
     except Exception as e:
         print(f"BIC replay error (ignored, production unaffected): {e}")
 

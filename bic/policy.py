@@ -69,7 +69,34 @@ class Principal:
 
 def resolve_principal(sender_id: str, channel: str = "whatsapp",
                       tenant_id: Optional[str] = None) -> Principal:
-    """Resolve identity from the VERIFIED sender id.
+    """@deprecated — SUPERSEDED BY bic.identity.resolve()
+
+    ⚠️ DO NOT CALL. Retained only so Slice 1B remains untouched after closure.
+    Nothing in production reaches this function, so its module-level
+    `_role_cache` is never populated and there is exactly one live cache
+    (bic.identity._cache).
+
+    Superseded 2026-08-02 by the canonical resolver (ADR 0005). The problem it
+    solved is unchanged; what changed is that `bic.identity` is now the ONE
+    implementation shared by the legacy webhook path and the Brain, so a
+    Decision Replay disagreement can only mean a real logic difference rather
+    than two lookups differing.
+
+    Differences worth knowing if you are tempted to use this:
+      • reads bot_roles via bic.db (SERVICE-ROLE key). bic.identity injects the
+        fetcher instead, letting the caller use the anon key that bot_roles'
+        own RLS policy already permits — least privilege, and it removed the
+        hidden dependency that made replay comparisons vacuous.
+      • keeps a SECOND cache, which is exactly the duplication ADR 0005 removed.
+
+    REMOVAL CONDITIONS — delete this function when ALL of:
+      1. Slice 1C is accepted and BIC_POLICY_ENABLED has been true in
+         production through at least one full migration stage without rollback.
+      2. No caller remains: `grep -rn "resolve_principal" --include=*.py`
+         returns only this definition and its tests.
+      3. A slice is open that is permitted to modify bic/policy.py — 1B is
+         closed, so removal needs an explicit phase, not an opportunistic edit.
+    Until then it stays as documented dead code rather than a silent trap.
 
     Article II.1: the sender id comes from the transport (Meta's authenticated
     webhook payload), never from message content. Nothing a user can type

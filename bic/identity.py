@@ -59,6 +59,43 @@ def clear_cache() -> None:
     _cache.clear()
 
 
+# ── Latency measurement (Performance Rules: measure before optimising) ───────
+# In-process counters only — no storage, no extra queries, no dependency. They
+# reset on cold start, which is fine: the question is "what does resolution
+# cost per invocation", not a long-run time series.
+_stats = {
+    "hits": 0, "misses": 0, "bootstrap": 0, "degraded": 0,
+    "hit_ms_total": 0.0, "miss_ms_total": 0.0,
+    "hit_ms_max": 0.0, "miss_ms_max": 0.0,
+}
+
+
+def _record(kind: str, elapsed_ms: float) -> None:
+    _stats[kind] += 1
+    if kind in ("hits", "misses"):
+        key = "hit" if kind == "hits" else "miss"
+        _stats[f"{key}_ms_total"] += elapsed_ms
+        if elapsed_ms > _stats[f"{key}_ms_max"]:
+            _stats[f"{key}_ms_max"] = elapsed_ms
+
+
+def stats() -> dict:
+    """Snapshot of resolution cost. Averages are None until sampled, so an
+    unsampled counter is never mistaken for a genuine 0 ms."""
+    h, m = _stats["hits"], _stats["misses"]
+    return {
+        **_stats,
+        "hit_ms_avg": round(_stats["hit_ms_total"] / h, 3) if h else None,
+        "miss_ms_avg": round(_stats["miss_ms_total"] / m, 3) if m else None,
+        "total_resolutions": h + m + _stats["bootstrap"],
+    }
+
+
+def reset_stats() -> None:
+    for k in _stats:
+        _stats[k] = 0 if isinstance(_stats[k], int) else 0.0
+
+
 def resolve(sender_id: str, channel: str = "whatsapp",
             tenant_id: Optional[str] = None) -> Principal:
     """Resolve a verified sender id to a Principal.
@@ -74,11 +111,15 @@ def resolve(sender_id: str, channel: str = "whatsapp",
     if not tenant:
         return Principal(sender_id, "CLIENT", "", degraded=True, channel=channel)
 
+    started = time.perf_counter()
+
     if sender_id in BOOTSTRAP_OWNERS:
+        _record("bootstrap", 0.0)
         return Principal(sender_id, "OWNER", tenant, label="bootstrap", channel=channel)
 
     cached = _cache.get(sender_id)
     if cached and cached[2] > time.time():
+        _record("hits", (time.perf_counter() - started) * 1000)
         return Principal(sender_id, cached[0], tenant, label=cached[1], channel=channel)
 
     role, label, degraded = "CLIENT", None, False
@@ -100,6 +141,11 @@ def resolve(sender_id: str, channel: str = "whatsapp",
     # to CLIENT for the whole TTL.
     if not degraded:
         _cache[sender_id] = (role, label, time.time() + CACHE_TTL)
+
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    _record("misses", elapsed_ms)
+    if degraded:
+        _record("degraded", 0.0)
 
     return Principal(sender_id, role, tenant, label=label,
                      channel=channel, degraded=degraded)
