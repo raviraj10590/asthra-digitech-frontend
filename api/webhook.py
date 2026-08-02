@@ -454,7 +454,10 @@ def fetch_context(phone: str) -> dict:
             params={
                 "phone":  f"eq.{phone}",
                 "order":  "created_at.desc",
-                "limit":  "24",
+                # 45 rows because this window also carries system markers
+                # (BOT_PAUSED, PENDING_CONFIRM, OWNER_MEMORY::, alert flags);
+                # after filtering those out, ~20 real turns still remain.
+                "limit":  "45",
                 "select": "role,content,created_at",
             },
             timeout=5,
@@ -482,8 +485,11 @@ def fetch_context(phone: str) -> dict:
             ctx["last_user"] = row
 
     convo = [r for r in rows if r.get("role") in ("user", "assistant")]
+    # Keep up to 20 turns available. Callers slice to what they actually want —
+    # generate_reply (client) still takes 8-10, so this costs clients nothing;
+    # it exists so owner mode can use a deeper window.
     ctx["history"] = [{"role": r["role"], "content": r["content"]}
-                      for r in reversed(convo)][-12:]
+                      for r in reversed(convo)][-20:]
     return ctx
 
 def save_message(phone: str, role: str, content: str):
@@ -1599,8 +1605,71 @@ def fetch_owner_memory(phone: str) -> str:
         print(f"fetch_owner_memory error: {e}")
     return ""
 
+# Stored cap. Generous because the note is now sectioned — a single flat blob
+# capped at 2000 chars was quietly dropping older facts every time something new
+# arrived. Archive recall (below) covers anything that still falls out.
+OWNER_MEMORY_MAX_CHARS = 8000
+# Raw conversation turns given to owner mode. Clients stay on their own smaller
+# window (see generate_reply) so this costs nothing on the customer side.
+OWNER_HISTORY_TURNS = 20
+
 def update_owner_memory(phone: str, summary: str):
-    save_message(phone, "system", f"{OWNER_MEMORY_MARKER}{(summary or '').strip()[:2000]}")
+    save_message(phone, "system", f"{OWNER_MEMORY_MARKER}{(summary or '').strip()[:OWNER_MEMORY_MAX_CHARS]}")
+
+# Words too common to be worth searching the archive for.
+_RECALL_STOPWORDS = {
+    "about", "after", "again", "asthra", "before", "could", "digitech", "doing",
+    "should", "their", "there", "these", "thing", "think", "those", "under",
+    "using", "want", "what", "when", "where", "which", "while", "would", "your",
+    "please", "tell", "give", "make", "need", "know", "have", "this", "that",
+    "from", "with", "will", "just", "like", "been", "they", "them", "were",
+}
+
+def recall_from_archive(phone: str, user_text: str, exclude: set) -> str:
+    """Search the FULL message history for older messages matching distinctive
+    words in what the owner just said.
+
+    This is what makes recall effectively unbounded: the rolling note holds the
+    durable summary, and anything compressed out of it is still reachable here —
+    without growing the prompt, because only matching lines get pulled in.
+    Best-effort: any failure returns '' and the reply proceeds normally."""
+    words = {w for w in re.findall(r'[A-Za-zಀ-೿]{5,}', user_text or "")
+             if w.lower() not in _RECALL_STOPWORDS}
+    if not words:
+        return ""
+    terms = list(words)[:4]
+    try:
+        or_clause = ",".join(f"content.ilike.*{t}*" for t in terms)
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+            headers=_supa_headers(""),
+            params={"phone": f"eq.{phone}", "or": f"({or_clause})",
+                     "role": "in.(user,assistant)",
+                     "order": "created_at.desc", "limit": "8",
+                     "select": "role,content,created_at"},
+            timeout=4,
+        )
+        if not r.ok:
+            print(f"recall_from_archive failed: {r.status_code}")
+            return ""
+        hits = []
+        for row in r.json():
+            c = (row.get("content") or "").strip()
+            # Skip anything already in the recent-history window — no point
+            # spending prompt tokens repeating what the model can already see.
+            if not c or c in exclude:
+                continue
+            when = (row.get("created_at") or "")[:10]
+            hits.append(f"[{when}] {row.get('role')}: {c[:300]}")
+            if len(hits) >= 3:
+                break
+        if not hits:
+            return ""
+        return ("EARLIER CONTEXT (older messages matching this topic — recalled "
+                "from the full archive, may predate the memory note):\n" + "\n".join(hits))
+    except Exception as e:
+        print(f"recall_from_archive error: {e}")
+        return ""
 
 def _parse_json_block(raw: str) -> dict:
     """Same tolerant extraction extract_lead_info already uses: find the first
@@ -1614,7 +1683,20 @@ def _parse_json_block(raw: str) -> dict:
 OWNER_TURN_INSTRUCTIONS = """Respond with ONLY a JSON object (no markdown fences, no text outside it), shaped exactly like:
 {"reply": "<your reply to send, in the language they used>", "memory": "<updated long-term memory note>"}
 
-memory rules: under 120 words, organized loosely as Decisions / Preferences / Open items when there's enough to justify it. Keep only durable facts, decisions, ongoing items, and preferences — drop small talk and one-off questions that don't matter later. Merge the prior note with anything new and durable from this exchange. The "memory" field must always be present — repeat the prior note unchanged if nothing new/durable happened this turn."""
+MEMORY RULES — keep the note under these EXACT section headings, in this order, omitting a section only when it has nothing in it:
+
+PEOPLE — staff, clients, contacts: who they are and what matters about them
+PROJECTS — ongoing work, deals, campaigns, and their current state
+DECISIONS — choices already made and the reason, so they aren't re-litigated
+PREFERENCES — how the owner wants things done (tone, tools, working style)
+OPEN — unresolved items, promised follow-ups, things awaiting a decision
+FACTS — durable business facts that don't fit above
+
+Each section is a short bullet list. Aim for under 400 words total; if you must trim, drop the OLDEST item within the most crowded section rather than dropping a whole section — sections must not starve each other.
+
+Carry forward everything still true. Only remove an item when it is genuinely resolved, superseded, or contradicted by this exchange — and when something is superseded, keep the new value, not both. Drop small talk and one-off questions.
+
+The "memory" field must ALWAYS be present. If nothing durable happened this turn, repeat the prior note unchanged, verbatim."""
 
 def owner_business_snapshot() -> str:
     """Live one-line-per-system snapshot, refreshed every reply, so the
@@ -1662,14 +1744,24 @@ def generate_owner_reply(sender: str, role: str, label: str, user_text: str, his
     (either provider can ignore the instruction), the raw text becomes the
     reply and memory simply doesn't advance this turn — never a crash."""
     mem = fetch_owner_memory(sender)
+    recent = (history or [])[-OWNER_HISTORY_TURNS:]
+
     messages = [{"role": "system", "content": OWNER_SYSTEM_PROMPT.format(label=label or "the owner", role=role)}]
     if mem:
         messages.append({"role": "system", "content": f"LONG-TERM MEMORY:\n{mem}"})
+
+    # Archive recall: pull older messages matching this topic that the note may
+    # have compressed away and that aren't already in `recent`.
+    archive = recall_from_archive(sender, user_text,
+                                  exclude={(m.get("content") or "").strip() for m in recent})
+    if archive:
+        messages.append({"role": "system", "content": archive})
+
     snap = owner_business_snapshot()
     if snap:
         messages.append({"role": "system", "content": snap})
     messages.append({"role": "system", "content": OWNER_TURN_INSTRUCTIONS})
-    messages += (history or [])[-12:]
+    messages += recent
     messages.append({"role": "user", "content": user_text})
 
     raw = _generate_ai_reply(messages, "")
