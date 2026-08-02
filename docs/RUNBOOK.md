@@ -64,8 +64,13 @@ are additive only and never touch another system's tables.
 
 ## Running ad-hoc SQL (verification, inspection)
 
-⚠️ **Do not use the dashboard SQL editor** — it has proven unreliable (blank
-renders, hangs, stale cache). Use the Management API. See ADR 0002.
+**The Supabase Management API is the STANDARD and only approved method.**
+Owner-ratified 2026-08-02.
+
+🚫 **The dashboard SQL Editor must not be relied upon.** It failed repeatedly
+across a full session — blank renders, hung script injection, stale cached
+content. Debugging it wastes time proving the editor works instead of proving
+the database works. See ADR 0002.
 
 ```bash
 cat > /tmp/q.sql <<'SQL'

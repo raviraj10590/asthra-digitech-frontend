@@ -8,7 +8,11 @@ A slice is COMPLETE only when every Quality Gate item passes.
 ## Phase 1 — Foundation
 
 ### Slice 1A — Migration tooling · Knowledge schema · Registries
-**Status: 🟡 CODE COMPLETE & VERIFIED — awaiting owner sign-off items**
+**Status: ✅ COMPLETE** (engineering) — owner-approved 2026-08-02
+
+Engineering completion and deployment readiness are tracked separately. The
+three outstanding operational tasks do not change 1A's implementation, so they
+sit in the Deployment Checklist below rather than blocking the slice.
 
 | Quality Gate | Status |
 |---|---|
@@ -44,15 +48,26 @@ duplicate single-cardinality REJECTED .............. PASS
 post-test row counts all zero (no residue) ......... PASS
 ```
 
-**Blocking 1A → COMPLETE (owner actions, cannot be done from code):**
-1. ⬜ Verify DeepSeek live via `#aitest` from WhatsApp
-2. ⬜ Rotate the exposed DeepSeek API key
-3. ⬜ Add `SUPABASE_SERVICE_ROLE_KEY` to the bot's Vercel env *(1B needs it — BIC tables are service-role only)*
+---
+
+## Deployment Checklist (operational — not slice implementation)
+
+Owner-only tasks. They do not alter any slice's code.
+
+| # | Task | Blocks | Status |
+|---|---|---|---|
+| D1 | Run `#aitest` from WhatsApp — confirm DeepSeek live | nothing (verification) | ⬜ |
+| D2 | Rotate the exposed DeepSeek API key | nothing (security hygiene) | ⬜ |
+| D3 | Add `SUPABASE_SERVICE_ROLE_KEY` to bot Vercel env | **1B deploy** | ⬜ |
+
+⚠️ **D3 blocks 1B's deployment, not its design.** BIC tables are deny-by-default
+RLS, so no code can read or write them until the service-role key exists. 1B can
+be designed and built against it; it cannot go to production without it.
 
 ---
 
 ### Slice 1B — Policy Gate · Tool Registry · Invocation logging
-**Status: ⬜ BLOCKED — IDD not written; 1A not signed off**
+**Status: 📋 IDD WRITTEN — awaiting approval** → `docs/idd/1B-policy-tool-layer.md`
 
 ### Slice 1C — BrainRequest/BrainResponse · WhatsApp adapter
 **Status: ⬜ NOT STARTED**
