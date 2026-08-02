@@ -112,11 +112,14 @@ class TestRegistry(unittest.TestCase):
         self.audits = []
         self._orig = tools._audit
         tools._audit = lambda *a, **k: self.audits.append((a, k))
+        # Snapshot/restore instead of popping: webhook registers REAL handlers
+        # at import, and popping them leaked across test files.
+        self._handlers_snapshot = dict(tools._HANDLERS)
 
     def tearDown(self):
         tools._audit = self._orig
-        tools._HANDLERS.pop("leads_today", None)
-        tools._HANDLERS.pop("boom", None)
+        tools._HANDLERS.clear()
+        tools._HANDLERS.update(self._handlers_snapshot)
 
     def test_denied_call_never_reaches_handler(self):
         """The core guarantee: policy denial happens BEFORE execution."""

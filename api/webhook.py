@@ -49,7 +49,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from bic import (brain as bic_brain, config as bic_config,
                      contract as bic_contract, identity as bic_identity,
-                     policy as bic_policy, replay as bic_replay)
+                     policy as bic_policy, replay as bic_replay,
+                     tools as bic_tools)
     from adapters import whatsapp as wa_adapter
     BIC_AVAILABLE = True
     print("BIC: package import OK")
@@ -2087,6 +2088,95 @@ def maybe_alert_lead(sender: str, lead: dict, already_alerted: bool):
         log_reply_to_crm(sender, note)
 
 
+def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
+    """The customer pipeline, EXTRACTED VERBATIM from do_POST.
+
+    Slice 1C: extracted so both the legacy path and the Brain flow can call the
+    SAME code. Identical behaviour is therefore structural — there is only one
+    implementation — rather than something two copies have to agree on.
+
+    Logic is unchanged, including its own sends (ADR 0003: this pipeline
+    self-sends inline; reshaping it to return text would mean rewriting business
+    functions, which 1C forbids). The only edit is `self._ok(); return` becoming
+    `return`, since the caller now owns the HTTP response.
+    """
+    memory = fetch_memory(sender)  # env-gated: {} until MEMORY_TABLE is set
+
+    is_new_contact = not ctx["history"]
+
+    # ── Menu escape hatch: reset any stuck chat to the services menu ──
+    if is_menu_request(user_text) and not is_new_contact:
+        send_welcome_menu(sender)
+        save_messages([(sender, "user", user_text),
+                       (sender, "assistant", "[ಮೆನು ಮರುಕಳಿಸಲಾಯಿತು]")])
+        return
+
+    # ── Off-topic guard: blatant non-business → polite redirect, no AI ──
+    if is_off_topic(user_text):
+        send_text(sender,
+            "ಕ್ಷಮಿಸಿ 🙏 ನಾನು Asthra DigiTech ಸೇವೆಗಳ ಬಗ್ಗೆ ಮಾತ್ರ ಸಹಾಯ ಮಾಡಬಲ್ಲೆ.\n"
+            "ನಿಮ್ಮ business ಗೆ website, social media, ads ಅಥವಾ design ಬೇಕಾ? "
+            "'menu' ಟೈಪ್ ಮಾಡಿ ನಮ್ಮ ಸೇವೆಗಳನ್ನು ನೋಡಿ."
+        )
+        save_messages([(sender, "user", user_text),
+                       (sender, "assistant", "[off-topic — redirected]")])
+        return
+
+    # ── VIP / election detection → instant owner alert ────────────
+    maybe_alert_vip(sender, user_text, ctx["vip_alerted"])
+
+    # ── Human handoff: owner paused this chat ─────────────────────
+    if ctx["paused"]:
+        save_message(sender, "user", user_text)  # keep the record
+        print(f"⏸️ bot paused for {sender} — staying silent")
+        return
+
+    # ── Brochure request? ─────────────────────────────────────────
+    if is_brochure_request(user_text):
+        send_text(sender, "ಖಂಡಿತ! ನಮ್ಮ ಕಂಪನಿ ಪ್ರೊಫೈಲ್ ಇಲ್ಲಿದೆ 🙏")
+        send_brochure(sender)
+        time.sleep(1)
+        send_followup_buttons(sender)
+        save_messages([(sender, "user", user_text),
+                       (sender, "assistant", "[ಬ್ರೋಚರ್ PDF ಕಳಿಸಲಾಯಿತು]")])
+        notify_owner(f"📄 Brochure sent to wa.me/{sender}")
+
+    # ── New contact: greet with services menu ─────────────────────
+    elif is_new_contact:
+        send_welcome_menu(sender)
+        save_messages([(sender, "user", user_text),
+                       (sender, "assistant", "[ಸ್ವಾಗತ + ಸೇವೆಗಳ ಮೆನು ಕಳಿಸಲಾಯಿತು]")])
+
+    # ── Normal AI reply ───────────────────────────────────────────
+    else:
+        reply = generate_reply(sender, user_text, history=ctx["history"], memory=memory)
+        print(f"🤖 {reply[:80]}")
+        send_text(sender, reply + after_hours_note())
+        save_messages([(sender, "user", user_text),
+                       (sender, "assistant", reply)])
+
+        # Lead extraction: EVERY turn while the chat is short (early
+        # drop-offs are exactly the leads we must not lose), then every
+        # 2nd turn once the conversation is established.
+        history = ctx["history"] + [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": reply},
+        ]
+        if len(history) >= 4 and (len(history) < 8 or (len(history) // 2) % 2 == 0):
+            lead = extract_lead_info(history)
+            if lead:
+                # Upsert only columns the leads table actually has —
+                # score/summary/timeline travel via alert + CRM note.
+                upsert_lead(sender, {k: v for k, v in lead.items()
+                                     if k in ("name", "company", "service_needed", "budget", "city")})
+                maybe_alert_lead(sender, lead, ctx["lead_alerted"])
+                # Business workflows the analyst detected (meeting, callback,
+                # quote, follow-up, unhappy, …). Deduped, best-effort, post-reply.
+                run_workflows(sender, lead, ctx)
+                # Hierarchical memory: merge fresh facts + roll summary.
+                # Post-reply, env-gated, best-effort — never blocks the customer.
+                update_memory(sender, lead, lead.get("summary", ""), history, memory)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # BIC SLICE 1C — Brain wiring + Decision Replay
 #
@@ -2196,6 +2286,77 @@ def _bic_owner_turn(sender: str, user_text: str, ctx: dict,
     wa_adapter.render(response, request, send_text=send_text)
     save_messages([(sender, "user", user_text),
                    (sender, "assistant", response.text)])
+
+
+def _bic_client_turn(sender: str, user_text: str, ctx: dict,
+                     message_id: str = None) -> None:
+    """Route a CLIENT turn through Adapter → Brain → flow → Adapter.
+
+    The flow calls run_client_pipeline — the SAME function the legacy path
+    calls — so behaviour is identical by construction rather than by two
+    implementations agreeing.
+
+    The pipeline self-sends and returns nothing, so the flow returns an empty
+    BrainResponse and the adapter's send step is a deliberate no-op. That is
+    ADR 0003's temporary bridge, not the target architecture; it is removed at
+    S6 when the client handlers return populated responses.
+    """
+    request = bic_contract.BrainRequest(
+        channel="whatsapp", sender_id=sender, text=user_text,
+        thread_id=sender, message_id=message_id,
+    )
+
+    def client_flow(principal, req):
+        run_client_pipeline(principal.sender_id, req.text, ctx)
+        return bic_contract.BrainResponse(text="")   # pipeline already replied
+
+    def owner_flow(principal, req):
+        # Reachable only if identity resolves differently than the caller
+        # expected. Delegating keeps the two paths consistent instead of
+        # silently dropping the turn.
+        reply = handle_owner_text(principal.sender_id, principal.role,
+                                  principal.label, req.text, ctx)
+        return bic_contract.BrainResponse(text=reply)
+
+    response = bic_brain.handle(
+        request, bic_brain.Flows(owner=owner_flow, client=client_flow))
+
+    # Owner-flow fallback still needs its reply sent and saved; the client flow
+    # returns empty text, so render() and the save below are no-ops for it
+    # (run_client_pipeline already saved its own messages).
+    if (response.text or "").strip():
+        wa_adapter.render(response, request, send_text=send_text)
+        save_messages([(sender, "user", user_text),
+                       (sender, "assistant", response.text)])
+
+
+# ── Tool handlers (Slice 1B registry, wired in 1C) ──────────────────────────
+# Each handler WRAPS an existing business function. No logic is reimplemented,
+# so the registry cannot drift from what the legacy path does. Registration
+# lives here — beside the functions it wraps — because bic/ must never import
+# application code (dependency direction, Article VIII).
+if BIC_AVAILABLE:
+    @bic_tools.register("leads_today")
+    def _tool_h_leads_today(principal, timeout=10, **_):
+        return tool_leads(principal.sender_id)
+
+    @bic_tools.register("crm_list_clients")
+    def _tool_h_crm_list_clients(principal, timeout=10, **_):
+        return tool_clients(principal.sender_id)
+
+    @bic_tools.register("roles_list")
+    def _tool_h_roles_list(principal, timeout=10, **_):
+        return tool_roles_list(principal.sender_id)
+
+    @bic_tools.register("send_brochure")
+    def _tool_h_send_brochure(principal, timeout=15, **_):
+        send_brochure(principal.sender_id)
+        return "sent"
+
+    @bic_tools.register("crm_sync_lead")
+    def _tool_h_crm_sync_lead(principal, timeout=10, data=None, **_):
+        sync_lead_to_crm(principal.sender_id, data or {})
+        return "synced"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2371,82 +2532,11 @@ class handler(BaseHTTPRequestHandler):
                     save_messages([(sender, "user", user_text), (sender, "assistant", reply)])
                 self._ok(); return
 
-            memory = fetch_memory(sender)  # env-gated: {} until MEMORY_TABLE is set
-
-            is_new_contact = not ctx["history"]
-
-            # ── Menu escape hatch: reset any stuck chat to the services menu ──
-            if is_menu_request(user_text) and not is_new_contact:
-                send_welcome_menu(sender)
-                save_messages([(sender, "user", user_text),
-                               (sender, "assistant", "[ಮೆನು ಮರುಕಳಿಸಲಾಯಿತು]")])
-                self._ok(); return
-
-            # ── Off-topic guard: blatant non-business → polite redirect, no AI ──
-            if is_off_topic(user_text):
-                send_text(sender,
-                    "ಕ್ಷಮಿಸಿ 🙏 ನಾನು Asthra DigiTech ಸೇವೆಗಳ ಬಗ್ಗೆ ಮಾತ್ರ ಸಹಾಯ ಮಾಡಬಲ್ಲೆ.\n"
-                    "ನಿಮ್ಮ business ಗೆ website, social media, ads ಅಥವಾ design ಬೇಕಾ? "
-                    "'menu' ಟೈಪ್ ಮಾಡಿ ನಮ್ಮ ಸೇವೆಗಳನ್ನು ನೋಡಿ."
-                )
-                save_messages([(sender, "user", user_text),
-                               (sender, "assistant", "[off-topic — redirected]")])
-                self._ok(); return
-
-            # ── VIP / election detection → instant owner alert ────────────
-            maybe_alert_vip(sender, user_text, ctx["vip_alerted"])
-
-            # ── Human handoff: owner paused this chat ─────────────────────
-            if ctx["paused"]:
-                save_message(sender, "user", user_text)  # keep the record
-                print(f"⏸️ bot paused for {sender} — staying silent")
-                self._ok(); return
-
-            # ── Brochure request? ─────────────────────────────────────────
-            if is_brochure_request(user_text):
-                send_text(sender, "ಖಂಡಿತ! ನಮ್ಮ ಕಂಪನಿ ಪ್ರೊಫೈಲ್ ಇಲ್ಲಿದೆ 🙏")
-                send_brochure(sender)
-                time.sleep(1)
-                send_followup_buttons(sender)
-                save_messages([(sender, "user", user_text),
-                               (sender, "assistant", "[ಬ್ರೋಚರ್ PDF ಕಳಿಸಲಾಯಿತು]")])
-                notify_owner(f"📄 Brochure sent to wa.me/{sender}")
-
-            # ── New contact: greet with services menu ─────────────────────
-            elif is_new_contact:
-                send_welcome_menu(sender)
-                save_messages([(sender, "user", user_text),
-                               (sender, "assistant", "[ಸ್ವಾಗತ + ಸೇವೆಗಳ ಮೆನು ಕಳಿಸಲಾಯಿತು]")])
-
-            # ── Normal AI reply ───────────────────────────────────────────
+            if _bic_enabled():
+                _bic_client_turn(sender, user_text, ctx, msg.get("id"))
             else:
-                reply = generate_reply(sender, user_text, history=ctx["history"], memory=memory)
-                print(f"🤖 {reply[:80]}")
-                send_text(sender, reply + after_hours_note())
-                save_messages([(sender, "user", user_text),
-                               (sender, "assistant", reply)])
-
-                # Lead extraction: EVERY turn while the chat is short (early
-                # drop-offs are exactly the leads we must not lose), then every
-                # 2nd turn once the conversation is established.
-                history = ctx["history"] + [
-                    {"role": "user", "content": user_text},
-                    {"role": "assistant", "content": reply},
-                ]
-                if len(history) >= 4 and (len(history) < 8 or (len(history) // 2) % 2 == 0):
-                    lead = extract_lead_info(history)
-                    if lead:
-                        # Upsert only columns the leads table actually has —
-                        # score/summary/timeline travel via alert + CRM note.
-                        upsert_lead(sender, {k: v for k, v in lead.items()
-                                             if k in ("name", "company", "service_needed", "budget", "city")})
-                        maybe_alert_lead(sender, lead, ctx["lead_alerted"])
-                        # Business workflows the analyst detected (meeting, callback,
-                        # quote, follow-up, unhappy, …). Deduped, best-effort, post-reply.
-                        run_workflows(sender, lead, ctx)
-                        # Hierarchical memory: merge fresh facts + roll summary.
-                        # Post-reply, env-gated, best-effort — never blocks the customer.
-                        update_memory(sender, lead, lead.get("summary", ""), history, memory)
+                run_client_pipeline(sender, user_text, ctx)
+            self._ok(); return
 
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             print(f"Parse error: {e}")
