@@ -29,10 +29,30 @@ v2.7 — OWNER / STAFF / CLIENT role system (2026-07-28):
     degrade to CLIENT gracefully if it's missing/unreachable.
 """
 
-import hashlib, hmac, json, os, re, time, tempfile, requests
+import hashlib, hmac, json, os, re, sys, time, tempfile, requests
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
+
+# ── BIC availability probe (Slice 1C prerequisite) ─────────────────────────────
+# Vercel's Python builder bundles what the entrypoint imports, so until this
+# line existed `bic/` shipped in git but not in the Lambda. This import is the
+# smallest possible check that the package resolves at runtime BEFORE the
+# adapter is built on top of that assumption.
+#
+# Deliberately guarded: a bundling failure must degrade to a log line, never a
+# 500 on a live customer webhook. BIC_AVAILABLE gates all 1C wiring.
+#
+# The repo root is added to sys.path because the function's own directory is
+# api/, and `bic/` is a sibling of it, not a child.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from bic import brain as bic_brain, contract as bic_contract, policy as bic_policy
+    BIC_AVAILABLE = True
+    print("BIC: package import OK")
+except Exception as _bic_err:  # pragma: no cover - environment dependent
+    BIC_AVAILABLE = False
+    print(f"BIC: package import FAILED ({_bic_err}) — running legacy path only")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN",    "asthra_secret_2024")
