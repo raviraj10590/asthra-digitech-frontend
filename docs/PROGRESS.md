@@ -115,7 +115,24 @@ means:
 integration work and belongs to 1C.
 
 ### Slice 1C — Request Architecture
-**Status: ⬜ NEXT** — 1B accepted; 1C is the only sanctioned next work
+**Status: 🚧 IN PROGRESS**
+
+| Item | Status |
+|---|---|
+| BrainRequest / BrainResponse | ✅ `bic/contract.py` |
+| Brain runtime | ✅ `bic/brain.py` |
+| **Bundling verified in production** | ✅ see below |
+| Webhook Adapter | ⬜ |
+| Feature-flag migration | ⬜ |
+| Old vs new comparison | ⬜ |
+
+**✅ Prerequisite 2 RESOLVED — `bic/` bundles correctly.**
+Confirmed in production, not assumed: the deployed Lambda logs
+`BIC: package import OK`. One line was required — `sys.path.insert` of the repo
+root, because the function's directory is `api/` and `bic/` is its sibling, not
+its child. **No `includeFiles` needed.** The import is guarded, so a future
+bundling failure degrades to a log line and `BIC_AVAILABLE=False`, never a 500
+on a live customer webhook.
 
 Contains: `BrainRequest` · `BrainResponse` · Webhook Adapter · routing
 migration · feature-flag rollout · old-vs-new behaviour comparison
