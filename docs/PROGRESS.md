@@ -122,9 +122,55 @@ integration work and belongs to 1C.
 | BrainRequest / BrainResponse | ✅ `bic/contract.py` |
 | Brain runtime | ✅ `bic/brain.py` |
 | **Bundling verified in production** | ✅ see below |
-| Webhook Adapter | ⬜ |
-| Feature-flag migration | ⬜ |
+| Webhook Adapter | ✅ `adapters/whatsapp.py` (built, **not wired**) |
+| Adapter wiring into `do_POST` | ⬜ next session |
+| Feature-flag routing | ⬜ |
+| **Shadow Mode** | ⬜ ⚠️ design decision required — see below |
 | Old vs new comparison | ⬜ |
+
+**Tests:** 68 offline, green. **`webhook.py` routing untouched** — only the
+guarded BIC import probe.
+
+**Client-flow bridge is TEMPORARY** — see ADR 0003. The client flow will send
+its own messages and return `BrainResponse(text="")`. Accepted for 1C only
+(behaviour preservation > purity). No future phase may depend on it.
+
+---
+
+#### ⚠️ Shadow Mode — hazard to resolve BEFORE implementation
+
+Owner requirement: run both paths per message, compare, and give the customer
+the legacy reply.
+
+**Taken literally, this causes DOUBLE SIDE EFFECTS.** The paths are not pure
+functions — running the new path a second time would also re-run everything it
+does:
+
+| Side effect | Consequence of naive shadowing |
+|---|---|
+| `generate_reply()` | **2× AI calls** — doubles tokens/cost, on a provider already hitting quota |
+| `sync_lead_to_crm()` | **Duplicate CRM writes** — real rows in a real customer database |
+| `update_owner_memory()` | Memory rolled forward twice; second pass sees the first's output |
+| `send_text` / `send_brochure` | **Customer receives the message twice** |
+| `notify_owner` | Duplicate owner alerts |
+| `save_messages` | Duplicate conversation history, corrupting later context |
+
+Shadowing is only safe if the shadow run is **side-effect-free**. Options for
+the next session:
+
+- **A — Injected no-op collaborators (recommended).** Run the shadow flow with
+  stubbed `send_text` / CRM writer / memory writer / `save_messages`, capturing
+  intended calls instead of performing them. Compares *decisions* rather than
+  re-executing effects. Still costs one extra AI call per message unless the AI
+  call is also stubbed or cached.
+- **B — Compare decisions only.** Shadow just the routing/classification
+  outcome (which flow, which branch, which tool), not reply generation. Zero
+  extra cost and zero risk, but does not compare reply text.
+- **C — Shadow OWNER path only.** Two known numbers, no customer exposure, and
+  `handle_owner_text` returns text cleanly. Lowest blast radius.
+
+**Do not implement shadow mode until this is decided.** A naive implementation
+would create duplicate CRM rows and double AI spend on the first live message.
 
 **✅ Prerequisite 2 RESOLVED — `bic/` bundles correctly.**
 Confirmed in production, not assumed: the deployed Lambda logs
@@ -139,13 +185,26 @@ migration · feature-flag rollout · old-vs-new behaviour comparison
 (response text, memory updates, tool execution, CRM updates, latency).
 
 **Prerequisites:**
-1. D3 — `SUPABASE_SERVICE_ROLE_KEY` in bot Vercel env. Once the new path is
+1. ⬜ D3 — `SUPABASE_SERVICE_ROLE_KEY` in bot Vercel env. Once the new path is
    live every invocation writes to `bic_tool_invocations`; without the key those
    writes fail and the rollout runs blind, with no data for the behaviour
    comparison.
-2. Confirm `bic/` is bundled by Vercel on first import (see 1B note).
-3. Wire the 5 approved tool handlers to existing business functions —
+2. ✅ ~~Confirm `bic/` is bundled by Vercel~~ — **RESOLVED**, verified in
+   production (`BIC: package import OK`).
+3. ⬜ Wrap the 5 approved tool handlers around existing business functions —
    **wrap, never rewrite**.
+
+**Acceptance criteria for 1C (owner-defined):**
+adapter wired · feature flag works · shadow mode completed · behaviour
+comparison passes · no customer-visible regression · documentation updated.
+
+**Target architecture** (unchanged; ADR 0003 records the one temporary deviation):
+```
+Webhook → Adapter → BrainRequest → Brain → Policy → Tool Registry
+        → Business Function → BrainResponse → Adapter → WhatsApp
+```
+Every flow should eventually return a `BrainResponse`. No flow should
+permanently send messages directly.
 
 ### Slice 1D — Knowledge backfill · Retention · Golden set · Docs
 **Status: ⬜ NOT STARTED**
