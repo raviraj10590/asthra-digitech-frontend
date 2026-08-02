@@ -99,11 +99,45 @@ and intended side effects, which arrive when the handlers are wrapped (S5).
 Degraded resolutions are flagged (`Principal.degraded`, `"degraded": true` in
 the log) and must be excluded from any acceptance tally.
 
+## Requirement: evidence durability
+
+> **Replay evidence MUST survive process restarts and log expiration.**
+
+This is an architectural requirement, not a credential or a storage product.
+Any implementation satisfying it is acceptable; the requirement never names one.
+
+Rationale, learned the expensive way: the first implementation wrote replay
+records with `print()` to stdout. Real owner testing on 2026-08-02 (140
+messages) generated records that were **unrecoverable within hours**, because
+the platform retains logs for roughly one hour. The runbook already documented
+that limitation — the evidence mechanism was built on the volatile store
+anyway.
+
+**Any evidence channel that expires is not evidence.** A validation gate whose
+data disappears before it can be read does not gate anything.
+
+### Conformance checklist for any implementation
+
+- [ ] Survives function cold start / process restart
+- [ ] Survives >24h without expiry
+- [ ] Queryable after the fact, without a live tail
+- [ ] Failure to persist degrades to a log line and NEVER blocks a live turn
+- [ ] Writes nothing that alters production behaviour (replay stays passive)
+- [ ] Does not pollute a store that production logic reads
+
+### Explicitly NOT part of the requirement
+
+- any particular credential (`SUPABASE_SERVICE_ROLE_KEY` is one enabler, not the requirement)
+- any particular table, database or vendor
+- the security-audit integrity properties of `bic_tool_invocations` — replay
+  records are **diagnostic**, not an audit trail
+
 ## Acceptance evidence required before `BIC_POLICY_ENABLED=true`
 
 1. **Replay accuracy** — N ≥ 20 non-degraded samples with zero `BIC_REPLAY_DIFF`,
    covering owner, staff and unknown senders.
 2. **Latency** — added replay overhead measured and bounded (target < 50 ms p95).
+   Samples must come from the durable store, not a live log tail.
 3. **Zero regressions** — full characterization suite green.
 4. **Rollback** — flag flip verified to restore the legacy path with no deploy.
 5. **Feature flag** — verified fail-safe across unset/false/true/garbage.

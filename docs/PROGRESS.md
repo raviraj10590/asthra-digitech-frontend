@@ -232,6 +232,24 @@ migration · feature-flag rollout · old-vs-new behaviour comparison
 3. ⬜ Wrap the 5 approved tool handlers around existing business functions —
    **wrap, never rewrite**.
 
+#### 🔴 BLOCKER — replay evidence is not durable
+
+**Requirement (owner-corrected):**
+> Replay evidence must survive process restarts and log expiration.
+
+Deliberately stated as a requirement, not an implementation. `SUPABASE_SERVICE_ROLE_KEY`
+is *one enabler*, not the blocker itself.
+
+**What happened:** owner testing on 2026-08-02 produced 140 messages and real
+replay records. All were **unrecoverable within hours** — they were written with
+`print()` to stdout, and the platform retains logs ~1 hour. `bic_tool_invocations`
+holds 0 rows because its writes need a credential that is unset, so the audit
+fallback also lands in the same expiring bucket.
+
+**An evidence channel that expires is not evidence.** Criteria 4 and 5 are
+structurally unsatisfiable until this is fixed — a re-test today would evaporate
+identically.
+
 **Acceptance checklist for 1C (owner-defined):**
 
 | # | Criterion | Status | Evidence |
@@ -239,8 +257,8 @@ migration · feature-flag rollout · old-vs-new behaviour comparison
 | 1 | Adapter wired | 🟡 OWNER only | S5 completes it |
 | 2 | Feature flag operational | ✅ | verified unset/false/true/TRUE/1/off/garbage |
 | 3 | Decision Replay implemented | ✅ | `bic/replay.py` + structured logging |
-| 4 | Replay accuracy evidence | 🟡 | unblocked (ADR 0005); awaiting live samples |
-| 5 | Latency measured | 🟡 | instrumented; needs production samples |
+| 4 | Replay accuracy evidence | ❌ | **evidence not durable** — see blocker |
+| 5 | Latency verified in production | ❌ | same root cause |
 | 6 | Zero regressions | ✅ | 104 tests green, characterization + cache mutation-verified |
 | 7 | Rollback verified | 🟡 | flag logic verified; not yet exercised in production |
 | 8 | Routing correctness | 🟡 | owner proven; client unproven |
