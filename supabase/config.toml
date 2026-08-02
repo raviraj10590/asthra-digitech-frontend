@@ -1,0 +1,20 @@
+# Supabase CLI config — Business Intelligence Core (BIC v1.0)
+#
+# This project (AI Kannada, kpzprllzgqlqkqgcgrbp) is SHARED between:
+#   - the ai-kannada Next.js app (owns articles, netas, rss, govt, … tables)
+#   - the Asthra WhatsApp bot / BIC (owns whatsapp_messages, leads, bot_roles,
+#     and all bic_* tables)
+#
+# ⚠️ The remote database already carries 24 tracked migrations that have NO
+# local counterpart in this repo. They predate BIC and are owned elsewhere.
+# Consequences — read before running any CLI command:
+#
+#   ✅ SAFE:  `supabase db push`      applies only NEW local files
+#   ✅ SAFE:  `supabase migration list --linked`
+#   ❌ NEVER: `supabase db reset`     would drop the production database
+#   ❌ NEVER: `supabase db pull`      would rewrite history this repo doesn't own
+#
+# All BIC migrations are additive and prefixed `bic_`. They never ALTER or DROP
+# a table owned by another system.
+
+project_id = "kpzprllzgqlqkqgcgrbp"

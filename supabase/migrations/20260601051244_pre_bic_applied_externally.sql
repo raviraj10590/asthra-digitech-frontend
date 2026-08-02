@@ -1,0 +1,19 @@
+-- PRE-BIC MIGRATION — PLACEHOLDER, INTENTIONALLY EMPTY
+--
+-- This version is already recorded in the remote migration history table and
+-- was applied before the Business Intelligence Core existed. Its DDL belongs to
+-- the ai-kannada Next.js application, which owns the articles/netas/rss/govt
+-- schema in this shared database.
+--
+-- The file exists ONLY so the Supabase CLI sees local and remote histories as
+-- aligned; without it `db push` refuses to run. It is never executed against
+-- the remote (already applied there).
+--
+-- The two alternatives were both worse:
+--   `db pull`                       → dumps another system's entire schema into
+--                                     this repo and rewrites history we do not own
+--   `migration repair --reverted`   → records these as reverted, which is false
+--
+-- ⚠️ CONSEQUENCE: this repo CANNOT rebuild the database from scratch. That is
+-- accepted — this is a live production database that is never recreated from
+-- migrations, and all BIC migrations are strictly additive.

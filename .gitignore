@@ -1,0 +1,8 @@
+.vercel
+
+# Supabase CLI local link state — machine-specific, and pooler-url can embed
+# connection credentials. Never commit.
+supabase/.temp/
+
+__pycache__/
+*.pyc
