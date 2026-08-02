@@ -122,11 +122,58 @@ integration work and belongs to 1C.
 | BrainRequest / BrainResponse | ✅ `bic/contract.py` |
 | Brain runtime | ✅ `bic/brain.py` |
 | **Bundling verified in production** | ✅ see below |
-| Webhook Adapter | ✅ `adapters/whatsapp.py` (built, **not wired**) |
-| Adapter wiring into `do_POST` | ⬜ next session |
-| Feature-flag routing | ⬜ |
-| **Decision Replay Mode** | ⬜ design settled — ADR 0004 |
-| Old vs new comparison | ⬜ |
+| Webhook Adapter | ✅ `adapters/whatsapp.py` |
+| Adapter wiring (OWNER path) | ✅ behind fail-safe flag |
+| Adapter wiring (CLIENT path) | ⬜ **required — see migration plan** |
+| Feature-flag routing | ✅ fail-safe, defaults FALSE |
+| Decision Replay Mode | ✅ deployed — ⚠️ **currently vacuous, see below** |
+| Old vs new comparison | ⬜ blocked on ADR 0005 |
+| Duplicate role resolution removed | ⬜ ADR 0005 (proposed) |
+
+---
+
+#### Incremental migration plan (owner review point 1 & 6)
+
+The OWNER/CLIENT split is a **temporary migration state, not the target**.
+Recorded here with an explicit removal plan so it cannot become permanent.
+
+| Stage | State | Exit condition |
+|---|---|---|
+| **S1** ✅ | OWNER via Brain (flag-gated); CLIENT legacy | flag fail-safe verified |
+| **S2** ⬜ | Role resolution unified (ADR 0005 B+C) | one resolver, one cache |
+| **S3** ⬜ | Replay produces non-vacuous evidence | ≥20 non-degraded samples, 0 diffs |
+| **S4** ⬜ | `BIC_POLICY_ENABLED=true` for OWNER | replies verified identical |
+| **S5** ⬜ | CLIENT path wrapped and routed through Brain | characterization green |
+| **S6** ⬜ | Split removed — one pipeline | ADR 0003 superseded |
+
+**1C is complete only at S6.** Stages S1–S5 are reversible by flag or
+`git revert`. If S5 proves unsafe, the split must be removed by moving CLIENT
+forward — never by making the split permanent.
+
+**Removal plan for ADR 0003's empty-response bridge:** at S5 the client
+handlers gain injected collaborators so they return a populated
+`BrainResponse`; `render()` then becomes the single output path and ADR 0003 is
+marked superseded.
+
+---
+
+#### ⚠️ Replay is deployed but currently VACUOUS — do not count it as evidence
+
+`webhook.get_role()` reads `bot_roles` with the **anon** key (works).
+`bic.policy.resolve_principal()` reads it with the **service-role** key, which
+is **not set** (D3) — so it fails closed to CLIENT.
+
+| Sender | Legacy | Replay | Verdict |
+|---|---|---|---|
+| Bootstrap owner | OWNER | OWNER | ✅ real match |
+| STAFF in `bot_roles` | STAFF | CLIENT (degraded) | ✅ real DIFF |
+| Unknown number | CLIENT | CLIENT *(because lookup failed)* | ⚠️ **FALSE MATCH** |
+
+The most common case agrees **by accident**. `BIC_REPLAY_MATCH` on client
+traffic is **not evidence** until ADR 0005 lands. Degraded samples
+(`Principal.degraded`) must be excluded from any tally.
+
+Full specification: `docs/REPLAY-SPEC.md`.
 
 **Tests:** 68 offline, green. **`webhook.py` routing untouched** — only the
 guarded BIC import probe.
@@ -188,9 +235,24 @@ migration · feature-flag rollout · old-vs-new behaviour comparison
 3. ⬜ Wrap the 5 approved tool handlers around existing business functions —
    **wrap, never rewrite**.
 
-**Acceptance criteria for 1C (owner-defined):**
-adapter wired · feature flag works · shadow mode completed · behaviour
-comparison passes · no customer-visible regression · documentation updated.
+**Acceptance checklist for 1C (owner-defined):**
+
+| # | Criterion | Status | Evidence |
+|---|---|---|---|
+| 1 | Adapter wired | 🟡 OWNER only | S5 completes it |
+| 2 | Feature flag operational | ✅ | verified unset/false/true/TRUE/1/off/garbage |
+| 3 | Decision Replay implemented | ✅ | `bic/replay.py`, 17 tests |
+| 4 | Replay accuracy evidence | ❌ | **vacuous — blocked on ADR 0005** |
+| 5 | Latency measured | ❌ | not yet measured |
+| 6 | Zero regressions | ✅ | 85 tests green, characterization mutation-verified |
+| 7 | Rollback verified | 🟡 | flag logic verified; not yet exercised in production |
+| 8 | Routing correctness | 🟡 | owner proven; client unproven |
+| 9 | No customer-visible change | ✅ | flag unset ⇒ legacy path serves everyone |
+| 10 | No additional AI calls | ✅ | replay makes none |
+| 11 | Documentation updated | ✅ | REPLAY-SPEC, ADR 0003/0004/0005, this tracker |
+| 12 | Progress tracker updated | ✅ | this file |
+
+**1C is NOT accepted.** Criteria 4, 5 blocked; 1, 7, 8 partial.
 
 **Target architecture** (unchanged; ADR 0003 records the one temporary deviation):
 ```
