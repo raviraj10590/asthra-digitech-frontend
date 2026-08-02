@@ -67,7 +67,11 @@ be designed and built against it; it cannot go to production without it.
 ---
 
 ### Slice 1B — Security Boundary
-**Status: ✅ CODE COMPLETE — awaiting acceptance**
+**Status: ✅ ACCEPTED & CLOSED** — owner-accepted 2026-08-02
+
+🔒 **This slice is closed. Do not reopen it to add handlers, imports, or build
+config.** Anything that touches `webhook.py`, imports `bic/`, or wires a handler
+is Slice 1C work by definition.
 
 **Scope (owner-fixed):** 1B solves exactly one problem — the security boundary.
 
@@ -111,7 +115,7 @@ means:
 integration work and belongs to 1C.
 
 ### Slice 1C — Request Architecture
-**Status: ⬜ NOT STARTED** — begins only after 1B is accepted
+**Status: ⬜ NEXT** — 1B accepted; 1C is the only sanctioned next work
 
 Contains: `BrainRequest` · `BrainResponse` · Webhook Adapter · routing
 migration · feature-flag rollout · old-vs-new behaviour comparison
