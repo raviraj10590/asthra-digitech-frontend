@@ -47,7 +47,10 @@ from urllib.parse import parse_qs, urlparse
 # api/, and `bic/` is a sibling of it, not a child.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
-    from bic import brain as bic_brain, contract as bic_contract, policy as bic_policy
+    from bic import (brain as bic_brain, config as bic_config,
+                     contract as bic_contract, policy as bic_policy,
+                     replay as bic_replay)
+    from adapters import whatsapp as wa_adapter
     BIC_AVAILABLE = True
     print("BIC: package import OK")
 except Exception as _bic_err:  # pragma: no cover - environment dependent
@@ -2051,6 +2054,102 @@ def maybe_alert_lead(sender: str, lead: dict, already_alerted: bool):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# BIC SLICE 1C — Brain wiring + Decision Replay
+#
+# Dependency direction is one-way: this module imports bic/, never the reverse.
+# Flows below WRAP existing business functions and never reimplement them.
+# ══════════════════════════════════════════════════════════════════════════════
+def _bic_enabled() -> bool:
+    """True when the new Brain path should serve the turn.
+
+    Requires BOTH the package to have imported (bundling probe) and an EXPLICIT
+    opt-in. Flipping BIC_POLICY_ENABLED in Vercel env reverses routing with no
+    code change and no redeploy.
+
+    ⚠️ Deliberately reads the env var directly with a default of FALSE, rather
+    than using bic_config.POLICY_ENABLED, which defaults to TRUE (it treats
+    anything except "off" as enabled). Inheriting that default would silently
+    switch production routing the moment this code deployed — skipping the
+    Decision Replay validation period entirely and inverting the owner's spec
+    ("false → legacy production path").
+
+    A migration flag must fail SAFE: unset means legacy. The 1B constant is left
+    untouched (that slice is closed); reconciling the two is follow-up work.
+    """
+    return BIC_AVAILABLE and os.environ.get(
+        "BIC_POLICY_ENABLED", "false").strip().lower() in ("true", "1", "yes", "on")
+
+
+def _bic_replay_compare(sender: str, legacy_role: str) -> None:
+    """Decision Replay Mode (ADR 0004) — predict, never execute.
+
+    Resolves identity through the BIC policy layer and compares the ROUTE
+    decision against the legacy get_role() result. Performs no sends, no
+    writes, no mutations and makes no AI call: it only re-reads a cached role
+    lookup, so it is safe to run on every message while the legacy path serves
+    the customer.
+
+    Scope note: 1C compares route + role only. Comparing tool selection and
+    prompt fingerprints requires the client handlers to accept injected
+    collaborators, which means reshaping business functions — explicitly out of
+    scope for 1C and deferred by ADR 0003.
+
+    Never raises: a replay failure must not affect the production turn.
+    """
+    if not BIC_AVAILABLE:
+        return
+    try:
+        principal = bic_policy.resolve_principal(sender, channel="whatsapp")
+        legacy_route = "owner" if legacy_role in ("OWNER", "STAFF") else "client"
+        replay_route = "owner" if principal.role in bic_brain.INTERNAL_ROLES else "client"
+
+        diffs = bic_replay.compare(
+            bic_replay.Decision(route=legacy_route, role=legacy_role),
+            bic_replay.Decision(route=replay_route, role=principal.role),
+        )
+        if diffs:
+            # A route disagreement is the one difference that actually matters:
+            # it would mean a customer could receive the internal pipeline.
+            print(f"BIC_REPLAY_DIFF sender={sender[-4:]} {diffs}")
+        else:
+            print(f"BIC_REPLAY_MATCH route={legacy_route} role={legacy_role}")
+    except Exception as e:
+        print(f"BIC replay error (ignored, production unaffected): {e}")
+
+
+def _bic_owner_turn(sender: str, user_text: str, ctx: dict,
+                    message_id: str = None) -> None:
+    """Route an OWNER/STAFF turn through Adapter → Brain → flow → Adapter.
+
+    handle_owner_text() is WRAPPED, not rewritten: it already returns text, so
+    it maps directly onto BrainResponse. Sends and saves stay byte-identical to
+    the legacy branch.
+    """
+    request = bic_contract.BrainRequest(
+        channel="whatsapp", sender_id=sender, text=user_text,
+        thread_id=sender, message_id=message_id,
+    )
+
+    def owner_flow(principal, req):
+        reply = handle_owner_text(principal.sender_id, principal.role,
+                                  principal.label, req.text, ctx)
+        return bic_contract.BrainResponse(text=reply)
+
+    def client_flow(principal, req):
+        # Unreachable here — the caller already established an internal role.
+        # Present because Brain requires both flows; returning empty text means
+        # the adapter sends nothing rather than inventing a reply.
+        return bic_contract.BrainResponse(text="")
+
+    response = bic_brain.handle(
+        request, bic_brain.Flows(owner=owner_flow, client=client_flow))
+
+    wa_adapter.render(response, request, send_text=send_text)
+    save_messages([(sender, "user", user_text),
+                   (sender, "assistant", response.text)])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # VERCEL SERVERLESS HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
 class handler(BaseHTTPRequestHandler):
@@ -2206,10 +2305,21 @@ class handler(BaseHTTPRequestHandler):
             # everyone else gets the customer-facing sales pipeline below.
             # See get_role() — this is the ONLY place the two modes fork.
             role, label = get_role(sender)
+
+            # Decision Replay (ADR 0004): predict-only comparison of the route
+            # decision. No sends, no writes, no AI — the legacy path below still
+            # serves the customer regardless of the outcome.
+            _bic_replay_compare(sender, role)
+
             if role in ("OWNER", "STAFF"):
-                reply = handle_owner_text(sender, role, label, user_text, ctx)
-                send_text(sender, reply)
-                save_messages([(sender, "user", user_text), (sender, "assistant", reply)])
+                if _bic_enabled():
+                    # New path: Adapter → BrainRequest → Brain → flow → Adapter.
+                    _bic_owner_turn(sender, user_text, ctx, msg.get("id"))
+                else:
+                    # Legacy path — unchanged, byte for byte.
+                    reply = handle_owner_text(sender, role, label, user_text, ctx)
+                    send_text(sender, reply)
+                    save_messages([(sender, "user", user_text), (sender, "assistant", reply)])
                 self._ok(); return
 
             memory = fetch_memory(sender)  # env-gated: {} until MEMORY_TABLE is set
