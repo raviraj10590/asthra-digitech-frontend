@@ -100,6 +100,28 @@ class ReplayStillFunctions(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             w._bic_replay_compare(OWNER, "OWNER")   # must not raise
 
+    def test_saturated_role_is_not_persisted(self):
+        """OWNER has 48 samples, 0 diffs. More cost latency and add nothing."""
+        wrote = []
+        with mock.patch.object(w, "REPLAY_SKIP_ROLES", {"OWNER"}), \
+             mock.patch.object(w.bic_db, "insert", lambda *a, **k: wrote.append(a)):
+            w._bic_persist_replay({"route": "owner", "role": "OWNER"})
+        self.assertEqual(wrote, [], "saturated role still writing on every turn")
+
+    def test_role_with_missing_evidence_IS_persisted(self):
+        """CLIENT has never produced a record — that is the evidence 1C still
+        needs, so the skip must never swallow it."""
+        wrote = []
+        with mock.patch.object(w, "REPLAY_SKIP_ROLES", {"OWNER"}), \
+             mock.patch.object(w.bic_db, "insert", lambda *a, **k: wrote.append(a)):
+            w._bic_persist_replay({"route": "client", "role": "CLIENT"})
+        self.assertEqual(len(wrote), 1, "CLIENT evidence was skipped — 1C needs it")
+
+    def test_skip_is_reversible_without_a_deploy(self):
+        with mock.patch.object(w, "REPLAY_SKIP_ROLES", set()), \
+             mock.patch.object(w.bic_db, "insert", lambda *a, **k: None) as ins:
+            w._bic_persist_replay({"route": "owner", "role": "OWNER"})
+
     def test_persistence_failure_is_swallowed(self):
         with mock.patch.object(w.bic_db, "insert",
                                mock.Mock(side_effect=RuntimeError("db down"))), \

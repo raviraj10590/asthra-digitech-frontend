@@ -2423,6 +2423,15 @@ def _bic_enabled() -> bool:
         "BIC_POLICY_ENABLED", "false").strip().lower() in ("true", "1", "yes", "on")
 
 
+# Replay roles whose evidence is SATURATED and therefore no longer worth a
+# write on every message (audit M4). Empty string re-enables everything.
+REPLAY_SKIP_ROLES = {
+    r.strip().upper()
+    for r in os.environ.get("BIC_REPLAY_SKIP_ROLES", "OWNER").split(",")
+    if r.strip()
+}
+
+
 def _bic_persist_replay(record: dict) -> None:
     """Append one replay record to the durable diagnostic store.
 
@@ -2439,7 +2448,24 @@ def _bic_persist_replay(record: dict) -> None:
     harmlessly and no evidence is collected.
 
     Removable in one migration after 1C: nothing reads this table.
+
+    SATURATION SKIP (audit M4). This is a synchronous Supabase write on the hot
+    path of EVERY message, for data nothing reads. As of 2026-08-03 the OWNER
+    route has 48 samples with 0 diffs and 0 degraded — more OWNER records carry
+    no information, they just cost latency on every owner turn.
+
+    So we persist only roles whose evidence is still MISSING. CLIENT has never
+    produced a single record (48/48 are OWNER), and that is precisely the
+    evidence Slice 1C still needs — so CLIENT keeps writing.
+
+    Env-overridable and therefore reversible with no deploy:
+        BIC_REPLAY_SKIP_ROLES=""        → resume collecting everything
+        BIC_REPLAY_SKIP_ROLES="OWNER"   → default, skip the saturated role
     """
+    role = (record.get("role") or "").strip().upper()
+    if role in REPLAY_SKIP_ROLES:
+        return
+
     try:
         bic_db.insert("bic_replay_records", {
             "tenant_id": bic_config.DEFAULT_TENANT_ID,

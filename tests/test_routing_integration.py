@@ -210,7 +210,9 @@ class TestReplayPersistence(unittest.TestCase):
         captured = {}
         with mock.patch.object(bic_db, "insert",
                                side_effect=lambda t, row, **k: captured.update(row)):
-            w._bic_persist_replay({"route": "owner", "role": "OWNER", "flow": "owner",
+            # CLIENT, not OWNER: OWNER is saturated and skipped, which would
+            # make this assertion pass on an empty dict.
+            w._bic_persist_replay({"route": "client", "role": "CLIENT", "flow": "client",
                                    "decision_hash": "abc", "tools": [], "degraded": False,
                                    "latency_ms": 1.2, "diffs": []})
         self.assertEqual(
