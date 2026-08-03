@@ -147,6 +147,7 @@ Recorded here with an explicit removal plan so it cannot become permanent.
 | **S4.5** ✅ | **Tool Registry bypass closed** | owner tools verified live, 7/7 audited |
 | **S4.6** ✅ | **Engineering review findings resolved** | 2 Critical + 4 High closed, 21 mutations caught |
 | **S4.7** 🟡 | **Closure validation** | replay + rollback + no-regression proven offline; privileged tools await one live command |
+| **S4.8** 🟡 | **Audit hardening** | 8 of 10 free tasks done; 2 need live traffic |
 | **S5** ⬜ | CLIENT path wrapped and routed through Brain | characterization green |
 | **S6** ⬜ | Split removed — one pipeline | ADR 0003 superseded |
 
@@ -300,7 +301,7 @@ Degraded samples (`"degraded": true`) are excluded from any tally.
 
 Full specification: `docs/REPLAY-SPEC.md`.
 
-**Tests:** 186 offline, green.
+**Tests:** 218 offline, green.
 
 **Client-flow bridge is TEMPORARY** — see ADR 0003. The client flow will send
 its own messages and return `BrainResponse(text="")`. Accepted for 1C only
@@ -486,6 +487,59 @@ suite is evidence about the suite, not about the system.**
 reported — the single deliberate behaviour change in 1C) and 0007 (MANAGER is a
 rank, not a pipeline). No ADR for C1/C2/H2/H3/H4/M3/M5/L1/L5: those restore
 intended behaviour rather than change it.
+
+---
+
+#### S4.8 — Independent audit hardening (2026-08-03)
+
+An independent audit **probed production rather than reading code** and found a
+Critical defect three prior reviews had missed: webhook signature verification
+was disabled (`META_APP_SECRET` unset), so the `from` field feeding the entire
+identity chain was unauthenticated. See ADR 0008.
+
+| Task | Status | Evidence |
+|---|---|---|
+| 1 · Webhook auth fails closed | ✅ code | 7 HTTP tests, 4 mutations caught. **Deploy-gated** on the secret being set |
+| 2 · Execute every handler once | ⬜ **blocked** | Needs live WhatsApp traffic — 6 of 13 handlers still unproven |
+| 3 · Replay OWNER/STAFF/CLIENT | ⬜ **blocked** | Needs live traffic; 32 records span 1 role |
+| 4 · Explicit maxDuration | ✅ | 30 s via `builds[].config`; 4 tests |
+| 5 · Registry circuit breaker | ✅ | 5 tests, 2 mutations caught |
+| 6 · Enable retention | ✅ | RPC verified against production; 4 tests |
+| 7 · HTTP integration tests | ✅ | 12 routing/flag/legacy/brain tests |
+| 8 · Message-ID dedup | ⛔ **cannot be done** | See below |
+| 9 · Mark dead code | ✅ | Marked, not removed — reasons recorded |
+| 10 · Documentation | ✅ | ADR 0008, this section |
+
+**Task 8 — why message-ID deduplication cannot be implemented yet.**
+`whatsapp_messages` has exactly five columns: `id`, `phone`, `role`, `content`,
+`created_at`. There is **no column to hold a WhatsApp message id**, and adding
+one is a schema change, which this work explicitly excludes.
+
+The one alternative within the constraints — encoding `WAMID::<id>` as a system
+marker in `content`, the channel `BOT_PAUSED` and `PENDING_CONFIRM` already use
+— was rejected: it adds a write to every inbound message on the hot path, and
+storing an identifier inside a free-text column is the kind of shortcut that
+becomes permanent.
+
+The existing text-plus-60-seconds dedup therefore stands. Its known defect is
+unchanged and recorded: **a customer who legitimately sends the same text twice
+within a minute is silently ignored.** `message_id` is already threaded through
+the adapter and `BrainRequest`, so the consuming side is ready; only the storage
+column is missing.
+
+**Two process defects were found during this work, both in the verification
+apparatus rather than the product:**
+
+1. **The mutation harness destroyed uncommitted work — twice.** It restores with
+   `git checkout -- .`, which reverts to HEAD. Run while holding uncommitted
+   changes, it silently discarded the fix under test. The first occurrence
+   shipped a narrowed invariant regex; the second produced a commit whose
+   message described an auth fix it did not contain, caught only because the new
+   tests failed. **Rule now: commit before mutating, and verify the tree is
+   clean first.**
+2. **A test matched prose instead of behaviour.** `assertIn("bic_rollup_tool_invocations", src)`
+   passed when the call was removed but a comment naming it remained. Tightened
+   to assert the RPC URL. Found by mutation, not by review.
 
 ---
 
