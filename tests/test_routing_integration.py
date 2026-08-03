@@ -164,3 +164,49 @@ class TestHandlerRegistration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestReplayPersistence(unittest.TestCase):
+    """Requirement: replay evidence survives restarts. Must stay PASSIVE."""
+
+    def test_persist_failure_never_breaks_a_turn(self):
+        from contextlib import ExitStack
+        cap = _Capture()
+        with ExitStack() as stack:
+            cap.install(stack)
+            stack.enter_context(mock.patch.object(
+                w.requests, "post", side_effect=RuntimeError("store down")))
+            identity.clear_cache(); identity.configure(lambda p: None)
+            w._bic_replay_compare(CLIENT, "CLIENT")          # must not raise
+            w.run_client_pipeline(CLIENT, "website price?", dict(CTX))
+        self.assertEqual(cap.sent, [(CLIENT, "AI-REPLY")],
+                         "a diagnostic write failure must not affect the reply")
+
+    def test_record_contains_only_approved_fields(self):
+        captured = {}
+        with mock.patch.object(w.requests, "post",
+                               side_effect=lambda *a, **k: captured.update(k.get("json") or {})):
+            w._bic_persist_replay({"route": "owner", "role": "OWNER", "flow": "owner",
+                                   "decision_hash": "abc", "tools": [], "degraded": False,
+                                   "latency_ms": 1.2, "diffs": []})
+        self.assertEqual(
+            sorted(captured),
+            ["decision_hash", "degraded", "diff_count", "flow", "latency_ms",
+             "role", "route", "selected_tools", "tenant_id"])
+
+    def test_no_pii_or_content_persisted(self):
+        """Explicitly forbidden: prompts, history, messages, phone, AI output."""
+        captured = {}
+        with mock.patch.object(w.requests, "post",
+                               side_effect=lambda *a, **k: captured.update(k.get("json") or {})):
+            w._bic_persist_replay({"route": "client", "role": "CLIENT", "sender": "9951",
+                                   "diffs": ["x", "y"]})
+        for banned in ("sender", "phone", "text", "message", "prompt",
+                       "reply", "history", "content"):
+            self.assertNotIn(banned, captured, f"must not persist {banned}")
+        self.assertEqual(captured["diff_count"], 2, "diffs stored as a count only")
+
+    def test_production_does_not_read_replay_table(self):
+        src = open(w.__file__).read()
+        self.assertEqual(src.count("bic_replay_records"), 1,
+                         "replay table must be written once and never read")

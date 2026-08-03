@@ -2204,6 +2204,39 @@ def _bic_enabled() -> bool:
         "BIC_POLICY_ENABLED", "false").strip().lower() in ("true", "1", "yes", "on")
 
 
+def _bic_persist_replay(record: dict) -> None:
+    """Append one replay record to the durable diagnostic store.
+
+    Requirement: replay evidence must survive process restarts and log
+    expiration. stdout does not — platform retention is ~1h.
+
+    BEST-EFFORT AND PASSIVE. Any failure is swallowed after a log line; a
+    diagnostic write must never affect a live conversation. Uses the anon key
+    (append-only policy) so it carries no dependency on a server credential.
+
+    Removable in one migration after 1C: nothing reads this table.
+    """
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/bic_replay_records",
+            headers=_supa_headers("return=minimal"),
+            json={
+                "tenant_id": bic_config.DEFAULT_TENANT_ID,
+                "route": record.get("route"),
+                "role": record.get("role"),
+                "flow": record.get("flow"),
+                "decision_hash": record.get("decision_hash"),
+                "selected_tools": record.get("tools") or [],
+                "degraded": bool(record.get("degraded")),
+                "latency_ms": record.get("latency_ms"),
+                "diff_count": len(record.get("diffs") or []),
+            },
+            timeout=3,
+        )
+    except Exception as e:
+        print(f"replay persist failed (ignored): {e}")
+
+
 def _bic_replay_compare(sender: str, legacy_role: str) -> None:
     """Decision Replay Mode (ADR 0004) — predict, never execute.
 
@@ -2223,6 +2256,7 @@ def _bic_replay_compare(sender: str, legacy_role: str) -> None:
     if not BIC_AVAILABLE:
         return
     try:
+        started = time.perf_counter()
         # Same canonical resolver the legacy path used (ADR 0005), so this is a
         # cache hit and adds no query.
         principal = bic_identity.resolve(sender, channel="whatsapp")
@@ -2245,6 +2279,7 @@ def _bic_replay_compare(sender: str, legacy_role: str) -> None:
             "degraded": principal.degraded,
             "sender": sender[-4:],
         }
+        record["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
         if diffs:
             # A route disagreement is the one difference that actually matters:
             # it would mean a customer could receive the internal pipeline.
@@ -2252,6 +2287,10 @@ def _bic_replay_compare(sender: str, legacy_role: str) -> None:
             print(f"BIC_REPLAY_DIFF {json.dumps(record)}")
         else:
             print(f"BIC_REPLAY_MATCH {json.dumps(record)}")
+
+        # Durable copy — stdout expires in ~1h, which is why the first attempt
+        # at evidence collection produced nothing recoverable.
+        _bic_persist_replay(record)
     except Exception as e:
         print(f"BIC replay error (ignored, production unaffected): {e}")
 
