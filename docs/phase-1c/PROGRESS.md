@@ -1,3 +1,7 @@
+# ⚠️ ARCHIVED — Phase 1C tracker, FROZEN 2026-08-03 at `0cb4ec8`
+# Superseded by docs/phase-1c/PHASE-1C-CLOSURE.md
+# No further implementation except a critical production bug.
+
 # BIC v1.0 — Progress Tracker
 
 Governed by `docs/BUSINESS-INTELLIGENCE-CORE-v1.0.md` (FROZEN).
