@@ -145,6 +145,7 @@ Recorded here with an explicit removal plan so it cannot become permanent.
 | **S3** ✅ | Replay produces genuine evidence | durable table; 15 samples, 0 diffs |
 | **S4** ✅ | `BIC_POLICY_ENABLED=true` for OWNER | replies verified identical |
 | **S4.5** ✅ | **Tool Registry bypass closed** | owner tools verified live, 7/7 audited |
+| **S4.6** ✅ | **Engineering review findings resolved** | 2 Critical + 4 High closed, mutation-verified |
 | **S5** ⬜ | CLIENT path wrapped and routed through Brain | characterization green |
 | **S6** ⬜ | Split removed — one pipeline | ADR 0003 superseded |
 
@@ -298,7 +299,7 @@ Degraded samples (`"degraded": true`) are excluded from any tally.
 
 Full specification: `docs/REPLAY-SPEC.md`.
 
-**Tests:** 134 offline, green.
+**Tests:** 166 offline, green.
 
 **Client-flow bridge is TEMPORARY** — see ADR 0003. The client flow will send
 its own messages and return `BrainResponse(text="")`. Accepted for 1C only
@@ -405,7 +406,7 @@ tool evidence, then S5 (client path through the Brain) and S6 (split removed).
 | 2 | Authorization still works | 🟡 7/7 OWNER allowed; **no live non-owner sample** |
 | 3 | Existing responses byte-identical | ✅ handlers wrap, never reimplement; owner reported no change |
 | 4 | Zero additional AI calls | ✅ `test_no_ai_call_in_the_dispatch_path` |
-| 5 | Characterization tests green | ✅ 134/134 |
+| 5 | Characterization tests green | ✅ 166/166 |
 | 6 | Registry failure fails safely | ✅ empty registry ⇒ deny-all; import failure or flag off ⇒ legacy |
 | 7 | Policy denial prevents execution | ✅ mutation-verified, no fallback on denial |
 | 8 | Latency within target | ✅ every tool inside declared expectation |
@@ -424,6 +425,41 @@ Webhook → Adapter → BrainRequest → Brain → Policy → Tool Registry
 ```
 Every flow should eventually return a `BrainResponse`. No flow should
 permanently send messages directly.
+
+#### S4.6 — Engineering review (2026-08-03)
+
+A strict 20-point review was run against the architecture documents *after*
+S4.5 reported success. It found **2 Critical and 4 High** defects in code that
+had 134 green, mutation-verified tests.
+
+**The Critical finding is the lesson.** `_tool_add_role` — the function that can
+mint an OWNER — bypassed the Policy Gate entirely, produced no audit row, and
+was guarded only by an inline string compare evaluated at *staging* time. The
+no-bypass test missed it because the test enumerated functions named `tool_*`
+and these are named `_tool_*`. **A leading underscore exempted the two most
+dangerous functions in the file, and the suite was green the whole time.**
+
+The invariant set is now DERIVED from the source (`_?tool_(?!h_)[a-z_]+`)
+rather than hand-listed, so a function cannot opt out by being named a certain
+way, and nobody has to remember to add it.
+
+| ID | Finding | Fix |
+|---|---|---|
+| C1 | `add_role`/`remove_role` bypass the registry | routed; `min_role=OWNER`, `risk_tier=4`, `audit_level=full` |
+| C2 | `#confirm` never re-checks authorization | re-resolved at confirm time, on the legacy path too |
+| H1 | failed brochure recorded and reported as sent | `invoke_tool()` returns `(ok, text)`; caller branches |
+| H2 | `timeout_seconds` decorative | threaded into the `requests` calls |
+| H3 | `config.POLICY_ENABLED` dead, inverted, `"false" != "off"` | deleted; one flag reader |
+| H4 | `#stop`/`#start` ungated, unaudited | `chat_pause`/`chat_resume`, OWNER |
+| M1 | `INTERNAL_ROLES` defined twice, MANAGER divergent | one definition; MANAGER not routed (1C = byte-identical) |
+| M3 | `audit_level='full'` tools recorded no args | allowlist entries added |
+| M5 | outage presented as authorization failure | distinguished in `invoke_tool` |
+| L1 | audit fallback printed full phone to stdout | truncated to last 4 |
+| L5 | `run_tool` return not coerced | `_coerce_tool_text` at the boundary |
+
+**Tests: 166 green. 15 mutations, all caught.**
+
+---
 
 ### Slice 1D — Knowledge backfill · Retention · Golden set · Docs
 **Status: ⬜ NOT STARTED**
