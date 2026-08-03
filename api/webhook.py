@@ -1603,7 +1603,18 @@ def run_tool(sender: str, code: str, _fallback=None, **args) -> str:
       • BIC unavailable → falls back to the direct call, so a bundling failure
         degrades to previous behaviour instead of taking the bot down
     """
-    if not BIC_AVAILABLE:
+    # Gated on the SAME flag as Brain routing, so BIC_POLICY_ENABLED stays the
+    # ONE rollback lever. Without this, registry routing would be permanently
+    # on and a registry outage would have no escape hatch: _load_registry()
+    # fails CLOSED to an empty registry, which is correct for a security
+    # boundary but means every owner command would answer "not permitted" and
+    # flipping the flag off would not bring them back.
+    #
+    # This is NOT a bypass. When the flag is on — production today — every tool
+    # executes through the registry. Flag off is the documented rollback to
+    # legacy behaviour, which is the same escape the BIC_AVAILABLE check gives
+    # when the package fails to bundle.
+    if not BIC_AVAILABLE or not _bic_enabled():
         # Same args as the tool, so every call site can name the business
         # function directly. A lambda here would read as a bypass to the
         # static no-bypass check, and would deserve to.

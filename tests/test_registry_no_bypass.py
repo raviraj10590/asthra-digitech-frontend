@@ -207,6 +207,7 @@ class DynamicDispatch(unittest.TestCase):
     def test_success_returns_tool_value(self):
         rec = _Recorder(_Result(ok=True, value="LEADS-OUTPUT"))
         with mock.patch.object(w, "BIC_AVAILABLE", True), \
+             mock.patch.object(w, "_bic_enabled", lambda: True), \
              mock.patch.object(w, "bic_tools", rec), \
              mock.patch.object(w.bic_identity, "resolve",
                                lambda s, **k: self._principal("OWNER")):
@@ -218,6 +219,7 @@ class DynamicDispatch(unittest.TestCase):
         boundary. A denial must not leak the tool's output."""
         ran = []
         with mock.patch.object(w, "BIC_AVAILABLE", True), \
+             mock.patch.object(w, "_bic_enabled", lambda: True), \
              mock.patch.object(w, "bic_tools",
                                _Recorder(_Result(ok=False, denied=True,
                                                  error="requires OWNER, caller is CLIENT"))), \
@@ -233,6 +235,7 @@ class DynamicDispatch(unittest.TestCase):
         """The fallback is for BIC being ABSENT, never for policy saying no.
         Falling back on denial would silently restore the bypass."""
         with mock.patch.object(w, "BIC_AVAILABLE", True), \
+             mock.patch.object(w, "_bic_enabled", lambda: True), \
              mock.patch.object(w, "bic_tools",
                                _Recorder(_Result(ok=False, denied=True, error="nope"))), \
              mock.patch.object(w.bic_identity, "resolve",
@@ -242,6 +245,7 @@ class DynamicDispatch(unittest.TestCase):
 
     def test_tool_error_fails_safe(self):
         with mock.patch.object(w, "BIC_AVAILABLE", True), \
+             mock.patch.object(w, "_bic_enabled", lambda: True), \
              mock.patch.object(w, "bic_tools",
                                _Recorder(_Result(ok=False, error="boom"))), \
              mock.patch.object(w.bic_identity, "resolve",
@@ -249,6 +253,16 @@ class DynamicDispatch(unittest.TestCase):
             out = w.run_tool(self.OWNER, "leads_today")
         self.assertNotIn("boom", out, "internal errors must not reach the user")
         self.assertTrue(out.startswith("⚠️"))
+
+    def test_flag_off_degrades_to_legacy_behaviour(self):
+        """BIC_POLICY_ENABLED is the ONE rollback lever. With it off, tools run
+        exactly as they did before the registry existed — otherwise a registry
+        outage (fail-closed to deny-all) would have no escape hatch."""
+        with mock.patch.object(w, "BIC_AVAILABLE", True), \
+             mock.patch.object(w, "_bic_enabled", lambda: False), \
+             mock.patch.object(w, "bic_tools", _Recorder(_Result(ok=True, value="REGISTRY"))):
+            out = w.run_tool(self.OWNER, "leads_today", _fallback=lambda s: "LEGACY")
+        self.assertEqual(out, "LEGACY")
 
     def test_bic_unavailable_degrades_to_the_direct_call(self):
         """A bundling failure must degrade the bot, not take it down."""
@@ -258,13 +272,15 @@ class DynamicDispatch(unittest.TestCase):
                 "DEGRADED")
 
     def test_bic_unavailable_without_fallback_is_still_safe(self):
-        with mock.patch.object(w, "BIC_AVAILABLE", False):
+        with mock.patch.object(w, "BIC_AVAILABLE", False), \
+             mock.patch.object(w, "_bic_enabled", lambda: False):
             out = w.run_tool(self.OWNER, "leads_today")
         self.assertIn("unavailable", out.lower())
 
     def test_args_reach_the_registry(self):
         rec = _Recorder(_Result(ok=True, value="captured"))
         with mock.patch.object(w, "BIC_AVAILABLE", True), \
+             mock.patch.object(w, "_bic_enabled", lambda: True), \
              mock.patch.object(w, "bic_tools", rec), \
              mock.patch.object(w.bic_identity, "resolve",
                                lambda s, **k: self._principal("CLIENT")):
@@ -275,6 +291,7 @@ class DynamicDispatch(unittest.TestCase):
         """Acceptance: routing through the registry adds ZERO AI calls."""
         ai = []
         with mock.patch.object(w, "BIC_AVAILABLE", True), \
+             mock.patch.object(w, "_bic_enabled", lambda: True), \
              mock.patch.object(w, "bic_tools", _Recorder(_Result(ok=True, value="x"))), \
              mock.patch.object(w, "generate_reply", lambda *a, **k: ai.append(1) or ""), \
              mock.patch.object(w.bic_identity, "resolve",
