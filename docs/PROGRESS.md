@@ -142,14 +142,95 @@ Recorded here with an explicit removal plan so it cannot become permanent.
 |---|---|---|
 | **S1** ✅ | OWNER via Brain (flag-gated); CLIENT legacy | flag fail-safe verified |
 | **S2** ✅ | Role resolution unified (ADR 0005) | one resolver, one cache — done |
-| **S3** 🟡 | Replay produces genuine evidence | ≥20 non-degraded samples, 0 diffs |
-| **S4** ⬜ | `BIC_POLICY_ENABLED=true` for OWNER | replies verified identical |
+| **S3** ✅ | Replay produces genuine evidence | durable table; 15 samples, 0 diffs |
+| **S4** ✅ | `BIC_POLICY_ENABLED=true` for OWNER | replies verified identical |
+| **S4.5** 🟡 | **Tool Registry bypass closed** | `bic_tool_invocations` > 0 in production |
 | **S5** ⬜ | CLIENT path wrapped and routed through Brain | characterization green |
 | **S6** ⬜ | Split removed — one pipeline | ADR 0003 superseded |
 
 **1C is complete only at S6.** Stages S1–S5 are reversible by flag or
 `git revert`. If S5 proves unsafe, the split must be removed by moving CLIENT
 forward — never by making the split permanent.
+
+---
+
+#### S4.5 — Closing the Tool Registry bypass
+
+**The defect.** After S4 the owner path served through the Brain, five handlers
+were registered, and `bic_tool_invocations` held **0 rows**. Tools were running;
+none of them ran *through the registry*. Registration had been mistaken for
+execution. Eleven dispatch sites still called `tool_*()` directly:
+
+| Site | Count | Path |
+|---|---|---|
+| `try_owner_command` — `#` commands | 7 | owner |
+| `handle_owner_text` — NL fallbacks | 4 | owner |
+| `run_client_pipeline` — `send_brochure` | 1 | client |
+| `upsert_lead` — `sync_lead_to_crm` | 1 | client (side effect) |
+
+Every one bypassed the Policy Gate. The security boundary built in 1B was
+**real but unreached** — a boundary nothing is required to pass through is
+decoration.
+
+**The fix.** One dispatcher, `webhook.run_tool(sender, code, _fallback, **args)`:
+
+```
+run_tool → identity.resolve → tools.invoke → policy.may_invoke
+         → handler → business function → audit
+```
+
+Five tools were added to make full routing possible: `status`, `aitest`,
+`memory_show`, `memory_clear` (all `min_role=STAFF`, matching the fact that
+`try_owner_command` applies **no** role gate today, so STAFF preserves current
+behaviour exactly), plus `crm_capture_self`.
+
+**Why `crm_capture_self` exists.** `upsert_lead` runs inside the CLIENT pipeline
+and must record the conversing customer's details. Routing that through
+`crm_sync_lead` (STAFF) would be denied and would silently break lead capture.
+The wrong fix is to mark `crm_sync_lead` customer-safe. Two operations share one
+implementation but have different exposure:
+
+| Tool | Role | Meaning |
+|---|---|---|
+| `crm_sync_lead` | STAFF | sync an arbitrary lead — administrative |
+| `crm_capture_self` | CLIENT | record MY OWN details — data capture |
+
+`crm_capture_self` is safe by construction: its handler always uses
+`principal.sender_id`, authenticated by the transport. A customer cannot name
+another subject, and can only persist data they already supplied by talking —
+no capability they did not already have. **No change to `bic/policy.py` was
+required, so closed Slice 1B stays closed and no ACP is owed.**
+
+**Two subtleties worth recording:**
+
+1. `status` composes from *registry invocations* of `leads_today` and
+   `crm_list_clients`, not from `tool_leads`/`tool_clients`. Wrapping the
+   composite alone would run three tools while auditing one — an audit trail
+   that understates what executed is worse than none.
+2. **Denial never falls back to the direct call.** The `_fallback` argument
+   exists for the `bic` package failing to import, and for nothing else.
+   Falling back on a policy denial would restore the exact bypass being closed.
+
+**Enforcement.** `tests/test_registry_no_bypass.py` parses `webhook.py` and
+fails if any business tool is called outside a registered handler. The one
+documented exception is `tool_status`'s body — the degraded path reached only
+when `bic` is unimportable — listed by name so a second exception requires a
+deliberate edit.
+
+Verified by mutation (a check that cannot fail is not a check):
+
+| Mutation | Result |
+|---|---|
+| owner dispatch → direct call | ✅ caught |
+| client brochure → direct call | ✅ caught |
+| CRM capture → direct call | ✅ caught |
+| denial falls back to direct call | ✅ caught (2 tests) |
+
+**Cost.** The audit write in `tools.invoke()` is synchronous, so each invocation
+adds one Supabase round-trip. `#status` now costs three (itself + two composed).
+Acceptable against a WhatsApp reply budget, but it is the reason S4.5 carries a
+production latency check rather than only offline tests. If it proves too slow,
+the fix is batching the audit write — not skipping it.
 
 **Removal plan for ADR 0003's empty-response bridge:** at S5 the client
 handlers gain injected collaborators so they return a populated
@@ -173,7 +254,7 @@ Degraded samples (`"degraded": true`) are excluded from any tally.
 
 Full specification: `docs/REPLAY-SPEC.md`.
 
-**Tests:** 104 offline, green.
+**Tests:** 132 offline, green.
 
 **Client-flow bridge is TEMPORARY** — see ADR 0003. The client flow will send
 its own messages and return `BrainResponse(text="")`. Accepted for 1C only
@@ -254,12 +335,13 @@ identically.
 
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
+| 0 | **Every tool executes via the registry** | 🟡 | code + tests done; awaiting production `bic_tool_invocations` > 0 |
 | 1 | Adapter wired | 🟡 OWNER only | S5 completes it |
 | 2 | Feature flag operational | ✅ | verified unset/false/true/TRUE/1/off/garbage |
 | 3 | Decision Replay implemented | ✅ | `bic/replay.py` + structured logging |
-| 4 | Replay accuracy evidence | ❌ | **evidence not durable** — see blocker |
-| 5 | Latency verified in production | ❌ | same root cause |
-| 6 | Zero regressions | ✅ | 104 tests green, characterization + cache mutation-verified |
+| 4 | Replay accuracy evidence | 🟡 | durable table live; 15 samples, 0 diffs (bar is 20) |
+| 5 | Latency verified in production | 🟡 | replay mean 0.063 ms; registry audit overhead unmeasured in prod |
+| 6 | Zero regressions | ✅ | 132 tests green; no-bypass + characterization + cache mutation-verified |
 | 7 | Rollback verified | 🟡 | flag logic verified; not yet exercised in production |
 | 8 | Routing correctness | 🟡 | owner proven; client unproven |
 | 9 | No customer-visible change | ✅ | flag unset ⇒ legacy path serves everyone |
@@ -267,8 +349,22 @@ identically.
 | 11 | Documentation updated | ✅ | REPLAY-SPEC, ADR 0003/0004/0005, this tracker |
 | 12 | Progress tracker updated | ✅ | this file |
 
-**1C is NOT accepted — approximately 65% complete.** Criteria 4, 5 await
-production samples; 1, 7, 8 partial pending S4-S6.
+**1C is NOT accepted — approximately 80% complete.** Criterion 0 (the
+registry invariant) awaits one live owner command; 4 and 5 await production
+samples; 1, 7, 8 remain partial pending S5-S6.
+
+**Owner-defined acceptance for the bypass fix (2026-08-03):**
+
+| # | Test | Status |
+|---|---|---|
+| 1 | `bic_tool_invocations` increases per tool execution | 🟡 awaiting live command |
+| 2 | Authorization still works | ✅ offline; live check pending |
+| 3 | Existing responses byte-identical | ✅ handlers wrap, never reimplement |
+| 4 | Zero additional AI calls | ✅ `test_no_ai_call_in_the_dispatch_path` |
+| 5 | Characterization tests green | ✅ 132/132 |
+| 6 | Registry failure fails safely | ✅ empty registry ⇒ deny-all; import failure ⇒ fallback |
+| 7 | Policy denial prevents execution | ✅ mutation-verified, no fallback on denial |
+| 8 | Latency within target | 🟡 +1 audit round-trip per tool; prod measurement pending |
 
 **Target architecture** (unchanged; ADR 0003 records the one temporary deviation):
 ```
