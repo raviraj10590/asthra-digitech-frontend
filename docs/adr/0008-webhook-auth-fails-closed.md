@@ -1,4 +1,4 @@
-# ADR 0008 — Webhook authentication fails closed
+# ADR 0008 — Webhook authentication: measure, then enforce
 
 **Status:** Accepted · 2026-08-03 · **Relates to:** audit finding C-1
 
@@ -33,9 +33,47 @@ Three prior code reviews missed this, including one that reported eight
 acceptance criteria as passing. All three read artefacts. None probed the
 running system.
 
+## ⚠️ Amended before deployment — the router
+
+The first version of this decision was "fail closed, immediately". Investigating
+the Meta app configuration **before** deploying it found that would have been an
+outage.
+
+**Meta does not deliver to this endpoint directly.** Of eight Meta apps, exactly
+one has WhatsApp configured — "N8N messages" (`1096228049110325`, the only app in
+Live mode) — and its callback URL is:
+
+```
+https://whatsapp-router-flame.vercel.app/webhook
+```
+
+That router (confirmed by the owner as theirs) forwards to this endpoint. Our
+HMAC is computed over the **raw body** with Meta's app secret, so it can only
+validate if the router forwards *both* the original bytes *and* the original
+`X-Hub-Signature-256` header. A forwarder that re-serialises the JSON — the
+default behaviour of most HTTP proxies and of `requests`/`fetch` round-trips —
+changes the bytes and breaks the hash silently.
+
+**Enforcing blind would have rejected 100% of legitimate traffic and taken the
+bot dark, with the cause invisible in the logs.** The audit that found the
+vulnerability did not find the router; only reading the Meta config did.
+
 ## Decision
 
-Fail closed. An unconfigured secret rejects **all** traffic.
+**Measure first, enforce second.**
+
+Ship signature verification in OBSERVE mode: compute the signature, log whether
+it would have validated, reject nothing. `WEBHOOK_AUTH_ENFORCE=true` flips it to
+fail closed once evidence shows a valid signature survives the router hop.
+
+This is the same pattern that made the Decision Replay migration safe, and it
+replaces an assumption about the router with a measurement of it.
+
+**The observation window is a deliberate, time-boxed period in which the
+vulnerability remains open.** One real message produces the evidence. It must be
+closed on that evidence, not left running because nothing is visibly broken.
+
+When enforcing: an unconfigured secret rejects **all** traffic.
 
 **503, not 403,** when the secret is missing: this is our misconfiguration, not
 a caller failure, and Meta retries 5xx — so genuine messages are redelivered
