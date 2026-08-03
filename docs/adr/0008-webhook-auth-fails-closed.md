@@ -80,6 +80,34 @@ a caller failure, and Meta retries 5xx — so genuine messages are redelivered
 once the secret is set rather than being silently discarded. A signature that is
 present and wrong still gets 403.
 
+## Measured — the router preserves everything (2026-08-03)
+
+Observe mode answered the question the same day, **without needing the app
+secret**, because `signature_present` does not depend on it.
+
+Four real WhatsApp messages (561, 691, 696, 727 bytes) all arrived with
+`signature_present: true`. A controlled probe settled the byte question:
+
+| | |
+|---|---|
+| Bytes sent to the router | **221** |
+| Bytes received by the bot | **221** |
+| Bytes if it had re-serialised (`json.dumps`) | 241 |
+
+The router forwards the raw body **byte-for-byte** and passes
+`X-Hub-Signature-256` through untouched. Its user agent is
+`python-requests/2.32.3` — a straight pass-through, not a re-encode.
+
+**Therefore HMAC verification works on this path, and enforcement is safe once
+`META_APP_SECRET` is configured.** The original fail-closed decision was right;
+what was missing was evidence, not correctness. Shipping it on the assumption
+would have been reckless even though the assumption happened to hold.
+
+Method worth repeating: two `curl` calls and one log read replaced a guess that
+could have blacked out production. The audit found the vulnerability; only
+reading the Meta config found the router; only observe mode proved the router
+was harmless.
+
 ## Consequences
 
 **This changes behaviour, and it can take the bot offline.** With the secret

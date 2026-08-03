@@ -499,7 +499,7 @@ identity chain was unauthenticated. See ADR 0008.
 
 | Task | Status | Evidence |
 |---|---|---|
-| 1 · Webhook auth fails closed | ✅ code | 7 HTTP tests, 4 mutations caught. **Deploy-gated** on the secret being set |
+| 1 · Webhook auth (observe mode) | ✅ **deployed** | 24 HTTP tests, 7 mutations caught. Router proven to preserve body + signature. Enforcement awaits `META_APP_SECRET` |
 | 2 · Execute every handler once | ⬜ **blocked** | Needs live WhatsApp traffic — 6 of 13 handlers still unproven |
 | 3 · Replay OWNER/STAFF/CLIENT | ⬜ **blocked** | Needs live traffic; 32 records span 1 role |
 | 4 · Explicit maxDuration | ✅ | 30 s via `builds[].config`; 4 tests |
