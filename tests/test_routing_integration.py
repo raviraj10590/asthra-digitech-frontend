@@ -133,13 +133,15 @@ class TestClientRoutingEquivalence(unittest.TestCase):
 
 class TestHandlerRegistration(unittest.TestCase):
     def test_all_registered(self):
-        """Grew from 5 to 10 when the bypass was closed: every dispatch site
-        now needs a handler, so this list IS the tool surface."""
+        """Grew from 5 to 9 when the bypass was closed: every dispatch site
+        now needs a handler, so this list IS the tool surface. `#status` is
+        absent by design — it is composed from two invocations at the dispatch
+        site, not a tool that invokes tools (see compose_status)."""
         self.assertEqual(
             sorted(tools._HANDLERS),
             ["aitest", "crm_capture_self", "crm_list_clients", "crm_sync_lead",
              "leads_today", "memory_clear", "memory_show", "roles_list",
-             "send_brochure", "status"])
+             "send_brochure"])
 
     def test_handlers_wrap_not_reimplement(self):
         """Each handler delegates to the existing function."""

@@ -36,15 +36,15 @@ WEBHOOK_PY = os.path.join(os.path.dirname(__file__), "..", "api", "webhook.py")
 
 # Every function that performs real business work and is registered as a tool.
 BUSINESS_TOOLS = {
-    "tool_leads", "tool_clients", "tool_status", "tool_roles_list",
+    "tool_leads", "tool_clients", "tool_roles_list",
     "tool_aitest", "tool_memory_show", "tool_memory_clear",
     "send_brochure", "sync_lead_to_crm",
 }
 
-# The ONE documented exception: tool_status's body is the degraded path, reached
-# only as run_tool()'s fallback when the bic package fails to import. Listed by
-# name so adding a second exception requires editing this test deliberately.
-ALLOWED_DIRECT_CALLERS = {"tool_status"}
+# NO exceptions. tool_status was the only one; it became dead code when
+# `#status` moved to compose_status() and was deleted. Keep this set empty —
+# every entry added here is a hole in the invariant.
+ALLOWED_DIRECT_CALLERS = set()
 
 
 def _parse():
@@ -157,6 +157,29 @@ class StaticNoBypass(unittest.TestCase):
                                  f"line {node.lineno}: only run_tool may call invoke()")
 
 
+class NoNestedInvocation(unittest.TestCase):
+    """`tools.invoke()` calls `db.reset_query_count()` on a single thread-local,
+    so a handler that invokes another tool corrupts the OUTER row's db_queries.
+    Composites belong at the dispatch site (compose_status) until invoke() is
+    made nest-safe under an ACP against closed Slice 1B."""
+
+    def test_no_handler_calls_run_tool(self):
+        tree = _parse()
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any(_is_register_decorator(d) for d in node.decorator_list):
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                        and inner.func.id == "run_tool"):
+                    offenders.append(f"  {node.name}() calls run_tool() at line {inner.lineno}")
+        self.assertEqual(offenders, [],
+                         "nested invocation corrupts the outer audit row:\n"
+                         + "\n".join(offenders))
+
+
 class _Recorder:
     """Stand-in registry that records what was asked of it."""
 
@@ -264,7 +287,7 @@ class HandlerCoverage(unittest.TestCase):
     """Every rewired dispatch site names a tool that is actually registered —
     a typo would otherwise surface as 'unknown tool → DENY' in production."""
 
-    DISPATCHED = {"leads_today", "crm_list_clients", "status", "roles_list",
+    DISPATCHED = {"leads_today", "crm_list_clients", "roles_list",
                   "aitest", "memory_show", "memory_clear",
                   "send_brochure", "crm_capture_self"}
 

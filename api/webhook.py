@@ -1522,13 +1522,6 @@ def tool_clients(sender: str, **_) -> str:
         lines.append(f"• {row.get('name')} — wa.me/{row.get('phone')}")
     return "\n".join(lines)
 
-def tool_status(sender: str, **_) -> str:
-    # DEGRADED PATH ONLY. Reached solely as run_tool()'s fallback when the BIC
-    # package failed to import; the live path is the `status` registry handler,
-    # which composes the same text from audited invocations. These direct calls
-    # are the deliberate degradation, not a registry bypass.
-    return "✅ Bot online\n\n" + tool_leads(sender) + "\n\n" + tool_clients(sender)
-
 def tool_roles_list(sender: str, **_) -> str:
     lines = ["👥 Access list:"]
     for p in OWNER_PHONES:
@@ -1568,6 +1561,32 @@ def tool_aitest(sender: str, **_) -> str:
     lines.append("")
     lines.append("Order: " + " → ".join(n for n, _ in chain))
     return "\n".join(lines)
+
+def compose_status(sender: str) -> str:
+    """`#status` is a COMPOSITE command: two audited tool invocations plus a
+    presentation string. Composed here, at the dispatch site, rather than as a
+    `status` tool that invokes other tools.
+
+    Why not a composite tool: `tools.invoke()` calls `db.reset_query_count()`,
+    and that counter is a single thread-local. A tool that invokes tools would
+    reset the outer invocation's counter, so the outer audit row would
+    under-report `db_queries`. Silently wrong numbers in an audit table are
+    worse than no numbers.
+
+    Making `invoke()` nest-safe means editing `bic/tools.py`, which belongs to
+    closed Slice 1B — that needs an ACP, not an opportunistic edit. Composing
+    here needs neither, and is arguably more correct anyway: each constituent
+    tool is gated by policy on its own terms, and the join is presentation,
+    which is the transport layer's job.
+
+    ⚠️ RULE: no registered handler may call run_tool(). Add a composite tool
+    only after the counter is made nest-safe under an ACP.
+    """
+    return ("✅ Bot online\n\n"
+            + run_tool(sender, "leads_today", _fallback=tool_leads)
+            + "\n\n"
+            + run_tool(sender, "crm_list_clients", _fallback=tool_clients))
+
 
 def run_tool(sender: str, code: str, _fallback=None, **args) -> str:
     """THE dispatch path for every tool execution.
@@ -1706,7 +1725,7 @@ def try_owner_command(sender: str, role: str, text: str):
     if low == "#clients":
         return run_tool(sender, "crm_list_clients", _fallback=tool_clients)
     if low == "#status":
-        return run_tool(sender, "status", _fallback=tool_status)
+        return compose_status(sender)
     if low == "#roles":
         return run_tool(sender, "roles_list", _fallback=tool_roles_list)
     if low == "#aitest":
@@ -1973,7 +1992,7 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
     if any(w in low for w in ("client", "ಗ್ರಾಹಕ", "crm")):
         return run_tool(sender, "crm_list_clients", _fallback=tool_clients)
     if any(w in low for w in ("status", "health", "online", "snapshot")):
-        return run_tool(sender, "status", _fallback=tool_status)
+        return compose_status(sender)
     if "role" in low and any(w in low for w in ("list", "who", "show")):
         return run_tool(sender, "roles_list", _fallback=tool_roles_list)
 
@@ -2454,16 +2473,6 @@ if BIC_AVAILABLE:
         """
         sync_lead_to_crm(principal.sender_id, data or {})
         return "captured"
-
-    @bic_tools.register("status")
-    def _tool_h_status(principal, timeout=15, **_):
-        # Composed FROM registry invocations, not from tool_leads/tool_clients
-        # directly — otherwise `#status` would run two tools while auditing one,
-        # and bic_tool_invocations would understate what actually executed.
-        return ("✅ Bot online\n\n"
-                + run_tool(principal.sender_id, "leads_today", _fallback=tool_leads)
-                + "\n\n"
-                + run_tool(principal.sender_id, "crm_list_clients", _fallback=tool_clients))
 
     @bic_tools.register("aitest")
     def _tool_h_aitest(principal, timeout=30, **_):
