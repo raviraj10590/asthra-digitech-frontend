@@ -114,6 +114,25 @@ class handler(BaseHTTPRequestHandler):
         # and does not depend on pg_cron (not guaranteed on the free tier).
         # Strictly best-effort — retention must never affect the digest, and a
         # failure here is a housekeeping miss, not an incident.
+        # Audit finding M-3: bic_rollup_tool_invocations has existed since
+        # Slice 1A and was NEVER CALLED, so the audit table grew without
+        # bound. Wired onto the existing daily cron rather than adding a
+        # scheduler — Vercel Hobby caps at 2 crons and both are in use.
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/bic_rollup_tool_invocations",
+                headers={
+                    "apikey": os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+                    "Authorization": f"Bearer {os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')}",
+                    "Content-Type": "application/json",
+                },
+                json={"retain_days": 90},
+                timeout=20,
+            )
+            print(f"bic tool-invocation rollup: {r.status_code} {r.text[:80]}")
+        except Exception as e:
+            print(f"bic tool-invocation rollup failed (ignored): {e}")
+
         try:
             r = requests.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/bic_prune_replay_records",

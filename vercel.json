@@ -1,9 +1,14 @@
 {
-  "regions": ["sin1"],
+  "regions": [
+    "sin1"
+  ],
   "builds": [
     {
       "src": "api/webhook.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python",
+      "config": {
+        "maxDuration": 30
+      }
     },
     {
       "src": "api/digest.py",

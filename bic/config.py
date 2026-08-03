@@ -51,6 +51,12 @@ DB_TIMEOUT_SECONDS = float(os.environ.get("BIC_DB_TIMEOUT", "5"))
 # would add a query per invocation for data that is effectively static.
 REGISTRY_CACHE_TTL = int(os.environ.get("BIC_REGISTRY_CACHE_TTL", "300"))
 
+# Back-off after a FAILED registry read (audit M-1). Short, because a real
+# outage should be retried reasonably soon; long enough that a single turn
+# never makes more than one doomed database call. Deliberately far below
+# REGISTRY_CACHE_TTL — this is a circuit breaker, not a cache.
+REGISTRY_FAILURE_BACKOFF = int(os.environ.get("BIC_REGISTRY_FAILURE_BACKOFF", "30"))
+
 
 def is_configured() -> bool:
     """True when BIC has what it needs to reach its own tables."""

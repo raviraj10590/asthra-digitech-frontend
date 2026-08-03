@@ -75,7 +75,12 @@ def _load_registry(force: bool = False) -> dict:
     """Tool defs from the DB, cached. Tool metadata is effectively static;
     re-reading per message would add a query per invocation for nothing."""
     global _REGISTRY_EXPIRES
-    if not force and _REGISTRY_CACHE and _REGISTRY_EXPIRES > time.time():
+    # NOTE the absence of an `and _REGISTRY_CACHE` term. Requiring a populated
+    # cache here defeated the negative cache in the ONE case that matters most:
+    # a cold instance during an outage has an empty cache, so it would retry on
+    # every single invoke. Honour the expiry whether or not we hold rows —
+    # that is what makes this a circuit breaker rather than a cache.
+    if not force and _REGISTRY_EXPIRES > time.time():
         return _REGISTRY_CACHE
     try:
         rows = db.select("bic_tool_defs", {"select": "*"})
@@ -84,7 +89,22 @@ def _load_registry(force: bool = False) -> dict:
         # run tools because a metadata read blipped would be worse than acting
         # on slightly old metadata. With no cache at all, every tool is denied
         # (unknown tool → DENY), which is the fail-closed outcome.
-        print(f"tools: registry load failed ({e}); using {'stale cache' if _REGISTRY_CACHE else 'EMPTY registry — all tools will deny'}")
+        #
+        # NEGATIVE CACHE (audit finding M-1). Previously the expiry was left
+        # unchanged on failure, so every invoke() re-attempted a dead database
+        # with a 5 s timeout. A single `#status` is two invokes = 10 s of
+        # timeouts, plus identity, two audit writes and the replay write —
+        # enough to blow the function limit, which means no 200 to Meta, which
+        # means a retry, which repeats the whole thing.
+        #
+        # Backing off does NOT change behaviour: an empty registry denies with
+        # or without this, and a stale cache serves the same rows. It only
+        # stops the hammering, and it lets the process fail fast instead of
+        # burning the turn budget on timeouts.
+        _REGISTRY_EXPIRES = time.time() + config.REGISTRY_FAILURE_BACKOFF
+        print(f"tools: registry load failed ({e}); using "
+              f"{'stale cache' if _REGISTRY_CACHE else 'EMPTY registry — all tools will deny'}"
+              f"; backing off {config.REGISTRY_FAILURE_BACKOFF}s")
         return _REGISTRY_CACHE
     _REGISTRY_CACHE.clear()
     _REGISTRY_CACHE.update({r["code"]: r for r in rows})
