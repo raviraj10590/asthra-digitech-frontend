@@ -133,15 +133,16 @@ class TestClientRoutingEquivalence(unittest.TestCase):
 
 class TestHandlerRegistration(unittest.TestCase):
     def test_all_registered(self):
-        """Grew from 5 to 9 when the bypass was closed: every dispatch site
-        now needs a handler, so this list IS the tool surface. `#status` is
-        absent by design — it is composed from two invocations at the dispatch
-        site, not a tool that invokes tools (see compose_status)."""
+        """5 → 9 when the bypass was closed, → 13 when the review found the
+        privileged commands still bypassing (C1, H4). This list IS the tool
+        surface. `#status` is absent by design — composed from two invocations
+        at the dispatch site, not a tool that invokes tools (compose_status)."""
         self.assertEqual(
             sorted(tools._HANDLERS),
-            ["aitest", "crm_capture_self", "crm_list_clients", "crm_sync_lead",
-             "leads_today", "memory_clear", "memory_show", "roles_list",
-             "send_brochure"])
+            ["add_role", "aitest", "chat_pause", "chat_resume",
+             "crm_capture_self", "crm_list_clients", "crm_sync_lead",
+             "leads_today", "memory_clear", "memory_show", "remove_role",
+             "roles_list", "send_brochure"])
 
     def test_handlers_wrap_not_reimplement(self):
         """Each handler delegates to the existing function."""
@@ -154,7 +155,11 @@ class TestHandlerRegistration(unittest.TestCase):
                                ("_tool_h_memory_show", "tool_memory_show"),
                                ("_tool_h_memory_clear", "tool_memory_clear"),
                                ("_tool_h_crm_capture_self", "sync_lead_to_crm"),
-                               ("_tool_h_crm_sync_lead", "sync_lead_to_crm")]:
+                               ("_tool_h_crm_sync_lead", "sync_lead_to_crm"),
+                               ("_tool_h_add_role", "_tool_add_role"),
+                               ("_tool_h_remove_role", "_tool_remove_role"),
+                               ("_tool_h_chat_pause", "tool_chat_pause"),
+                               ("_tool_h_chat_resume", "tool_chat_resume")]:
             src = inspect.getsource(getattr(w, name))
             self.assertIn(existing, src, f"{name} must wrap {existing}")
             # Count EXECUTABLE lines only. The original raw line count also

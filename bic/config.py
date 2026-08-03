@@ -26,10 +26,22 @@ SUPABASE_URL = os.environ.get(
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 # ── Feature flag ───────────────────────────────────────────────────────────
-# Runtime kill-switch for the policy/tool layer. This slice touches the routing
-# path, and `git revert` needs a deploy — a routing regression needs stopping
-# NOW. Set BIC_POLICY_ENABLED=off to fall back to the legacy inline path.
-POLICY_ENABLED = os.environ.get("BIC_POLICY_ENABLED", "on").strip().lower() != "off"
+# DELETED 2026-08-03 (review finding H3). There was a POLICY_ENABLED constant
+# here reading the same BIC_POLICY_ENABLED env var as webhook._bic_enabled(),
+# with the OPPOSITE default (unset ⇒ True) and a broken comparison:
+#
+#     os.environ.get("BIC_POLICY_ENABLED", "on").lower() != "off"
+#
+# `"false" != "off"` evaluates to True, so setting the var to "false" — the most
+# natural way anyone would attempt a rollback — disabled the live path and
+# ENABLED this constant. It had zero call sites, but it sat in the config module
+# under the name a future engineer would reach for first, and the rollback lever
+# is the load-bearing safety property of this entire migration.
+#
+# THE ONE SOURCE OF TRUTH IS webhook._bic_enabled(). It reads the env var
+# directly, defaults to FALSE, and accepts only ("true","1","yes","on").
+# Do not add a second reader here. If BIC code ever needs the flag, have the
+# host inject it — the same pattern identity.configure() already uses.
 
 # Network timeout for BIC's own reads (registry, roles). Tool timeouts are
 # per-tool and come from bic_tool_defs.

@@ -19,6 +19,7 @@ Offline: no network, no AI, no database.
 
 import ast
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -35,11 +36,22 @@ from bic import policy, tools              # noqa: E402
 WEBHOOK_PY = os.path.join(os.path.dirname(__file__), "..", "api", "webhook.py")
 
 # Every function that performs real business work and is registered as a tool.
-BUSINESS_TOOLS = {
-    "tool_leads", "tool_clients", "tool_roles_list",
-    "tool_aitest", "tool_memory_show", "tool_memory_clear",
-    "send_brochure", "sync_lead_to_crm",
-}
+#
+# ⚠️ THIS SET WAS THE BUG. It used to enumerate `tool_*` names only, so
+# `_tool_add_role` and `_tool_remove_role` — the two functions that can mint an
+# OWNER — were exempt by virtue of a leading underscore. The invariant test was
+# green the entire time the highest-privilege operation in the system bypassed
+# the Policy Gate.
+#
+# It is now DERIVED, not hand-written: any function whose name matches
+# _?tool_[a-z_]+ and is not a registered handler (_tool_h_*) is treated as a
+# business tool automatically. A new privileged function cannot opt out of the
+# invariant by being named a certain way, and nobody has to remember to add it
+# here.
+TOOL_NAME_RE = re.compile(r"^tool_(?!h_)[a-z_]+$")
+
+# Non-tool business functions that must also route (they have registry codes).
+EXTRA_BUSINESS_TOOLS = {"send_brochure", "sync_lead_to_crm"}
 
 # NO exceptions. tool_status was the only one; it became dead code when
 # `#status` moved to compose_status() and was deleted. Keep this set empty —
@@ -50,6 +62,16 @@ ALLOWED_DIRECT_CALLERS = set()
 def _parse():
     with open(WEBHOOK_PY, encoding="utf-8") as fh:
         return ast.parse(fh.read(), filename="webhook.py")
+
+
+def _business_tools(tree) -> set:
+    """Business tools, DERIVED from the source rather than hand-listed."""
+    found = set(EXTRA_BUSINESS_TOOLS)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if TOOL_NAME_RE.match(node.name):
+                found.add(node.name)
+    return found
 
 
 def _is_register_decorator(dec):
@@ -63,6 +85,7 @@ class StaticNoBypass(unittest.TestCase):
 
     def setUp(self):
         self.tree = _parse()
+        self.business_tools = _business_tools(self.tree)
         # Map every function definition to its enclosing function, so a call can
         # be attributed to the function it physically sits in.
         self.owner_of = {}
@@ -73,7 +96,7 @@ class StaticNoBypass(unittest.TestCase):
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if any(_is_register_decorator(d) for d in child.decorator_list):
                         self.registered.add(child.name)
-                    if child.name in BUSINESS_TOOLS:
+                    if child.name in self.business_tools:
                         self.definitions.add(child.name)
                     walk(child, child.name)
                 else:
@@ -88,7 +111,7 @@ class StaticNoBypass(unittest.TestCase):
         for node in ast.walk(self.tree):
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
                 continue
-            if node.func.id not in BUSINESS_TOOLS:
+            if node.func.id not in self.business_tools:
                 continue
             caller = None
             for parent in ast.walk(self.tree):
@@ -140,21 +163,31 @@ class StaticNoBypass(unittest.TestCase):
     def test_every_business_tool_has_a_registered_handler(self):
         """A tool that exists but is unregistered cannot be invoked through the
         registry, which is how bypasses get reintroduced."""
-        missing = sorted(BUSINESS_TOOLS - self.definitions)
+        missing = sorted(self.business_tools - self.definitions)
         self.assertEqual(missing, [], f"expected in webhook.py: {missing}")
-        self.assertGreaterEqual(len(self.registered), 9,
+        self.assertGreaterEqual(len(self.registered), 13,
                                 f"only {len(self.registered)} handlers registered")
+
+    def test_privileged_functions_are_covered_by_the_invariant(self):
+        """Regression lock for the review's C1. The derived set MUST include the
+        underscore-prefixed privilege operations; if a future refactor narrows
+        the pattern back, this fails rather than going quietly green."""
+        for name in ("_tool_add_role", "_tool_remove_role",
+                     "tool_chat_pause", "tool_chat_resume"):
+            self.assertIn(name, self.business_tools,
+                          f"{name} is exempt from the no-bypass invariant")
 
     def test_run_tool_exists_and_is_the_only_dispatcher(self):
         self.assertTrue(callable(w.run_tool))
+        self.assertTrue(callable(w.invoke_tool))
         src = open(WEBHOOK_PY, encoding="utf-8").read()
         # invoke() is the registry entry point; only run_tool may call it.
         ranges = self._caller_ranges()
         for node in ast.walk(self.tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "invoke"):
-                self.assertEqual(self._enclosing(node.lineno, ranges), "run_tool",
-                                 f"line {node.lineno}: only run_tool may call invoke()")
+                self.assertEqual(self._enclosing(node.lineno, ranges), "invoke_tool",
+                                 f"line {node.lineno}: only invoke_tool may call invoke()")
 
 
 class NoNestedInvocation(unittest.TestCase):
@@ -173,7 +206,7 @@ class NoNestedInvocation(unittest.TestCase):
                 continue
             for inner in ast.walk(node):
                 if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
-                        and inner.func.id == "run_tool"):
+                        and inner.func.id in ("run_tool", "invoke_tool")):
                     offenders.append(f"  {node.name}() calls run_tool() at line {inner.lineno}")
         self.assertEqual(offenders, [],
                          "nested invocation corrupts the outer audit row:\n"
@@ -306,7 +339,8 @@ class HandlerCoverage(unittest.TestCase):
 
     DISPATCHED = {"leads_today", "crm_list_clients", "roles_list",
                   "aitest", "memory_show", "memory_clear",
-                  "send_brochure", "crm_capture_self"}
+                  "send_brochure", "crm_capture_self",
+                  "add_role", "remove_role", "chat_pause", "chat_resume"}
 
     def test_all_dispatched_codes_are_registered(self):
         src = open(WEBHOOK_PY, encoding="utf-8").read()

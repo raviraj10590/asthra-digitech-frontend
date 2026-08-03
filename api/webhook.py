@@ -359,6 +359,13 @@ def get_role(phone: str) -> tuple:
         return "OWNER", None
     try:
         row = _fetch_role_row(phone)
+        # NOT INTERNAL_ROLES — this is role VALIDATION, not pipeline routing.
+        # It is deliberately narrower than policy.ROLE_ORDER: with BIC
+        # unavailable there is no registry and no policy gate, so this degraded
+        # path recognises only the two roles the legacy bot ever understood and
+        # treats anything else (e.g. MANAGER) as CLIENT — the fail-closed
+        # direction. Conflating it with the routing tuple would widen privilege
+        # in exactly the mode that has the fewest working safeguards.
         if row and row.get("role") in ("OWNER", "STAFF"):
             return row["role"], row.get("label")
     except Exception as e:
@@ -599,7 +606,14 @@ def upsert_lead(phone: str, data: dict):
     # crm_capture_self, not crm_sync_lead: the subject here is the conversing
     # customer recording their OWN details, which must stay reachable for a
     # CLIENT principal without relaxing the STAFF gate on the admin sync tool.
-    run_tool(phone, "crm_capture_self", _fallback=sync_lead_to_crm, data=data)
+    # H1, same pattern: a denial here silently drops the lead out of the CRM.
+    # The lead IS still in the `leads` table (upserted just above), so this is
+    # recoverable rather than lost — a greppable marker plus the audit row is
+    # proportionate, where a WhatsApp alert per sync would be noise.
+    synced, why = invoke_tool(phone, "crm_capture_self",
+                              _fallback=sync_lead_to_crm, data=data)
+    if not synced:
+        print(f"LEAD_CRM_SYNC_FAILED phone=...{phone[-4:]} reason={why}")
 
 def is_duplicate_webhook(ctx: dict, text: str) -> bool:
     """Meta retries webhooks — identical text within 60s is a retry, not a person."""
@@ -1267,14 +1281,21 @@ def notify_owner(message: str):
         except Exception as e:
             print(f"notify_owner error ({phone}): {e}")
 
-def send_brochure(to: str):
-    """Send company profile PDF as a document message."""
+def send_brochure(to: str, timeout: float = None, **_) -> bool:
+    """Send company profile PDF as a document message.
+
+    Returns True when a document was actually dispatched. Review H1: the caller
+    used to discard this entirely and then record "[ಬ್ರೋಚರ್ PDF ಕಳಿಸಲಾಯಿತು]" in
+    the transcript regardless — a success record for work that may not have
+    happened. The no-URL branch returns False because it sends an apology, not
+    a brochure.
+    """
     if not BROCHURE_URL:
         send_text(to,
             "ಬ್ರೋಚರ್ ಶೀಘ್ರದಲ್ಲೇ ಕಳಿಸುತ್ತೇವೆ. "
             "ಈಗ ಕರೆ ಮಾಡಿ: +91 88844 48141"
         )
-        return
+        return False
     _wa_post({
         "messaging_product": "whatsapp",
         "to": to,
@@ -1285,6 +1306,7 @@ def send_brochure(to: str):
             "filename": "Asthra_DigiTech_Company_Profile.pdf",
         },
     })
+    return True
 
 def send_welcome_menu(to: str):
     """First-contact greeting: branded logo image + tappable services list."""
@@ -1473,7 +1495,7 @@ def _row_date_ist(iso_ts: str):
     except Exception:
         return None
 
-def tool_leads(sender: str, **_) -> str:
+def tool_leads(sender: str, timeout: float = 5, **_) -> str:
     """Today's captured leads from the AI Kannada leads table."""
     try:
         r = requests.get(
@@ -1481,7 +1503,7 @@ def tool_leads(sender: str, **_) -> str:
             headers=_supa_headers(""),
             params={"order": "created_at.desc", "limit": "50",
                      "select": "name,company,service_needed,budget,city,created_at"},
-            timeout=5,
+            timeout=timeout,
         )
         rows = r.json() if r.ok else []
     except Exception as e:
@@ -1495,7 +1517,7 @@ def tool_leads(sender: str, **_) -> str:
         lines.append("No leads captured today yet.")
     return "\n".join(lines)
 
-def tool_clients(sender: str, **_) -> str:
+def tool_clients(sender: str, timeout: float = 5, **_) -> str:
     """CRM client count + latest 5, from the Asthra CRM's clients table."""
     if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
         return "⚠️ CRM sync isn't configured yet."
@@ -1505,14 +1527,14 @@ def tool_clients(sender: str, **_) -> str:
             headers=_crm_headers(),
             params={"user_id": f"eq.{CRM_OWNER_USER_ID}", "order": "created_at.desc",
                      "limit": "5", "select": "name,phone,created_at"},
-            timeout=5,
+            timeout=timeout,
         )
         rows = rows_r.json() if rows_r.ok else []
         count_r = requests.get(
             f"{CRM_SUPABASE_URL}/rest/v1/clients",
             headers={**_crm_headers(), "Prefer": "count=exact"},
             params={"user_id": f"eq.{CRM_OWNER_USER_ID}", "select": "id"},
-            timeout=5,
+            timeout=timeout,
         )
         total = count_r.headers.get("Content-Range", "?/?").split("/")[-1] if count_r.ok else "?"
     except Exception as e:
@@ -1522,7 +1544,7 @@ def tool_clients(sender: str, **_) -> str:
         lines.append(f"• {row.get('name')} — wa.me/{row.get('phone')}")
     return "\n".join(lines)
 
-def tool_roles_list(sender: str, **_) -> str:
+def tool_roles_list(sender: str, timeout: float = 5, **_) -> str:
     lines = ["👥 Access list:"]
     for p in OWNER_PHONES:
         lines.append(f"• OWNER (bootstrap): wa.me/{p}")
@@ -1531,7 +1553,7 @@ def tool_roles_list(sender: str, **_) -> str:
             f"{SUPABASE_URL}/rest/v1/{ROLES_TABLE}",
             headers=_supa_headers(""),
             params={"active": "eq.true", "select": "phone,role,label", "order": "role"},
-            timeout=5,
+            timeout=timeout,
         )
         rows = r.json() if r.ok else []
     except Exception as e:
@@ -1614,21 +1636,59 @@ def run_tool(sender: str, code: str, _fallback=None, **args) -> str:
     # executes through the registry. Flag off is the documented rollback to
     # legacy behaviour, which is the same escape the BIC_AVAILABLE check gives
     # when the package fails to bundle.
+    return invoke_tool(sender, code, _fallback=_fallback, **args)[1]
+
+
+def invoke_tool(sender: str, code: str, _fallback=None, **args) -> tuple:
+    """run_tool's underlying form: returns (ok, text) instead of just text.
+
+    Exists because discarding run_tool's return value silently swallowed policy
+    denials on the customer path (review finding H1): the bot promised a
+    brochure, recorded that it had been sent, and notified the owner of a
+    success that never happened. A caller that must branch on failure needs the
+    outcome, not a string it would have to sniff for an emoji prefix.
+    """
     if not BIC_AVAILABLE or not _bic_enabled():
         # Same args as the tool, so every call site can name the business
         # function directly. A lambda here would read as a bypass to the
         # static no-bypass check, and would deserve to.
-        return _fallback(sender, **args) if _fallback else "⚠️ Tool layer unavailable."
+        #
+        # ok=True: this is the LEGACY path, and legacy semantics are what
+        # rollback means. Reporting failure here would make the flag change
+        # behaviour, which is exactly what it must not do.
+        if _fallback:
+            return True, _coerce_tool_text(_fallback(sender, **args))
+        return False, "⚠️ Tool layer unavailable."
 
     principal = bic_identity.resolve(sender, channel="whatsapp")
     result = bic_tools.invoke(principal, code, **args)
 
     if result.denied:
-        return f"🚫 Not permitted: {result.error}"
+        # M5: an outage must not present as an authorization failure.
+        # Every dispatched code is asserted to exist in bic_tool_defs by
+        # test_all_dispatched_codes_are_registered, so "unknown tool" in
+        # production cannot be a typo — it means _load_registry() fell back to
+        # an empty registry (its documented fail-closed behaviour). Telling the
+        # owner they lack permission for a command they have always been able
+        # to run sends diagnosis to bot_roles instead of to connectivity.
+        if result.error == "unknown tool":
+            print(f"run_tool {code}: REGISTRY UNAVAILABLE (empty registry — check Supabase)")
+            return False, "⚠️ Service temporarily unavailable — please try again shortly."
+        return False, f"🚫 Not permitted: {result.error}"
     if not result.ok:
         print(f"run_tool {code} failed: {result.error}")
-        return "⚠️ That didn't work just now. Try again shortly."
-    return result.value
+        return False, "⚠️ That didn't work just now. Try again shortly."
+    return True, _coerce_tool_text(result.value)
+
+
+def _coerce_tool_text(value) -> str:
+    """L5: run_tool is annotated -> str but a handler returns whatever it
+    returns. compose_status concatenates the result, so a handler returning
+    None would raise a TypeError deep inside an unrelated command. Coerce at
+    the boundary instead of trusting every present and future handler."""
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else str(value)
 
 
 def tool_memory_show(sender: str, **_) -> str:
@@ -1675,11 +1735,36 @@ def _tool_remove_role(sender: str, target: str) -> str:
     _invalidate_role(target)
     return f"✅ Access revoked for wa.me/{target}"
 
+def tool_chat_pause(sender: str, target: str = "", **_) -> str:
+    """Silence the bot for one customer conversation (auto-resumes in 24h).
+
+    Review H4: this had NO role check and no audit. It writes to a THIRD
+    PARTY's message history and can cause silent, indefinite customer-facing
+    service loss — the only owner command that can. It is now registry-routed
+    like everything else, so the gate and the audit row come for free.
+    """
+    save_message(target, "system", "BOT_PAUSED")
+    return f"⏸️ Bot paused for wa.me/{target} (auto-resumes in 24h)"
+
+
+def tool_chat_resume(sender: str, target: str = "", **_) -> str:
+    save_message(target, "system", "BOT_RESUMED")
+    return f"▶️ Bot resumed for wa.me/{target}"
+
+
 # Irreversible actions live here, keyed by name — _stage_confirm() stores the
 # name + args, #confirm looks it up and calls it. Nothing runs on the first ask.
+#
+# Review C1: these two used to call _tool_add_role/_tool_remove_role DIRECTLY,
+# so the one operation that can mint an OWNER produced no bic_tool_invocations
+# row and passed no Policy Gate. They now route through run_tool like every
+# other tool — which is also what re-checks authorization at CONFIRM time
+# rather than trusting the check made when the action was staged (C2).
 OWNER_TOOLS = {
-    "add_role":    lambda sender, **a: _tool_add_role(sender, **a),
-    "remove_role": lambda sender, **a: _tool_remove_role(sender, **a),
+    "add_role":    lambda sender, **a: run_tool(sender, "add_role",
+                                                _fallback=_tool_add_role, **a),
+    "remove_role": lambda sender, **a: run_tool(sender, "remove_role",
+                                                _fallback=_tool_remove_role, **a),
 }
 
 OWNER_COMMANDS_HELP = (
@@ -1719,6 +1804,20 @@ def _find_pending_confirm(ctx: dict):
         pass
     return None
 
+# Every entry in OWNER_TOOLS is OWNER-only (bic_tool_defs.min_role='OWNER' for
+# add_role and remove_role). Named rather than inlined so the confirm-time gate
+# and the staging gate cannot drift apart.
+#
+# ⚠️ If OWNER_TOOLS ever gains a non-OWNER action, this single constant becomes
+# wrong. The registry's per-tool min_role is the authoritative answer; this
+# exists only to keep the legacy (flag-off) path from having no check at all.
+CONFIRM_REQUIRED_ROLE = "OWNER"
+
+# ⚠️ KNOWN HAZARD, owner decision pending (review C2, second half): these are
+# ordinary conversational words. A bare "ok" — one of the most common WhatsApp
+# replies there is — executes whatever irreversible action is staged. Narrowing
+# this to {"#confirm"} for risk_tier >= 3 is a user-visible behaviour change,
+# which 1C may not introduce unilaterally. NOT fixed here by choice.
 CONFIRM_WORDS = {"#confirm", "confirm", "yes", "ok", "haudu", "ಹೌದು"}
 CANCEL_WORDS  = {"#cancel", "cancel", "no", "ಬೇಡ"}
 
@@ -1750,10 +1849,10 @@ def try_owner_command(sender: str, role: str, text: str):
     if m:
         action, target = m.group(1).lower(), m.group(2).lstrip("+")
         if action == "stop":
-            save_message(target, "system", "BOT_PAUSED")
-            return f"⏸️ Bot paused for wa.me/{target} (auto-resumes in 24h)"
-        save_message(target, "system", "BOT_RESUMED")
-        return f"▶️ Bot resumed for wa.me/{target}"
+            return run_tool(sender, "chat_pause",
+                            _fallback=tool_chat_pause, target=target)
+        return run_tool(sender, "chat_resume",
+                        _fallback=tool_chat_resume, target=target)
 
     m = re.match(r'^#(addowner|addstaff)\s+(\+?\d{10,15})\s+(.+)$', stripped, re.IGNORECASE)
     if m:
@@ -1987,7 +2086,26 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
         tool, args = pending
         save_message(sender, "system", "PENDING_CLEARED")
         fn = OWNER_TOOLS.get(tool)
-        return fn(sender, **args) if fn else "⚠️ Pending action no longer valid."
+        if not fn:
+            return "⚠️ Pending action no longer valid."
+        # ── C2: re-check authorization at CONFIRM time ─────────────────────
+        # The `role != "OWNER"` gate lives in try_owner_command, which runs
+        # AFTER this branch and only saw the STAGING message. Nothing revalidated
+        # at execution time, leaving a 5-minute window in which a demoted owner
+        # could still complete a privilege grant.
+        #
+        # `role` is the value resolved at the top of this turn. Re-reading it
+        # here is a cache hit, and it is the authoritative answer for THIS
+        # message rather than for the message that staged the action.
+        #
+        # run_tool re-checks again via the registry when the flag is on; this
+        # guard is what keeps the property true on the LEGACY path too, so
+        # rollback cannot silently remove an authorization check.
+        current_role, _ = get_role(sender)
+        if current_role != CONFIRM_REQUIRED_ROLE:
+            print(f"CONFIRM DENIED: {tool} by {current_role} (staged when OWNER)")
+            return "🚫 Not permitted: your access changed since this action was staged."
+        return fn(sender, **args)
     if pending and low in CANCEL_WORDS:
         save_message(sender, "system", "PENDING_CLEARED")
         return "❌ Cancelled."
@@ -2204,12 +2322,26 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
     # ── Brochure request? ─────────────────────────────────────────
     if is_brochure_request(user_text):
         send_text(sender, "ಖಂಡಿತ! ನಮ್ಮ ಕಂಪನಿ ಪ್ರೊಫೈಲ್ ಇಲ್ಲಿದೆ 🙏")
-        run_tool(sender, "send_brochure", _fallback=send_brochure)
-        time.sleep(1)
-        send_followup_buttons(sender)
-        save_messages([(sender, "user", user_text),
-                       (sender, "assistant", "[ಬ್ರೋಚರ್ PDF ಕಳಿಸಲಾಯಿತು]")])
-        notify_owner(f"📄 Brochure sent to wa.me/{sender}")
+        # H1: the return value used to be discarded. A policy denial or a failed
+        # send produced a customer who was PROMISED a brochure, a transcript
+        # saying it had been sent, and an owner notified of a success that never
+        # happened — with nothing in the logs to contradict any of it.
+        sent, _ = invoke_tool(sender, "send_brochure", _fallback=send_brochure)
+        if sent:
+            time.sleep(1)
+            send_followup_buttons(sender)
+            save_messages([(sender, "user", user_text),
+                           (sender, "assistant", "[ಬ್ರೋಚರ್ PDF ಕಳಿಸಲಾಯಿತು]")])
+            notify_owner(f"📄 Brochure sent to wa.me/{sender}")
+        else:
+            # Tell the customer the truth, record the truth, and make it the
+            # OWNER's problem — a promised brochure that never arrives is a lost
+            # lead, and silence is the one response that guarantees nobody acts.
+            send_text(sender, "⚠️ ಕ್ಷಮಿಸಿ, ಬ್ರೋಚರ್ ಕಳಿಸಲು ತಾಂತ್ರಿಕ ಸಮಸ್ಯೆ. "
+                              "ನಮ್ಮ ತಂಡ ಶೀಘ್ರದಲ್ಲೇ ಕಳಿಸುತ್ತದೆ 🙏")
+            save_messages([(sender, "user", user_text),
+                           (sender, "assistant", "[ಬ್ರೋಚರ್ ಕಳಿಸಲು ವಿಫಲವಾಯಿತು]")])
+            notify_owner(f"⚠️ Brochure FAILED for wa.me/{sender} — send it manually")
 
     # ── New contact: greet with services menu ─────────────────────
     elif is_new_contact:
@@ -2253,6 +2385,23 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
 # Dependency direction is one-way: this module imports bic/, never the reverse.
 # Flows below WRAP existing business functions and never reimplement them.
 # ══════════════════════════════════════════════════════════════════════════════
+# ── M1: ONE definition of "who gets the internal pipeline" ─────────────────
+# do_POST used to fork on the literal ("OWNER","STAFF") while the Brain used
+# brain.INTERNAL_ROLES = ("OWNER","STAFF","MANAGER"). A MANAGER therefore got
+# the customer sales pipeline with the flag off and the internal executive
+# assistant with it on — a data-exposure difference gated on the rollback lever,
+# which is exactly what 1C promised not to introduce. It was invisible because
+# production has zero MANAGER rows, which is also why 23 replay samples showed
+# no diff: the divergence existed but nothing exercised it.
+#
+# Resolved by making the Brain's tuple authoritative and REMOVING MANAGER from
+# it, because 1C's mandate is byte-identical behaviour and legacy never routed
+# MANAGER internally. MANAGER remains a valid authorization RANK in
+# policy.ROLE_ORDER — it simply is not routed to the internal pipeline yet.
+# Routing it is a behaviour change and an owner decision, deferred to 1D.
+INTERNAL_ROLES = bic_brain.INTERNAL_ROLES if BIC_AVAILABLE else ("OWNER", "STAFF")
+
+
 def _bic_enabled() -> bool:
     """True when the new Brain path should serve the turn.
 
@@ -2331,8 +2480,13 @@ def _bic_replay_compare(sender: str, legacy_role: str) -> None:
         # Same canonical resolver the legacy path used (ADR 0005), so this is a
         # cache hit and adds no query.
         principal = bic_identity.resolve(sender, channel="whatsapp")
-        legacy_route = "owner" if legacy_role in ("OWNER", "STAFF") else "client"
-        replay_route = "owner" if principal.role in bic_brain.INTERNAL_ROLES else "client"
+        # Both sides now read the SAME constant (M1). That makes the route
+        # comparison tautological by construction — which is the intended end
+        # state and is already recorded as such in REPLAY-SPEC. The genuine
+        # divergence signal is the ROLE, which is still resolved independently
+        # of the legacy caller's value.
+        legacy_route = "owner" if legacy_role in INTERNAL_ROLES else "client"
+        replay_route = "owner" if principal.role in INTERNAL_ROLES else "client"
 
         legacy_d = bic_replay.Decision(route=legacy_route, role=legacy_role)
         replay_d = bic_replay.Decision(route=replay_route, role=principal.role)
@@ -2446,22 +2600,29 @@ def _bic_client_turn(sender: str, user_text: str, ctx: dict,
 # lives here — beside the functions it wraps — because bic/ must never import
 # application code (dependency direction, Article VIII).
 if BIC_AVAILABLE:
+    # `timeout` is the registry's declared timeout_seconds for this tool. It is
+    # PASSED THROUGH, not discarded (review H2): every handler used to accept it
+    # and drop it on the floor, which made bic_tool_defs.timeout_seconds — and
+    # the per-tool tuning it implies — pure fiction.
     @bic_tools.register("leads_today")
     def _tool_h_leads_today(principal, timeout=10, **_):
-        return tool_leads(principal.sender_id)
+        return tool_leads(principal.sender_id, timeout=timeout)
 
     @bic_tools.register("crm_list_clients")
     def _tool_h_crm_list_clients(principal, timeout=10, **_):
-        return tool_clients(principal.sender_id)
+        return tool_clients(principal.sender_id, timeout=timeout)
 
     @bic_tools.register("roles_list")
     def _tool_h_roles_list(principal, timeout=10, **_):
-        return tool_roles_list(principal.sender_id)
+        return tool_roles_list(principal.sender_id, timeout=timeout)
 
     @bic_tools.register("send_brochure")
     def _tool_h_send_brochure(principal, timeout=15, **_):
-        send_brochure(principal.sender_id)
-        return "sent"
+        # Propagate the real outcome. Returning a constant "sent" would make the
+        # audit row claim success for a failed send (H1).
+        if send_brochure(principal.sender_id, timeout=timeout):
+            return "sent"
+        raise RuntimeError("brochure not dispatched (BROCHURE_URL unset or send failed)")
 
     @bic_tools.register("crm_sync_lead")
     def _tool_h_crm_sync_lead(principal, timeout=10, data=None, **_):
@@ -2496,6 +2657,32 @@ if BIC_AVAILABLE:
     @bic_tools.register("memory_clear")
     def _tool_h_memory_clear(principal, timeout=10, **_):
         return tool_memory_clear(principal.sender_id)
+
+    # ── PRIVILEGED (review C1, H4) ─────────────────────────────────────────
+    # These four were the last bypass, and the most dangerous: add_role can
+    # mint an OWNER. Registered last, gated hardest (min_role OWNER, risk_tier
+    # 3-4, audit_level full).
+    @bic_tools.register("add_role")
+    def _tool_h_add_role(principal, timeout=10, target=None, role=None,
+                         label=None, added_by=None, **_):
+        # added_by is the STAGED value, kept so the stored row is byte-identical
+        # to the legacy path. Stage and confirm are always the same sender (the
+        # pending marker is read from that sender's own history), so it equals
+        # principal.sender_id in every reachable case.
+        return _tool_add_role(principal.sender_id, target, role, label,
+                              added_by or principal.sender_id)
+
+    @bic_tools.register("remove_role")
+    def _tool_h_remove_role(principal, timeout=10, target=None, **_):
+        return _tool_remove_role(principal.sender_id, target)
+
+    @bic_tools.register("chat_pause")
+    def _tool_h_chat_pause(principal, timeout=10, target=None, **_):
+        return tool_chat_pause(principal.sender_id, target=target)
+
+    @bic_tools.register("chat_resume")
+    def _tool_h_chat_resume(principal, timeout=10, target=None, **_):
+        return tool_chat_resume(principal.sender_id, target=target)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2660,7 +2847,7 @@ class handler(BaseHTTPRequestHandler):
             # serves the customer regardless of the outcome.
             _bic_replay_compare(sender, role)
 
-            if role in ("OWNER", "STAFF"):
+            if role in INTERNAL_ROLES:
                 if _bic_enabled():
                     # New path: Adapter → BrainRequest → Brain → flow → Adapter.
                     _bic_owner_turn(sender, user_text, ctx, msg.get("id"))

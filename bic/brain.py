@@ -34,7 +34,16 @@ class Flows:
 # Roles that receive the internal/executive pipeline. CLIENT and anything
 # unrecognised fall to the customer pipeline — the fail-closed default, since an
 # unknown role resolves to CLIENT in the policy layer.
-INTERNAL_ROLES = ("OWNER", "STAFF", "MANAGER")
+#
+# THE single definition — webhook.py imports this rather than repeating the
+# tuple (review M1). MANAGER was removed 2026-08-03: it was listed here but not
+# in do_POST's legacy fork, so a MANAGER's pipeline depended on the feature
+# flag. 1C must be byte-identical, and legacy never routed MANAGER internally.
+#
+# MANAGER is still a real rank in policy.ROLE_ORDER and still authorizes tools
+# at min_role STAFF/MANAGER. It is only the PIPELINE choice that excludes it.
+# Adding it back is a behaviour change requiring owner approval — 1D.
+INTERNAL_ROLES = ("OWNER", "STAFF")
 
 
 def handle(request: BrainRequest, flows: Flows) -> BrainResponse:

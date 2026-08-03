@@ -32,6 +32,23 @@ _ARG_ALLOWLIST = {
     "leads_today":      ["limit"],
     "roles_list":       [],
     "send_brochure":    ["has_recipient"],
+
+    # Added 2026-08-03 (review M3). These declare audit_level='full' but had no
+    # entry, so _redact returned {} — a "full" audit that recorded nothing. The
+    # omission failed SAFE (nothing leaked), but crm_capture_self is the only
+    # customer-path WRITE tool and its rows said a CRM write happened and
+    # nothing about it.
+    "crm_capture_self": ["service_needed", "city"],
+    "memory_clear":     [],          # explicit: takes no arguments worth recording
+
+    # PRIVILEGED (review C1, H4). `target` and `role` ARE the audit: a privilege
+    # grant whose record omits who was granted what is not an audit trail.
+    # `label` is deliberately excluded — free text that may carry a person's
+    # name, and it is not needed to reconstruct the security event.
+    "add_role":    ["target", "role"],
+    "remove_role": ["target"],
+    "chat_pause":  ["target"],
+    "chat_resume": ["target"],
 }
 
 
@@ -143,7 +160,14 @@ def _audit(principal, code, d, started, finished, ok, error, queries, args) -> N
     try:
         db.insert("bic_tool_invocations", row)
     except Exception as e:
-        print(f"AUDIT_FALLBACK {json.dumps(row, default=str)} (reason: {e})")
+        # L1: the stored row keeps the full sender id — an audit trail that
+        # cannot identify the actor is useless. The STDOUT fallback is a wider
+        # surface (platform logs, shipped to whoever can read them), so the
+        # identifier is truncated there. Same event, less exposure.
+        safe = dict(row)
+        ref = safe.get("source_ref") or ""
+        safe["source_ref"] = f"...{ref[-4:]}" if ref else None
+        print(f"AUDIT_FALLBACK {json.dumps(safe, default=str)} (reason: {e})")
 
 
 def invoke(principal: policy.Principal, code: str, **args) -> ToolResult:
