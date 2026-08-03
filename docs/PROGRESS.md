@@ -179,8 +179,8 @@ run_tool → identity.resolve → tools.invoke → policy.may_invoke
          → handler → business function → audit
 ```
 
-Five tools were added to make full routing possible: `status`, `aitest`,
-`memory_show`, `memory_clear` (all `min_role=STAFF`, matching the fact that
+Four tools were added to make full routing possible: `aitest`, `memory_show`,
+`memory_clear` (all `min_role=STAFF`, matching the fact that
 `try_owner_command` applies **no** role gate today, so STAFF preserves current
 behaviour exactly), plus `crm_capture_self`.
 
@@ -203,19 +203,33 @@ required, so closed Slice 1B stays closed and no ACP is owed.**
 
 **Two subtleties worth recording:**
 
-1. `status` composes from *registry invocations* of `leads_today` and
-   `crm_list_clients`, not from `tool_leads`/`tool_clients`. Wrapping the
-   composite alone would run three tools while auditing one — an audit trail
-   that understates what executed is worse than none.
+1. **`#status` is a composite COMMAND, not a composite tool.** It was first
+   built as a `status` tool that invoked `leads_today` and `crm_list_clients`.
+   That is wrong: `tools.invoke()` calls `db.reset_query_count()` on a single
+   thread-local, so a nested invocation resets the outer counter and the outer
+   audit row under-reports `db_queries`. An audit table with silently wrong
+   numbers is worse than one with none.
+
+   Making `invoke()` nest-safe means editing `bic/tools.py` — **closed Slice
+   1B, which requires an ACP**. Composing at the dispatch site
+   (`webhook.compose_status`) requires neither, and is arguably the better
+   design anyway: each constituent tool is gated by policy on its own terms,
+   and joining their output is presentation, which belongs to the transport
+   layer. The `status` registry row is deactivated, not deleted, so the
+   decision survives in the registry.
+
+   **Standing rule, test-enforced:** no registered handler may call
+   `run_tool()`. Composite tools need an ACP first.
 2. **Denial never falls back to the direct call.** The `_fallback` argument
    exists for the `bic` package failing to import, and for nothing else.
    Falling back on a policy denial would restore the exact bypass being closed.
 
 **Enforcement.** `tests/test_registry_no_bypass.py` parses `webhook.py` and
-fails if any business tool is called outside a registered handler. The one
-documented exception is `tool_status`'s body — the degraded path reached only
-when `bic` is unimportable — listed by name so a second exception requires a
-deliberate edit.
+fails if any business tool is called outside a registered handler. There are
+**zero exceptions**: `tool_status` was the only one, it became dead code when
+`#status` moved to `compose_status()`, and it was deleted rather than kept as a
+fallback — dead code that calls business functions directly is exactly the trap
+the check exists to prevent.
 
 Verified by mutation (a check that cannot fail is not a check):
 
@@ -225,9 +239,11 @@ Verified by mutation (a check that cannot fail is not a check):
 | client brochure → direct call | ✅ caught |
 | CRM capture → direct call | ✅ caught |
 | denial falls back to direct call | ✅ caught (2 tests) |
+| `compose_status` reverted to direct calls | ✅ caught |
+| a handler nests an invocation | ✅ caught (2 tests) |
 
 **Cost.** The audit write in `tools.invoke()` is synchronous, so each invocation
-adds one Supabase round-trip. `#status` now costs three (itself + two composed).
+adds one Supabase round-trip. `#status` now costs two.
 Acceptable against a WhatsApp reply budget, but it is the reason S4.5 carries a
 production latency check rather than only offline tests. If it proves too slow,
 the fix is batching the audit write — not skipping it.
@@ -254,7 +270,7 @@ Degraded samples (`"degraded": true`) are excluded from any tally.
 
 Full specification: `docs/REPLAY-SPEC.md`.
 
-**Tests:** 132 offline, green.
+**Tests:** 133 offline, green.
 
 **Client-flow bridge is TEMPORARY** — see ADR 0003. The client flow will send
 its own messages and return `BrainResponse(text="")`. Accepted for 1C only
@@ -341,7 +357,7 @@ identically.
 | 3 | Decision Replay implemented | ✅ | `bic/replay.py` + structured logging |
 | 4 | Replay accuracy evidence | 🟡 | durable table live; 15 samples, 0 diffs (bar is 20) |
 | 5 | Latency verified in production | 🟡 | replay mean 0.063 ms; registry audit overhead unmeasured in prod |
-| 6 | Zero regressions | ✅ | 132 tests green; no-bypass + characterization + cache mutation-verified |
+| 6 | Zero regressions | ✅ | 133 tests green; no-bypass + characterization + cache mutation-verified |
 | 7 | Rollback verified | 🟡 | flag logic verified; not yet exercised in production |
 | 8 | Routing correctness | 🟡 | owner proven; client unproven |
 | 9 | No customer-visible change | ✅ | flag unset ⇒ legacy path serves everyone |
@@ -361,7 +377,7 @@ samples; 1, 7, 8 remain partial pending S5-S6.
 | 2 | Authorization still works | ✅ offline; live check pending |
 | 3 | Existing responses byte-identical | ✅ handlers wrap, never reimplement |
 | 4 | Zero additional AI calls | ✅ `test_no_ai_call_in_the_dispatch_path` |
-| 5 | Characterization tests green | ✅ 132/132 |
+| 5 | Characterization tests green | ✅ 133/133 |
 | 6 | Registry failure fails safely | ✅ empty registry ⇒ deny-all; import failure ⇒ fallback |
 | 7 | Policy denial prevents execution | ✅ mutation-verified, no fallback on denial |
 | 8 | Latency within target | 🟡 +1 audit round-trip per tool; prod measurement pending |
