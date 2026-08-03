@@ -36,6 +36,12 @@ BOOTSTRAP_OWNERS = [
     if p.strip()
 ]
 
+# ⚠️ DEAD IN PRODUCTION (audit task 9). Populated only by the @deprecated
+# resolve_principal() below, which nothing calls — bic.identity is the single
+# live resolver and holds the only live cache (ADR 0005). Retained rather than
+# removed because bic/policy.py belongs to CLOSED Slice 1B and this function's
+# own documented removal conditions require Phase 1C to be ACCEPTED first,
+# which it is not. Delete both together in the slice permitted to touch 1B.
 _role_cache = {}
 ROLE_CACHE_TTL = 300
 

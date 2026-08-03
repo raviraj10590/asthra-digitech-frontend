@@ -19,6 +19,16 @@ REPLAY = "REPLAY"
 LIVE = "LIVE"
 
 
+# ── NOT USED IN PRODUCTION (audit task 9) ─────────────────────────────────
+# Recorder, RecordedOp and stub_ai_reply are exercised by tests but have no
+# production call site. They are RETAINED, not removed:
+#   • they are the recording half of Decision Replay, built for the slice that
+#     compares tool selection and prompt fingerprints (deferred by ADR 0003)
+#   • 16 tests already pin their behaviour, so deleting them loses coverage of
+#     a contract we intend to use
+# This is deliberate dormancy, not rot. If the deferred slice is abandoned,
+# delete all three together with their tests.
+
 @dataclass(frozen=True)
 class RecordedOp:
     """An operation the pipeline intended to perform but did not."""
