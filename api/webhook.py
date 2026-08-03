@@ -110,6 +110,19 @@ DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL      = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip()
 DEEPSEEK_BASE_URL   = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 DEEPSEEK_MAX_TOKENS = int(os.environ.get("DEEPSEEK_MAX_TOKENS", "1200"))
+OPENAI_MAX_TOKENS   = int(os.environ.get("OPENAI_MAX_TOKENS", "400"))
+GEMINI_MAX_TOKENS   = int(os.environ.get("GEMINI_MAX_TOKENS", "400"))
+
+# The OWNER turn asks for ONE JSON object containing a reply AND a rolled-forward
+# memory note of up to 400 words across six sections. In Kannada — a non-Latin
+# script costing roughly one token per one-to-two characters — that note alone is
+# 1,500-2,500 tokens before the reply.
+#
+# At the default budgets (openai 400, deepseek 1200) the response CANNOT fit.
+# Truncation was guaranteed, not occasional: 24 of 24 leaked payloads had no
+# closing brace. The JSON then failed to parse, the raw fragment was sent to the
+# owner, AND the memory silently stopped advancing — one bug, three symptoms.
+OWNER_TURN_MAX_TOKENS = int(os.environ.get("OWNER_TURN_MAX_TOKENS", "3000"))
 WELCOME_IMAGE   = os.environ.get("WELCOME_IMAGE",   "https://kpzprllzgqlqkqgcgrbp.supabase.co/storage/v1/object/public/documents/adt-welcome.png")
 # Asthra CRM (byras.shop) — separate Supabase project. Mirrors conversations
 # into whatsapp_messages AND syncs qualified leads into clients, so nothing
@@ -979,7 +992,7 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
         "ತುರ್ತಿಗಾಗಿ ಕರೆ ಮಾಡಿ: +91 88844 48141")
 
 
-def _to_gemini_payload(messages: list) -> dict:
+def _to_gemini_payload(messages: list, max_tokens: int = None) -> dict:
     """Convert OpenAI-style messages to Gemini's generateContent format.
 
     system → systemInstruction (merged), assistant → 'model', user → 'user'.
@@ -996,16 +1009,21 @@ def _to_gemini_payload(messages: list) -> dict:
                 "role": "model" if role == "assistant" else "user",
                 "parts": [{"text": content}],
             })
+    # Gemini was ALSO capped at 400, so it truncated the owner envelope exactly
+    # like the other two providers. The cap is now per-call.
     payload = {
         "contents": contents,
-        "generationConfig": {"maxOutputTokens": 400, "temperature": 0.75},
+        "generationConfig": {
+            "maxOutputTokens": max_tokens or GEMINI_MAX_TOKENS,
+            "temperature": 0.75,
+        },
     }
     if sys_parts:
         payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(sys_parts)}]}
     return payload
 
 
-def generate_reply_gemini(messages: list) -> str:
+def generate_reply_gemini(messages: list, max_tokens: int = None) -> str:
     """Same conversation, Gemini 2.5 Flash. Returns '' on any failure so the
     caller can fall through to the apology text."""
     if not GEMINI_API_KEY:
@@ -1015,7 +1033,7 @@ def generate_reply_gemini(messages: list) -> str:
         r = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
-            json=_to_gemini_payload(messages),
+            json=_to_gemini_payload(messages, max_tokens),
             timeout=15,
         )
         if not r.ok:
@@ -1026,19 +1044,27 @@ def generate_reply_gemini(messages: list) -> str:
         print(f"gemini fallback error: {e}")
         return ""
 
-def _call_openai(messages: list) -> str:
+def _call_openai(messages: list, max_tokens: int = None) -> str:
     """Same contract as generate_reply_gemini: '' on any failure, so callers
     can treat both providers identically."""
     try:
         resp = get_openai().chat.completions.create(
-            model=OPENAI_CHAT_MODEL, messages=messages, max_tokens=400, temperature=0.75,
+            model=OPENAI_CHAT_MODEL, messages=messages,
+            max_tokens=max_tokens or OPENAI_MAX_TOKENS, temperature=0.75,
         )
-        return resp.choices[0].message.content.strip()
+        choice = resp.choices[0]
+        # Explicit truncation signal. Guessing from the text is unreliable;
+        # the provider tells us directly. A truncated structured reply used to
+        # reach the user as raw JSON (see generate_owner_reply).
+        if getattr(choice, "finish_reason", None) == "length":
+            print(f"⚠️ openai TRUNCATED at max_tokens={max_tokens or OPENAI_MAX_TOKENS} "
+                  f"— structured output will not parse")
+        return choice.message.content.strip()
     except Exception as e:
         print(f"openai error: {e}")
         return ""
 
-def _call_deepseek(messages: list) -> str:
+def _call_deepseek(messages: list, max_tokens: int = None) -> str:
     """DeepSeek via the OpenAI-compatible endpoint. Same '' -on-failure contract
     as the other providers so callers treat them identically."""
     if not DEEPSEEK_API_KEY:
@@ -1046,10 +1072,14 @@ def _call_deepseek(messages: list) -> str:
     try:
         from openai import OpenAI
         client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+        budget = max_tokens or DEEPSEEK_MAX_TOKENS
         resp = client.chat.completions.create(
             model=DEEPSEEK_MODEL, messages=messages,
-            max_tokens=DEEPSEEK_MAX_TOKENS, temperature=0.75,
+            max_tokens=budget, temperature=0.75,
         )
+        if getattr(resp.choices[0], "finish_reason", None) == "length":
+            print(f"⚠️ deepseek TRUNCATED at max_tokens={budget} "
+                  f"— structured output will not parse")
         content = (resp.choices[0].message.content or "").strip()
         if not content:
             # Reasoning models can spend the entire token budget thinking and
@@ -1091,14 +1121,14 @@ def _provider_chain() -> list:
             names.append(n)
     return [(n, _PROVIDERS[n]) for n in names]
 
-def _generate_ai_reply(messages: list, apology: str) -> str:
+def _generate_ai_reply(messages: list, apology: str, max_tokens: int = None) -> str:
     """Try each provider in configured order; fall back to `apology` only if all
     fail. One place holds provider order and failure logging — generate_reply
     and generate_owner_reply both call this rather than each carrying its own
     duplicate try-fallback."""
     chain = _provider_chain()
     for i, (name, provider) in enumerate(chain):
-        result = provider(messages)
+        result = provider(messages, max_tokens)
         if result:
             if i > 0:
                 print(f"↪️ replied via fallback provider ({name})")
@@ -1972,6 +2002,43 @@ def recall_from_archive(phone: str, user_text: str, exclude: set) -> str:
         print(f"recall_from_archive error: {e}")
         return ""
 
+def _looks_like_machine_output(text: str) -> bool:
+    """True when text is a JSON envelope or fenced block rather than prose.
+
+    This is the guard that stops a parse failure reaching a human. It is
+    deliberately conservative: it only fires on text that STARTS like machine
+    output, so a reply that merely mentions JSON is unaffected."""
+    t = (text or "").lstrip()
+    return t.startswith("```") or t.startswith("{") or t.startswith('"reply"')
+
+
+def _salvage_reply(raw: str) -> str:
+    """Recover the reply string from a TRUNCATED JSON envelope.
+
+    When the model is cut off mid-object the JSON never closes, so
+    _parse_json_block finds no {...} match and returns {}. The content the
+    owner actually wanted is still sitting there in the "reply" field — it is
+    only the envelope that is broken.
+
+    Returns '' when nothing usable can be recovered, so the caller can fall
+    back to clean text rather than emitting a fragment.
+    """
+    if not raw:
+        return ""
+    # "reply": "....  — capture up to an unescaped closing quote, or to the end
+    # of the string when truncation removed it.
+    m = re.search(r'"reply"\s*:\s*"(.*?)(?<!\\)"\s*(?:,|\}|$)', raw, re.DOTALL)
+    if not m:
+        m = re.search(r'"reply"\s*:\s*"(.*)$', raw, re.DOTALL)   # truncated
+    if not m:
+        return ""
+    text = m.group(1)
+    # Unescape the JSON string body without needing a valid document.
+    for a, b in (('\\n', '\n'), ('\\"', '"'), ('\\t', '\t'), ('\\\\', '\\')):
+        text = text.replace(a, b)
+    return text.strip()
+
+
 def _parse_json_block(raw: str) -> dict:
     """Same tolerant extraction extract_lead_info already uses: find the first
     {...} block (handles markdown-fenced or chatty output) and parse it."""
@@ -2065,13 +2132,42 @@ def generate_owner_reply(sender: str, role: str, label: str, user_text: str, his
     messages += recent
     messages.append({"role": "user", "content": user_text})
 
-    raw = _generate_ai_reply(messages, "")
+    # OWNER_TURN_MAX_TOKENS, not the provider default: this call returns a
+    # reply AND a memory note in one JSON object, which does not fit in a
+    # short budget (see the constant's note).
+    raw = _generate_ai_reply(messages, "", max_tokens=OWNER_TURN_MAX_TOKENS)
     parsed = _parse_json_block(raw)
-    reply = parsed.get("reply") or raw or "⚠️ AI assistant temporarily unavailable. Send #help for direct commands."
+
+    reply = parsed.get("reply")
+
+    if not reply:
+        # The envelope did not parse — almost always truncation. The reply text
+        # is usually still recoverable from the broken JSON.
+        reply = _salvage_reply(raw)
+        if reply:
+            print("⚠️ owner reply SALVAGED from unparseable envelope "
+                  f"({len(raw)} chars) — check provider truncation")
+
+    if not reply:
+        # Nothing usable. Fall back to the raw text ONLY when it reads as prose.
+        #
+        # This is the guard for the defect found on 2026-08-03: `reply = ... or raw`
+        # sent a truncated JSON fragment straight to the owner. 58 messages over
+        # six days began with ```json. A human must never receive machine output —
+        # a clean apology is strictly better than a broken envelope.
+        reply = "" if _looks_like_machine_output(raw) else (raw or "")
+
+    if not reply:
+        reply = "⚠️ AI assistant temporarily unavailable. Send #help for direct commands."
 
     new_mem = parsed.get("memory")
     if new_mem and new_mem != mem:
         update_owner_memory(sender, new_mem)
+    elif not parsed:
+        # Silent consequence of the same bug: when the envelope fails, memory
+        # never advances. It had not moved since 2026-07-29 and the owner was
+        # visibly complaining about it. Make the failure loud.
+        print("⚠️ owner memory did NOT advance — envelope unparseable this turn")
 
     return reply
 
