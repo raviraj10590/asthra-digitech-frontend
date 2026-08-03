@@ -100,11 +100,18 @@ class M3_RetentionIsWired(unittest.TestCase):
             return fh.read()
 
     def test_rollup_is_invoked_by_the_existing_cron(self):
-        self.assertIn("bic_rollup_tool_invocations", self._digest_source(),
+        """Assert on the RPC URL, not on any mention of the name.
+
+        The first version of this test matched the string anywhere in the file
+        and therefore passed when the CALL was removed but a comment naming it
+        remained — the mutation run caught it. Matching prose is not matching
+        behaviour.
+        """
+        self.assertIn("rpc/bic_rollup_tool_invocations", self._digest_source(),
                       "audit-table retention is still unwired")
 
     def test_replay_prune_is_still_invoked(self):
-        self.assertIn("bic_prune_replay_records", self._digest_source())
+        self.assertIn("rpc/bic_prune_replay_records", self._digest_source())
 
     def test_no_new_cron_was_added(self):
         """Vercel Hobby caps at 2 crons and both are in use. Retention rides
