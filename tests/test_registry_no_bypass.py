@@ -48,7 +48,7 @@ WEBHOOK_PY = os.path.join(os.path.dirname(__file__), "..", "api", "webhook.py")
 # business tool automatically. A new privileged function cannot opt out of the
 # invariant by being named a certain way, and nobody has to remember to add it
 # here.
-TOOL_NAME_RE = re.compile(r"^tool_(?!h_)[a-z_]+$")
+TOOL_NAME_RE = re.compile(r"^_?tool_(?!h_)[a-z_]+$")
 
 # Non-tool business functions that must also route (they have registry codes).
 EXTRA_BUSINESS_TOOLS = {"send_brochure", "sync_lead_to_crm"}
