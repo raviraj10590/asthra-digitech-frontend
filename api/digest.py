@@ -109,6 +109,26 @@ class handler(BaseHTTPRequestHandler):
             print(f"digest error: {e}")
             body = {"ok": False, "error": str(e)}
 
+        # BIC Slice 1C: 30-day retention for the replay diagnostic table.
+        # Rides the existing daily cron rather than adding a fourth scheduler,
+        # and does not depend on pg_cron (not guaranteed on the free tier).
+        # Strictly best-effort — retention must never affect the digest, and a
+        # failure here is a housekeeping miss, not an incident.
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/bic_prune_replay_records",
+                headers={
+                    "apikey": os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+                    "Authorization": f"Bearer {os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')}",
+                    "Content-Type": "application/json",
+                },
+                json={"retain_days": 30},
+                timeout=10,
+            )
+            print(f"bic replay retention: {r.status_code} {r.text[:80]}")
+        except Exception as e:
+            print(f"bic replay retention failed (ignored): {e}")
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()

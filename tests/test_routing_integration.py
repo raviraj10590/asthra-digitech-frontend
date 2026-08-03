@@ -17,7 +17,7 @@ os.environ.setdefault("OWNER_PHONE", "918884448141,918861369951")
 os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
 
 import webhook as w                                  # noqa: E402
-from bic import identity, tools, policy              # noqa: E402
+from bic import identity, tools, policy, db as bic_db  # noqa: E402
 
 OWNER = "918861369951"
 CLIENT = "919555555555"
@@ -175,7 +175,7 @@ class TestReplayPersistence(unittest.TestCase):
         with ExitStack() as stack:
             cap.install(stack)
             stack.enter_context(mock.patch.object(
-                w.requests, "post", side_effect=RuntimeError("store down")))
+                bic_db, "insert", side_effect=RuntimeError("store down")))
             identity.clear_cache(); identity.configure(lambda p: None)
             w._bic_replay_compare(CLIENT, "CLIENT")          # must not raise
             w.run_client_pipeline(CLIENT, "website price?", dict(CTX))
@@ -184,21 +184,21 @@ class TestReplayPersistence(unittest.TestCase):
 
     def test_record_contains_only_approved_fields(self):
         captured = {}
-        with mock.patch.object(w.requests, "post",
-                               side_effect=lambda *a, **k: captured.update(k.get("json") or {})):
+        with mock.patch.object(bic_db, "insert",
+                               side_effect=lambda t, row, **k: captured.update(row)):
             w._bic_persist_replay({"route": "owner", "role": "OWNER", "flow": "owner",
                                    "decision_hash": "abc", "tools": [], "degraded": False,
                                    "latency_ms": 1.2, "diffs": []})
         self.assertEqual(
             sorted(captured),
             ["decision_hash", "degraded", "diff_count", "flow", "latency_ms",
-             "role", "route", "selected_tools", "tenant_id"])
+             "role", "route", "schema_version", "selected_tools", "tenant_id"])
 
     def test_no_pii_or_content_persisted(self):
         """Explicitly forbidden: prompts, history, messages, phone, AI output."""
         captured = {}
-        with mock.patch.object(w.requests, "post",
-                               side_effect=lambda *a, **k: captured.update(k.get("json") or {})):
+        with mock.patch.object(bic_db, "insert",
+                               side_effect=lambda t, row, **k: captured.update(row)):
             w._bic_persist_replay({"route": "client", "role": "CLIENT", "sender": "9951",
                                    "diffs": ["x", "y"]})
         for banned in ("sender", "phone", "text", "message", "prompt",
@@ -210,3 +210,12 @@ class TestReplayPersistence(unittest.TestCase):
         src = open(w.__file__).read()
         self.assertEqual(src.count("bic_replay_records"), 1,
                          "replay table must be written once and never read")
+
+    def test_write_uses_server_credential_not_anon(self):
+        """Owner change 2: replay is backend-write only. The anon key is public,
+        so 'backend only' requires a server-only secret."""
+        import inspect
+        src = inspect.getsource(w._bic_persist_replay)
+        self.assertIn("bic_db.insert", src)
+        self.assertNotIn("_supa_headers", src,
+                         "must not write with the public anon key")

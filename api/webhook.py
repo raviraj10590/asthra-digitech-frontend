@@ -48,7 +48,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from bic import (brain as bic_brain, config as bic_config,
-                     contract as bic_contract, identity as bic_identity,
+                     contract as bic_contract, db as bic_db, identity as bic_identity,
                      policy as bic_policy, replay as bic_replay,
                      tools as bic_tools)
     from adapters import whatsapp as wa_adapter
@@ -2211,30 +2211,31 @@ def _bic_persist_replay(record: dict) -> None:
     expiration. stdout does not — platform retention is ~1h.
 
     BEST-EFFORT AND PASSIVE. Any failure is swallowed after a log line; a
-    diagnostic write must never affect a live conversation. Uses the anon key
-    (append-only policy) so it carries no dependency on a server credential.
+    diagnostic write must never affect a live conversation.
+
+    Writes with the SERVER credential, not the anon key. The public INSERT
+    policy was removed so replay records can only be written by the backend —
+    and since the anon key is public, "backend only" necessarily means a
+    server-only secret. Without SUPABASE_SERVICE_ROLE_KEY these writes fail
+    harmlessly and no evidence is collected.
 
     Removable in one migration after 1C: nothing reads this table.
     """
     try:
-        requests.post(
-            f"{SUPABASE_URL}/rest/v1/bic_replay_records",
-            headers=_supa_headers("return=minimal"),
-            json={
-                "tenant_id": bic_config.DEFAULT_TENANT_ID,
-                "route": record.get("route"),
-                "role": record.get("role"),
-                "flow": record.get("flow"),
-                "decision_hash": record.get("decision_hash"),
-                "selected_tools": record.get("tools") or [],
-                "degraded": bool(record.get("degraded")),
-                "latency_ms": record.get("latency_ms"),
-                "diff_count": len(record.get("diffs") or []),
-            },
-            timeout=3,
-        )
+        bic_db.insert("bic_replay_records", {
+            "tenant_id": bic_config.DEFAULT_TENANT_ID,
+            "schema_version": 1,
+            "route": record.get("route"),
+            "role": record.get("role"),
+            "flow": record.get("flow"),
+            "decision_hash": record.get("decision_hash"),
+            "selected_tools": record.get("tools") or [],
+            "degraded": bool(record.get("degraded")),
+            "latency_ms": record.get("latency_ms"),
+            "diff_count": len(record.get("diffs") or []),
+        }, timeout=3)
     except Exception as e:
-        print(f"replay persist failed (ignored): {e}")
+        print(f"replay persist failed (ignored, production unaffected): {e}")
 
 
 def _bic_replay_compare(sender: str, legacy_role: str) -> None:
