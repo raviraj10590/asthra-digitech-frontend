@@ -595,7 +595,11 @@ def upsert_lead(phone: str, data: dict):
         print(f"lead upserted: {data}")
     except Exception as e:
         print(f"upsert_lead error: {e}")
-    sync_lead_to_crm(phone, data)
+    # Routed through the registry (Slice 1C: no direct tool_*() execution).
+    # crm_capture_self, not crm_sync_lead: the subject here is the conversing
+    # customer recording their OWN details, which must stay reachable for a
+    # CLIENT principal without relaxing the STAFF gate on the admin sync tool.
+    run_tool(phone, "crm_capture_self", _fallback=sync_lead_to_crm, data=data)
 
 def is_duplicate_webhook(ctx: dict, text: str) -> bool:
     """Meta retries webhooks — identical text within 60s is a retry, not a person."""
@@ -1519,6 +1523,10 @@ def tool_clients(sender: str, **_) -> str:
     return "\n".join(lines)
 
 def tool_status(sender: str, **_) -> str:
+    # DEGRADED PATH ONLY. Reached solely as run_tool()'s fallback when the BIC
+    # package failed to import; the live path is the `status` registry handler,
+    # which composes the same text from audited invocations. These direct calls
+    # are the deliberate degradation, not a registry bypass.
     return "✅ Bot online\n\n" + tool_leads(sender) + "\n\n" + tool_clients(sender)
 
 def tool_roles_list(sender: str, **_) -> str:
@@ -1560,6 +1568,38 @@ def tool_aitest(sender: str, **_) -> str:
     lines.append("")
     lines.append("Order: " + " → ".join(n for n, _ in chain))
     return "\n".join(lines)
+
+def run_tool(sender: str, code: str, _fallback=None, **args) -> str:
+    """THE dispatch path for every tool execution.
+
+        Policy → Tool Registry → Tool Invocation → existing business function
+
+    No caller may invoke a tool_*() function directly. Registration alone was
+    insufficient — this is the path that makes the registry authoritative and
+    populates bic_tool_invocations.
+
+    Failure semantics:
+      • policy denial  → refusal text; the handler is NEVER entered
+      • tool error     → error text; the failure is audited
+      • BIC unavailable → falls back to the direct call, so a bundling failure
+        degrades to previous behaviour instead of taking the bot down
+    """
+    if not BIC_AVAILABLE:
+        # Same args as the tool, so every call site can name the business
+        # function directly. A lambda here would read as a bypass to the
+        # static no-bypass check, and would deserve to.
+        return _fallback(sender, **args) if _fallback else "⚠️ Tool layer unavailable."
+
+    principal = bic_identity.resolve(sender, channel="whatsapp")
+    result = bic_tools.invoke(principal, code, **args)
+
+    if result.denied:
+        return f"🚫 Not permitted: {result.error}"
+    if not result.ok:
+        print(f"run_tool {code} failed: {result.error}")
+        return "⚠️ That didn't work just now. Try again shortly."
+    return result.value
+
 
 def tool_memory_show(sender: str, **_) -> str:
     mem = fetch_owner_memory(sender)
@@ -1662,19 +1702,19 @@ def try_owner_command(sender: str, role: str, text: str):
     if low in ("#help", "#commands"):
         return OWNER_COMMANDS_HELP
     if low == "#leads":
-        return tool_leads(sender)
+        return run_tool(sender, "leads_today", _fallback=tool_leads)
     if low == "#clients":
-        return tool_clients(sender)
+        return run_tool(sender, "crm_list_clients", _fallback=tool_clients)
     if low == "#status":
-        return tool_status(sender)
+        return run_tool(sender, "status", _fallback=tool_status)
     if low == "#roles":
-        return tool_roles_list(sender)
+        return run_tool(sender, "roles_list", _fallback=tool_roles_list)
     if low == "#aitest":
-        return tool_aitest(sender)
+        return run_tool(sender, "aitest", _fallback=tool_aitest)
     if low == "#memory":
-        return tool_memory_show(sender)
+        return run_tool(sender, "memory_show", _fallback=tool_memory_show)
     if low == "#forget":
-        return tool_memory_clear(sender)
+        return run_tool(sender, "memory_clear", _fallback=tool_memory_clear)
 
     m = re.match(r'^#(stop|start)\s+(\+?\d{10,15})\s*$', stripped, re.IGNORECASE)
     if m:
@@ -1929,13 +1969,13 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
     # Natural-language read-only lookups — deterministic, zero AI cost, covers
     # the common asks before falling through to the general assistant chat.
     if any(w in low for w in ("lead", "ಲೀಡ್")):
-        return tool_leads(sender)
+        return run_tool(sender, "leads_today", _fallback=tool_leads)
     if any(w in low for w in ("client", "ಗ್ರಾಹಕ", "crm")):
-        return tool_clients(sender)
+        return run_tool(sender, "crm_list_clients", _fallback=tool_clients)
     if any(w in low for w in ("status", "health", "online", "snapshot")):
-        return tool_status(sender)
+        return run_tool(sender, "status", _fallback=tool_status)
     if "role" in low and any(w in low for w in ("list", "who", "show")):
-        return tool_roles_list(sender)
+        return run_tool(sender, "roles_list", _fallback=tool_roles_list)
 
     return generate_owner_reply(sender, role, label, user_text, ctx.get("history"))
 
@@ -2134,7 +2174,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
     # ── Brochure request? ─────────────────────────────────────────
     if is_brochure_request(user_text):
         send_text(sender, "ಖಂಡಿತ! ನಮ್ಮ ಕಂಪನಿ ಪ್ರೊಫೈಲ್ ಇಲ್ಲಿದೆ 🙏")
-        send_brochure(sender)
+        run_tool(sender, "send_brochure", _fallback=send_brochure)
         time.sleep(1)
         send_followup_buttons(sender)
         save_messages([(sender, "user", user_text),
@@ -2397,6 +2437,45 @@ if BIC_AVAILABLE:
     def _tool_h_crm_sync_lead(principal, timeout=10, data=None, **_):
         sync_lead_to_crm(principal.sender_id, data or {})
         return "synced"
+
+    @bic_tools.register("crm_capture_self")
+    def _tool_h_crm_capture_self(principal, timeout=10, data=None, **_):
+        """Record the CALLER'S OWN lead details. Deliberately a separate tool
+        code from crm_sync_lead rather than relaxing that tool to customer_safe.
+
+        Two operations share one implementation but have different exposure:
+          • crm_sync_lead    (STAFF) — sync an arbitrary lead; an admin action
+          • crm_capture_self (CLIENT) — record MY details; a data-capture step
+
+        Safe by construction: the subject is always principal.sender_id, which
+        the transport authenticated. A customer cannot name someone else, and
+        can only write data they already supplied by talking to the bot — so
+        this grants no capability they did not already have.
+        """
+        sync_lead_to_crm(principal.sender_id, data or {})
+        return "captured"
+
+    @bic_tools.register("status")
+    def _tool_h_status(principal, timeout=15, **_):
+        # Composed FROM registry invocations, not from tool_leads/tool_clients
+        # directly — otherwise `#status` would run two tools while auditing one,
+        # and bic_tool_invocations would understate what actually executed.
+        return ("✅ Bot online\n\n"
+                + run_tool(principal.sender_id, "leads_today", _fallback=tool_leads)
+                + "\n\n"
+                + run_tool(principal.sender_id, "crm_list_clients", _fallback=tool_clients))
+
+    @bic_tools.register("aitest")
+    def _tool_h_aitest(principal, timeout=30, **_):
+        return tool_aitest(principal.sender_id)
+
+    @bic_tools.register("memory_show")
+    def _tool_h_memory_show(principal, timeout=10, **_):
+        return tool_memory_show(principal.sender_id)
+
+    @bic_tools.register("memory_clear")
+    def _tool_h_memory_clear(principal, timeout=10, **_):
+        return tool_memory_clear(principal.sender_id)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
