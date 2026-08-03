@@ -2711,16 +2711,67 @@ class handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body   = self.rfile.read(length)
 
-        # Webhook authenticity: when META_APP_SECRET is configured, reject any
-        # payload whose X-Hub-Signature-256 doesn't match — otherwise anyone who
-        # discovers this URL can forge messages (including owner commands, since
-        # those trust the payload's 'from' field) and drive WhatsApp sends.
+        # ── WEBHOOK AUTHENTICITY ──────────────────────────────────────────────
+        # Root of the entire identity chain. Article II.1 requires identity to
+        # come from the transport's VERIFIED payload, and every control
+        # downstream — Policy Gate, Tool Registry, approval gates — authorizes
+        # whatever principal this payload claims. The 2026-08-03 audit probed
+        # production and found verification effectively disabled: the check was
+        # `if app_secret:` and the secret was unset, so an unsigned POST
+        # returned 200 and a forged bootstrap-owner message would have executed
+        # as genuine.
+        #
+        # ⚠️ WHY THIS MEASURES BEFORE IT ENFORCES.
+        # Meta does NOT deliver here directly. The only Meta app with WhatsApp
+        # configured points at https://whatsapp-router-flame.vercel.app/webhook,
+        # which forwards to this endpoint. Our HMAC is computed over the RAW
+        # body using Meta's app secret, so it can only validate if the router
+        # forwards BOTH the original bytes AND the original X-Hub-Signature-256
+        # header. A forwarder that re-serialises the JSON — what most do by
+        # default — changes the bytes and silently breaks the hash.
+        #
+        # Enforcing blind would therefore have rejected 100% of legitimate
+        # traffic and taken the bot dark, with the cause invisible in the logs.
+        # So: measure first, enforce second — the same pattern that made the
+        # Decision Replay migration safe.
+        #
+        #   WEBHOOK_AUTH_ENFORCE unset/false → observe and log, reject nothing
+        #   WEBHOOK_AUTH_ENFORCE=true        → fail closed, as designed
+        #
+        # The observation window is a DELIBERATE, TIME-BOXED period in which the
+        # vulnerability stays open. One real message produces the evidence
+        # needed to flip the flag. Do not leave it open longer than that.
         app_secret = os.environ.get("META_APP_SECRET", "")
-        if app_secret:
-            sig = self.headers.get("X-Hub-Signature-256", "")
-            expected = "sha256=" + hmac.new(app_secret.encode(), body, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(sig, expected):
-                print("⛔ webhook signature mismatch — payload rejected")
+        enforce = os.environ.get("WEBHOOK_AUTH_ENFORCE", "false").strip().lower() \
+            in ("true", "1", "yes", "on")
+        sig = self.headers.get("X-Hub-Signature-256", "")
+
+        sig_valid = False
+        if app_secret and sig:
+            expected = "sha256=" + hmac.new(app_secret.encode(), body,
+                                            hashlib.sha256).hexdigest()
+            sig_valid = hmac.compare_digest(sig, expected)
+
+        # Evidence on EVERY request, structured and greppable. Carries no
+        # payload contents — only whether authentication would have succeeded.
+        print("WEBHOOK_AUTH " + json.dumps({
+            "secret_configured": bool(app_secret),
+            "signature_present": bool(sig),
+            "signature_valid": sig_valid,
+            "enforcing": enforce,
+            "body_bytes": len(body),
+        }))
+
+        if enforce:
+            if not app_secret:
+                # Our misconfiguration, not the caller's fault. 5xx so Meta
+                # retries and genuine messages are redelivered, not lost.
+                print("⛔ META_APP_SECRET not configured — rejecting all traffic")
+                self.send_response(503)
+                self.end_headers()
+                return
+            if not sig_valid:
+                print("⛔ webhook signature invalid — payload rejected")
                 self.send_response(403)
                 self.end_headers()
                 return
