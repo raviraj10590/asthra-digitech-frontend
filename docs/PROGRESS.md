@@ -145,7 +145,8 @@ Recorded here with an explicit removal plan so it cannot become permanent.
 | **S3** ✅ | Replay produces genuine evidence | durable table; 15 samples, 0 diffs |
 | **S4** ✅ | `BIC_POLICY_ENABLED=true` for OWNER | replies verified identical |
 | **S4.5** ✅ | **Tool Registry bypass closed** | owner tools verified live, 7/7 audited |
-| **S4.6** ✅ | **Engineering review findings resolved** | 2 Critical + 4 High closed, mutation-verified |
+| **S4.6** ✅ | **Engineering review findings resolved** | 2 Critical + 4 High closed, 21 mutations caught |
+| **S4.7** 🟡 | **Closure validation** | replay + rollback + no-regression proven offline; privileged tools await one live command |
 | **S5** ⬜ | CLIENT path wrapped and routed through Brain | characterization green |
 | **S6** ⬜ | Split removed — one pipeline | ADR 0003 superseded |
 
@@ -299,7 +300,7 @@ Degraded samples (`"degraded": true`) are excluded from any tally.
 
 Full specification: `docs/REPLAY-SPEC.md`.
 
-**Tests:** 166 offline, green.
+**Tests:** 186 offline, green.
 
 **Client-flow bridge is TEMPORARY** — see ADR 0003. The client flow will send
 its own messages and return `BrainResponse(text="")`. Accepted for 1C only
@@ -406,7 +407,7 @@ tool evidence, then S5 (client path through the Brain) and S6 (split removed).
 | 2 | Authorization still works | 🟡 7/7 OWNER allowed; **no live non-owner sample** |
 | 3 | Existing responses byte-identical | ✅ handlers wrap, never reimplement; owner reported no change |
 | 4 | Zero additional AI calls | ✅ `test_no_ai_call_in_the_dispatch_path` |
-| 5 | Characterization tests green | ✅ 166/166 |
+| 5 | Characterization tests green | ✅ 186/186 |
 | 6 | Registry failure fails safely | ✅ empty registry ⇒ deny-all; import failure or flag off ⇒ legacy |
 | 7 | Policy denial prevents execution | ✅ mutation-verified, no fallback on denial |
 | 8 | Latency within target | ✅ every tool inside declared expectation |
@@ -457,7 +458,34 @@ way, and nobody has to remember to add it.
 | L1 | audit fallback printed full phone to stdout | truncated to last 4 |
 | L5 | `run_tool` return not coerced | `_coerce_tool_text` at the boundary |
 
-**Tests: 166 green. 15 mutations, all caught.**
+**Tests: 186 green (forward and reverse module order). 21 mutations, all caught.**
+
+**Two defects were found while writing the closure-validation suite — both in
+the verification apparatus, not the production fix:**
+
+1. **The C1 invariant regex shipped narrowed.** The mutation harness used in
+   `185bc64` restored `api/` and `bic/` but not `tests/`, so the mutation
+   *"narrow the pattern back to exclude `_tool_*`"* was left applied and
+   committed. The routing fix itself was real — an independent AST scan showed
+   0 violations throughout — but **the test locking it was not in force**, and
+   the acceptance report that said "15 mutations caught" was reporting on a
+   harness that had corrupted its own subject. The harness now snapshots via
+   `git checkout -- .`, so restore is total by construction rather than by an
+   enumerated list of paths.
+2. **`identity.configure()` leaked across test modules.** It installs
+   module-level state and several suites never restored it; an OWNER-returning
+   stub made three characterization tests report that an unknown number
+   resolved as OWNER. Every class now snapshots and restores, and a guard
+   drives `setUp`/`tearDown` directly rather than asserting global state
+   (which would be order-dependent, i.e. flaky).
+
+Both are recorded because they are the same lesson as C1 itself: **a green
+suite is evidence about the suite, not about the system.**
+
+**ADRs written where behaviour actually changed:** 0006 (brochure failure is
+reported — the single deliberate behaviour change in 1C) and 0007 (MANAGER is a
+rank, not a pipeline). No ADR for C1/C2/H2/H3/H4/M3/M5/L1/L5: those restore
+intended behaviour rather than change it.
 
 ---
 
