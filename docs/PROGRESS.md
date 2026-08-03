@@ -56,9 +56,9 @@ Owner-only tasks. They do not alter any slice's code.
 
 | # | Task | Blocks | Status |
 |---|---|---|---|
-| D1 | Run `#aitest` from WhatsApp — confirm DeepSeek live | nothing (verification) | ⬜ |
+| D1 | Run `#aitest` from WhatsApp — confirm DeepSeek live | nothing (verification) | ✅ 2026-08-03, 7.3 s |
 | D2 | Rotate the exposed DeepSeek API key | nothing (security hygiene) | ⬜ |
-| D3 | Add `SUPABASE_SERVICE_ROLE_KEY` to bot Vercel env | **1B deploy** | ⬜ |
+| D3 | Add `SUPABASE_SERVICE_ROLE_KEY` to bot Vercel env | **1B deploy** | ✅ audit + replay writes landing |
 
 ⚠️ **D3 blocks 1B's deployment, not its design.** BIC tables are deny-by-default
 RLS, so no code can read or write them until the service-role key exists. 1B can
@@ -144,7 +144,7 @@ Recorded here with an explicit removal plan so it cannot become permanent.
 | **S2** ✅ | Role resolution unified (ADR 0005) | one resolver, one cache — done |
 | **S3** ✅ | Replay produces genuine evidence | durable table; 15 samples, 0 diffs |
 | **S4** ✅ | `BIC_POLICY_ENABLED=true` for OWNER | replies verified identical |
-| **S4.5** 🟡 | **Tool Registry bypass closed** | `bic_tool_invocations` > 0 in production |
+| **S4.5** ✅ | **Tool Registry bypass closed** | owner tools verified live, 7/7 audited |
 | **S5** ⬜ | CLIENT path wrapped and routed through Brain | characterization green |
 | **S6** ⬜ | Split removed — one pipeline | ADR 0003 superseded |
 
@@ -244,6 +244,34 @@ Verified by mutation (a check that cannot fail is not a check):
 
 **Cost.** The audit write in `tools.invoke()` is synchronous, so each invocation
 adds one Supabase round-trip. `#status` now costs two.
+
+**Production evidence — 2026-08-03, six owner commands:**
+
+```
+#leads   → leads_today                        142 ms
+#clients → crm_list_clients                   421 ms
+#status  → leads_today + crm_list_clients   50 + 348 ms   ← composite, 2 rows
+#roles   → roles_list                          53 ms
+#memory  → memory_show                         87 ms
+#aitest  → aitest                            7347 ms
+```
+
+7 invocations, 7 audited, 0 failures, 0 denials, every tool inside its declared
+latency. `bic_tool_invocations` went 0 → 7: the registry is now on the execution
+path, not beside it.
+
+Two audit-quality defects were found in this data and fixed rather than
+accepted:
+
+- **`aitest` expectation was 2.4× optimistic** (declared 3000 ms, measured
+  7347 ms). It passed only because the SLOW check uses a 3× threshold. A
+  declared expectation that a *healthy* run nearly breaches is a future false
+  alarm, not a baseline. Corrected to 8000 ms — declarations are corrected from
+  measurement, never the reverse.
+- **`db_queries` reads 0 on every row.** Accurate but misleading: `bic/db.py`
+  counts queries made *through it*, and every handler wraps a legacy function
+  that calls Supabase with `requests` directly. Documented on the column so
+  nobody later reads 0 as "no database work".
 Acceptable against a WhatsApp reply budget, but it is the reason S4.5 carries a
 production latency check rather than only offline tests. If it proves too slow,
 the fix is batching the audit write — not skipping it.
@@ -270,7 +298,7 @@ Degraded samples (`"degraded": true`) are excluded from any tally.
 
 Full specification: `docs/REPLAY-SPEC.md`.
 
-**Tests:** 133 offline, green.
+**Tests:** 134 offline, green.
 
 **Client-flow bridge is TEMPORARY** — see ADR 0003. The client flow will send
 its own messages and return `BrainResponse(text="")`. Accepted for 1C only
@@ -351,12 +379,12 @@ identically.
 
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
-| 0 | **Every tool executes via the registry** | 🟡 | code + tests done; awaiting production `bic_tool_invocations` > 0 |
+| 0 | **Every tool executes via the registry** | 🟡 | owner path proven live (7/7); client tools untested in production |
 | 1 | Adapter wired | 🟡 OWNER only | S5 completes it |
 | 2 | Feature flag operational | ✅ | verified unset/false/true/TRUE/1/off/garbage |
 | 3 | Decision Replay implemented | ✅ | `bic/replay.py` + structured logging |
-| 4 | Replay accuracy evidence | 🟡 | durable table live; 15 samples, 0 diffs (bar is 20) |
-| 5 | Latency verified in production | 🟡 | replay mean 0.063 ms; registry audit overhead unmeasured in prod |
+| 4 | Replay accuracy evidence | ✅ | 23 samples, 0 diffs, 0 degraded, 1 decision hash — bar was 20 |
+| 5 | Latency verified in production | ✅ | replay mean 0.063 ms; all 7 tools inside declared expectation |
 | 6 | Zero regressions | ✅ | 133 tests green; no-bypass + characterization + cache mutation-verified |
 | 7 | Rollback verified | 🟡 | flag logic verified; not yet exercised in production |
 | 8 | Routing correctness | 🟡 | owner proven; client unproven |
@@ -365,22 +393,29 @@ identically.
 | 11 | Documentation updated | ✅ | REPLAY-SPEC, ADR 0003/0004/0005, this tracker |
 | 12 | Progress tracker updated | ✅ | this file |
 
-**1C is NOT accepted — approximately 80% complete.** Criterion 0 (the
-registry invariant) awaits one live owner command; 4 and 5 await production
-samples; 1, 7, 8 remain partial pending S5-S6.
+**1C is NOT accepted — approximately 90% complete.** The registry invariant is
+satisfied for the owner path with production evidence. Remaining: live CLIENT
+tool evidence, then S5 (client path through the Brain) and S6 (split removed).
 
 **Owner-defined acceptance for the bypass fix (2026-08-03):**
 
 | # | Test | Status |
 |---|---|---|
-| 1 | `bic_tool_invocations` increases per tool execution | 🟡 awaiting live command |
-| 2 | Authorization still works | ✅ offline; live check pending |
-| 3 | Existing responses byte-identical | ✅ handlers wrap, never reimplement |
+| 1 | `bic_tool_invocations` increases per tool execution | ✅ 0 → 7, one row per execution |
+| 2 | Authorization still works | 🟡 7/7 OWNER allowed; **no live non-owner sample** |
+| 3 | Existing responses byte-identical | ✅ handlers wrap, never reimplement; owner reported no change |
 | 4 | Zero additional AI calls | ✅ `test_no_ai_call_in_the_dispatch_path` |
-| 5 | Characterization tests green | ✅ 133/133 |
-| 6 | Registry failure fails safely | ✅ empty registry ⇒ deny-all; import failure ⇒ fallback |
+| 5 | Characterization tests green | ✅ 134/134 |
+| 6 | Registry failure fails safely | ✅ empty registry ⇒ deny-all; import failure or flag off ⇒ legacy |
 | 7 | Policy denial prevents execution | ✅ mutation-verified, no fallback on denial |
-| 8 | Latency within target | 🟡 +1 audit round-trip per tool; prod measurement pending |
+| 8 | Latency within target | ✅ every tool inside declared expectation |
+
+**Honest gap on criteria 2 and 3.** Both owner phones are bootstrap OWNERs, so
+no live sample exercises a CLIENT principal. `send_brochure` and
+`crm_capture_self` are wired, registered and unit-tested, but have **not
+executed in production**. Until an organic customer conversation lands, the
+client half of the invariant rests on tests, not evidence. This is a real gap,
+recorded rather than rounded up.
 
 **Target architecture** (unchanged; ADR 0003 records the one temporary deviation):
 ```
