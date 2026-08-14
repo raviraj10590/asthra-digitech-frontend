@@ -549,5 +549,149 @@ class ProductionWiring(Base):
         self.assertIn("mark_capability_failure", src)
 
 
+
+# ── Schema conformance — code vs migration, without a database ─────────────
+
+MIGRATION = os.path.join(os.path.dirname(__file__), "..", "supabase",
+                         "migrations", "20260811000001_bic_decision_records.sql")
+
+
+def _migration_sql():
+    with open(MIGRATION, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _declared_columns():
+    """Column names from the CREATE TABLE body.
+
+    Deliberately a parse of the migration rather than a second hand-written
+    list: two lists drift, and the drift is invisible until a live write fails.
+    """
+    import re
+    sql = _migration_sql()
+    body = sql.split("create table if not exists bic_decision_records", 1)[1]
+    body = body.split("\n);", 1)[0]
+    cols = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("--") or line.startswith("("):
+            continue
+        m = re.match(r"^([a-z_]+)\s+(uuid|text|smallint|boolean|jsonb|numeric|timestamptz)",
+                     line)
+        if m:
+            cols.append(m.group(1))
+    return set(cols)
+
+
+class SchemaConformance(Base):
+    """The write path never runs against a real database in these tests, and in
+    production a failed write is SWALLOWED. So a column-name mismatch would
+    produce an archive that is silently empty while every test stays green.
+    These tests are the only thing standing between that and a live deploy."""
+
+    # Set by the DB, never sent by the writer.
+    DB_DEFAULTED = {"id", "decided_at"}
+
+    def test_migration_parses_to_the_expected_column_count(self):
+        cols = _declared_columns()
+        self.assertEqual(len(cols), 17, f"parsed {sorted(cols)}")
+
+    def test_every_written_field_exists_as_a_column(self):
+        d.open_turn()
+        d.mark_identity("CLIENT")
+        written = set(d.build_record())
+        missing = written - _declared_columns()
+        self.assertEqual(missing, set(), f"written but not in schema: {missing}")
+
+    def test_every_required_column_is_written(self):
+        d.open_turn()
+        d.mark_identity("CLIENT")
+        written = set(d.build_record())
+        required = _declared_columns() - self.DB_DEFAULTED
+        self.assertEqual(required - written, set(),
+                         f"column exists but nothing writes it: {required - written}")
+
+    def test_not_null_columns_are_never_none(self):
+        """A null into a NOT NULL column fails the insert — silently, because
+        the write is best-effort."""
+        for marks in (
+            lambda: None,
+            lambda: d.mark_ai_consulted("openai"),
+            lambda: d.mark_deterministic_branch(),
+            lambda: d.mark_tool_denied("x"),
+        ):
+            d.close_turn(); d.open_turn(); d.mark_identity("CLIENT")
+            marks()
+            rec = d.build_record()
+            for col in ("tenant_id", "schema_version", "turn_id", "brain_version",
+                        "route", "role", "identity_degraded", "decisive_rung",
+                        "gate_results", "ai_consulted", "ai_consultation_reason"):
+                self.assertIsNotNone(rec[col], f"{col} is NOT NULL in schema")
+
+    def test_every_emittable_rung_satisfies_the_check_constraint(self):
+        """If the code can emit a value the CHECK rejects, every write of that
+        kind fails in production and nothing says so."""
+        sql = _migration_sql()
+        rung_clause = sql.split("check (decisive_rung in (", 1)[1].split("))", 1)[0]
+        for rung in d.EMITTABLE_RUNGS:
+            self.assertIn(f"'{rung}'", rung_clause, f"{rung} would be rejected")
+
+    def test_every_reason_satisfies_the_check_constraint(self):
+        sql = _migration_sql()
+        clause = sql.split("check (ai_consultation_reason in (", 1)[1].split("))", 1)[0]
+        for reason in (d.CONSULTED_RESPONSE_GENERATION,
+                       d.CONSULTED_ALL_PROVIDERS_FAILED,
+                       d.NOT_CONSULTED_DETERMINISTIC_BRANCH,
+                       d.NOT_CONSULTED_CHAT_PAUSED,
+                       d.NOT_CONSULTED_POLICY_DENIED,
+                       d.NOT_CONSULTED_NOT_REQUIRED):
+            self.assertIn(f"'{reason}'", clause, f"{reason} would be rejected")
+
+    def test_provider_consistency_constraint_is_never_violated(self):
+        """CHECK (ai_consulted = true or ai_provider is null)."""
+        d.close_turn(); d.open_turn(); d.mark_identity("CLIENT")
+        d.mark_deterministic_branch()
+        rec = d.build_record()
+        self.assertFalse(rec["ai_consulted"])
+        self.assertIsNone(rec["ai_provider"])
+
+    def test_record_is_json_serialisable(self):
+        """db.insert sends it as JSON; an unserialisable value fails the write."""
+        d.open_turn()
+        d.mark_identity("CLIENT")
+        d.mark_ai_consulted("openai")
+        json.dumps(d.build_record())          # no default= crutch
+
+
+class WriteFailsHarmlesslyUntilMigrated(Base):
+    """Current production reality: the table does not exist yet."""
+
+    def test_missing_table_does_not_break_the_turn(self):
+        d.open_turn()
+        d.mark_identity("CLIENT")
+
+        def undefined_table(*a, **k):
+            from bic.db import DbError
+            raise DbError("bic_decision_records insert 404: relation does not exist")
+
+        with mock.patch.object(d.db, "insert", undefined_table):
+            self.assertIsNotNone(d.flush())   # returns the record, raises nothing
+        self.assertFalse(d.is_open())
+
+    def test_failure_is_logged_loudly_not_silently(self):
+        """A silently failing archive looks healthy and is empty (3D §8.2)."""
+        import contextlib, io
+        buf = io.StringIO()
+        d.open_turn()
+        d.mark_identity("CLIENT")
+
+        def boom(*a, **k):
+            raise RuntimeError("relation does not exist")
+
+        with mock.patch.object(d.db, "insert", boom), contextlib.redirect_stdout(buf):
+            d.flush()
+        self.assertIn("DECISION_RECORD persist failed", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
