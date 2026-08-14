@@ -48,7 +48,8 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from bic import (brain as bic_brain, config as bic_config,
-                     contract as bic_contract, db as bic_db, identity as bic_identity,
+                     contract as bic_contract, db as bic_db,
+                     decision as bic_decision, identity as bic_identity,
                      policy as bic_policy, replay as bic_replay,
                      tools as bic_tools)
     from adapters import whatsapp as wa_adapter
@@ -1132,8 +1133,18 @@ def _generate_ai_reply(messages: list, apology: str, max_tokens: int = None) -> 
         if result:
             if i > 0:
                 print(f"↪️ replied via fallback provider ({name})")
+            # Decision Record (3D §4.2 / I10). THE chokepoint for model
+            # consultation — both generate_reply and generate_owner_reply pass
+            # through here, so recording it once covers every AI call.
+            if BIC_AVAILABLE:
+                bic_decision.mark_ai_consulted(name)
             return result
     print(f"_generate_ai_reply: all providers failed ({[n for n, _ in chain]})")
+    # Consultation still HAPPENED — it just returned nothing. "We asked and got
+    # nothing" and "we never asked" are different facts, and a record that
+    # merged them would misreport the model's involvement in this turn.
+    if BIC_AVAILABLE:
+        bic_decision.mark_ai_all_providers_failed()
     return apology
 
 
@@ -2390,6 +2401,11 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
 
     # ── Menu escape hatch: reset any stuck chat to the services menu ──
     if is_menu_request(user_text) and not is_new_contact:
+        # Decision Record witness (3C rung 3). A deterministic predicate settled
+        # this turn — recorded here rather than inferred later from the absence
+        # of an AI call, because absence has several possible causes.
+        if BIC_AVAILABLE:
+            bic_decision.mark_deterministic_branch()
         send_welcome_menu(sender)
         save_messages([(sender, "user", user_text),
                        (sender, "assistant", "[ಮೆನು ಮರುಕಳಿಸಲಾಯಿತು]")])
@@ -2397,6 +2413,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
 
     # ── Off-topic guard: blatant non-business → polite redirect, no AI ──
     if is_off_topic(user_text):
+        if BIC_AVAILABLE:
+            bic_decision.mark_deterministic_branch()
         send_text(sender,
             "ಕ್ಷಮಿಸಿ 🙏 ನಾನು Asthra DigiTech ಸೇವೆಗಳ ಬಗ್ಗೆ ಮಾತ್ರ ಸಹಾಯ ಮಾಡಬಲ್ಲೆ.\n"
             "ನಿಮ್ಮ business ಗೆ website, social media, ads ಅಥವಾ design ಬೇಕಾ? "
@@ -2411,12 +2429,19 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
 
     # ── Human handoff: owner paused this chat ─────────────────────
     if ctx["paused"]:
+        # Its own reason: a paused chat is a deliberate human handoff, not the
+        # same fact as a rule matching the customer's words.
+        if BIC_AVAILABLE:
+            bic_decision.mark_deterministic_branch(
+                bic_decision.NOT_CONSULTED_CHAT_PAUSED)
         save_message(sender, "user", user_text)  # keep the record
         print(f"⏸️ bot paused for {sender} — staying silent")
         return
 
     # ── Brochure request? ─────────────────────────────────────────
     if is_brochure_request(user_text):
+        if BIC_AVAILABLE:
+            bic_decision.mark_deterministic_branch()
         send_text(sender, "ಖಂಡಿತ! ನಮ್ಮ ಕಂಪನಿ ಪ್ರೊಫೈಲ್ ಇಲ್ಲಿದೆ 🙏")
         # H1: the return value used to be discarded. A policy denial or a failed
         # send produced a customer who was PROMISED a brochure, a transcript
@@ -2441,6 +2466,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
 
     # ── New contact: greet with services menu ─────────────────────
     elif is_new_contact:
+        if BIC_AVAILABLE:
+            bic_decision.mark_deterministic_branch()
         send_welcome_menu(sender)
         save_messages([(sender, "user", user_text),
                        (sender, "assistant", "[ಸ್ವಾಗತ + ಸೇವೆಗಳ ಮೆನು ಕಳಿಸಲಾಯಿತು]")])
@@ -2640,6 +2667,55 @@ def _bic_replay_compare(sender: str, legacy_role: str) -> None:
         _bic_persist_replay(record)
     except Exception as e:
         print(f"BIC replay error (ignored, production unaffected): {e}")
+
+
+def _decision_open(sender: str, role: str) -> None:
+    """Open the Decision Record for this turn (3C §1.1, 3D).
+
+    ELIGIBILITY — scope boundary, stated explicitly rather than left implicit:
+    every TEXT turn that reaches the routing fork is recorded. Media
+    acknowledgements and deduplicated webhook returns are OUT OF SCOPE for this
+    slice — they are fixed responses with no decision path, and 3A's ADMIT →
+    DUPLICATE decision is not implemented. They are excluded, NOT recorded as
+    skipped decisions; this function is simply never reached for them.
+
+    There is NO saturation skip. The 1C replay diagnostic skips saturated roles
+    because it is throwaway data nothing reads; a Decision Record with gaps
+    would be missing evidence exactly where a dispute later lands.
+
+    (The 1C table is deliberately not named here: a frozen invariant test
+    asserts it appears exactly once in this file — at its write site — which is
+    how "production never reads it" stays true.)
+    """
+    if not BIC_AVAILABLE:
+        return
+    try:
+        bic_decision.open_turn()
+        bic_decision.mark_route("owner" if role in INTERNAL_ROLES else "client")
+        # Cache hit — the canonical resolver already ran for this turn (ADR
+        # 0005), so this adds no query. Read for `degraded`, which is the
+        # constitutional fail-closed signal and is not on get_role()'s return.
+        degraded = False
+        try:
+            degraded = bool(bic_identity.resolve(sender, channel="whatsapp").degraded)
+        except Exception:
+            pass
+        bic_decision.mark_identity(role, degraded)
+    except Exception as e:
+        print(f"decision record open failed (ignored, production unaffected): {e}")
+
+
+def _decision_flush() -> None:
+    """Close and persist. Never raises — evidence collection must not affect
+    the customer's turn."""
+    if not BIC_AVAILABLE:
+        return
+    try:
+        record = bic_decision.flush()
+        if record:
+            print(f"DECISION_RECORD {json.dumps(record, default=str)}")
+    except Exception as e:
+        print(f"decision record flush failed (ignored, production unaffected): {e}")
 
 
 def _bic_owner_turn(sender: str, user_text: str, ctx: dict,
@@ -3020,21 +3096,31 @@ class handler(BaseHTTPRequestHandler):
             # serves the customer regardless of the outcome.
             _bic_replay_compare(sender, role)
 
-            if role in INTERNAL_ROLES:
-                if _bic_enabled():
-                    # New path: Adapter → BrainRequest → Brain → flow → Adapter.
-                    _bic_owner_turn(sender, user_text, ctx, msg.get("id"))
+            # ── Decision Record (3C/3D): OPEN ─────────────────────────────
+            # Distinct from the replay diagnostic above: that table prunes at
+            # 30 days and nothing reads it; this one is retained evidence.
+            _decision_open(sender, role)
+            try:
+                if role in INTERNAL_ROLES:
+                    if _bic_enabled():
+                        # New path: Adapter → BrainRequest → Brain → flow → Adapter.
+                        _bic_owner_turn(sender, user_text, ctx, msg.get("id"))
+                    else:
+                        # Legacy path — unchanged, byte for byte.
+                        reply = handle_owner_text(sender, role, label, user_text, ctx)
+                        send_text(sender, reply)
+                        save_messages([(sender, "user", user_text), (sender, "assistant", reply)])
+                elif _bic_enabled():
+                    _bic_client_turn(sender, user_text, ctx, msg.get("id"))
                 else:
-                    # Legacy path — unchanged, byte for byte.
-                    reply = handle_owner_text(sender, role, label, user_text, ctx)
-                    send_text(sender, reply)
-                    save_messages([(sender, "user", user_text), (sender, "assistant", reply)])
-                self._ok(); return
-
-            if _bic_enabled():
-                _bic_client_turn(sender, user_text, ctx, msg.get("id"))
-            else:
-                run_client_pipeline(sender, user_text, ctx)
+                    run_client_pipeline(sender, user_text, ctx)
+            finally:
+                # ── Decision Record: FLUSH ────────────────────────────────
+                # `finally`, so all four terminal paths through the fork are
+                # captured — including one that raised. Four separate write
+                # sites would eventually miss one, and a missing record is
+                # indistinguishable from a decision that never happened.
+                _decision_flush()
             self._ok(); return
 
         except (KeyError, IndexError, json.JSONDecodeError) as e:

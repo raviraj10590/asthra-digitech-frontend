@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime, timezone
 
-from . import config, db, policy
+from . import config, db, decision, policy
 
 _HANDLERS = {}          # code -> callable          (private, never exported)
 _REGISTRY_CACHE = {}    # code -> tool_def row
@@ -202,6 +202,14 @@ def invoke(principal: policy.Principal, code: str, **args) -> ToolResult:
     allowed, reason = policy.may_invoke(principal, d)
     if not allowed:
         started = finished = time.time()
+        # Decision Record: *absent* is not *not permitted* (3B §4.2). An
+        # unknown tool is a capability gap someone should fix; a denial is
+        # working authorization. Collapsing them sends diagnosis toward the
+        # registry when the answer is a role.
+        if reason == "unknown tool":
+            decision.mark_capability_failure()
+        else:
+            decision.mark_tool_denied(code)
         # Denials are audited too — an attempted privilege escalation is
         # exactly the event worth having a record of.
         _audit(principal, code, d, started, finished, False,
@@ -213,10 +221,13 @@ def invoke(principal: policy.Principal, code: str, **args) -> ToolResult:
     if handler is None:
         # Registry row exists but no handler is wired — a deployment mismatch.
         # Explicit failure, never a silent pass.
+        decision.mark_capability_failure()
         started = finished = time.time()
         _audit(principal, code, d, started, finished, False, "handler missing", 0, args)
         return ToolResult(ok=False, error=f"no handler registered for {code}")
 
+    # Policy passed and a handler exists: this capability is being exercised.
+    decision.mark_tool_invoked(code)
     db.reset_query_count()
     started = time.time()
     ok, value, error = True, None, None
