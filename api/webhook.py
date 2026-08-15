@@ -2677,6 +2677,25 @@ def _bic_replay_compare(sender: str, legacy_role: str) -> None:
         print(f"BIC replay error (ignored, production unaffected): {e}")
 
 
+def _turn_failure_class(exc: BaseException) -> str:
+    """Classify a turn failure using the EXISTING bounded vocabulary.
+
+    Delegates to bic.tools._failure_class rather than defining a second
+    taxonomy — two vocabularies for the same concept drift, and then a
+    `DATABASE` in one place stops meaning `DATABASE` in the other.
+
+    Only the bounded class is returned. The exception's message and traceback
+    stay here and never reach the log line: either could carry customer data,
+    and this line is emitted on every request.
+    """
+    if BIC_AVAILABLE:
+        try:
+            return bic_tools._failure_class(exc)
+        except Exception:
+            pass
+    return "UNKNOWN"
+
+
 def _decision_open(sender: str, role: str) -> None:
     """Open the Decision Record for this turn (3C §1.1, 3D).
 
@@ -2982,6 +3001,40 @@ class handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
+        # ── D2: turn observability ────────────────────────────────────────────
+        # Two windows could previously swallow a turn without trace: a failure
+        # in fetch_context() or get_role(), both BEFORE the Decision Record
+        # opens. A real message was once investigated for an hour and the only
+        # available conclusion was "it never arrived" — inferred from ABSENCE.
+        #
+        # Everything from the routing fork onward is already covered: the
+        # Decision Record flushes from a `finally`, so even a turn that raises
+        # mid-dispatch is recorded. This closes the remaining gap.
+        #
+        # A LOG LINE, NOT A TABLE — deliberately. The failures being caught are
+        # database failures; a row written to record them would fail for the
+        # same reason. A failure record that fails during the failure is not a
+        # record. This rides the WEBHOOK_AUTH channel, which already emits on
+        # every request and already carries no payload contents.
+        #
+        # NO DECISION RECORD IS EVER FABRICATED. A turn that died before
+        # _decision_open never entered the decision lifecycle; inventing a
+        # record for it would be exactly the kind of manufactured evidence this
+        # system refuses. `decision_record: false` STATES the absence.
+        turn = {
+            "outcome": "OK",
+            # The furthest stage ENTERED. On failure that is where it died; on
+            # a media ack it legitimately stays PARSE, because such a turn
+            # returns before the routing fork.
+            "stage": "PARSE",
+            "failure_class": None,
+            "decision_record": False,
+            # The owner/client routing fork was entered. Media acknowledgements
+            # reply to the customer without ever reaching it.
+            "dispatch_began": False,
+            "body_bytes": len(body),
+        }
+
         try:
             data    = json.loads(body)
             entry   = data["entry"][0]
@@ -3087,6 +3140,7 @@ class handler(BaseHTTPRequestHandler):
             print(f"💬 Text: {user_text[:80]}")
 
             # ── ONE context fetch for everything below ────────────────────
+            turn["stage"] = "CONTEXT"
             ctx = fetch_context(sender)
 
             # ── Meta retry deduplication ──────────────────────────────────
@@ -3097,6 +3151,7 @@ class handler(BaseHTTPRequestHandler):
             # ── Mode split: OWNER/STAFF get the executive-assistant pipeline,
             # everyone else gets the customer-facing sales pipeline below.
             # See get_role() — this is the ONLY place the two modes fork.
+            turn["stage"] = "ROUTE"
             role, label = get_role(sender)
 
             # Decision Replay (ADR 0004): predict-only comparison of the route
@@ -3108,6 +3163,12 @@ class handler(BaseHTTPRequestHandler):
             # Distinct from the replay diagnostic above: that table prunes at
             # 30 days and nothing reads it; this one is retained evidence.
             _decision_open(sender, role)
+            turn["stage"] = "DISPATCH"
+            turn["dispatch_began"] = True
+            # True once the accumulator is open: the existing `finally` below
+            # guarantees a record is flushed even if dispatch raises.
+            turn["decision_record"] = bool(
+                BIC_AVAILABLE and bic_decision.is_open())
             try:
                 if role in INTERNAL_ROLES:
                     if _bic_enabled():
@@ -3132,9 +3193,19 @@ class handler(BaseHTTPRequestHandler):
             self._ok(); return
 
         except (KeyError, IndexError, json.JSONDecodeError) as e:
+            turn["outcome"] = "PARSE_ERROR"
+            turn["failure_class"] = _turn_failure_class(e)
             print(f"Parse error: {e}")
         except Exception as e:
+            turn["outcome"] = "INTERNAL_ERROR"
+            turn["failure_class"] = _turn_failure_class(e)
             print(f"Unexpected error: {e}")
+        finally:
+            # Exactly once per do_POST, on every exit path — the `return`s
+            # inside the try included. Structured and greppable, like
+            # WEBHOOK_AUTH, and carrying no payload contents: no sender, no
+            # message, no exception message, no stack trace.
+            print("WEBHOOK_TURN " + json.dumps(turn))
 
         self._ok()
 
