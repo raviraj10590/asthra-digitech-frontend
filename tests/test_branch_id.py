@@ -162,11 +162,14 @@ class HistoricalRowsRemainReadable(Base):
         self.assertEqual(dict(cli.branch_summary([self.V1_ROW])), {"<none>": 1})
 
     def test_schema_version_advanced(self):
-        self.assertEqual(d.SCHEMA_VERSION, 2)
+        """v2 added branch_id; v3 added tool_results. Both additive, so v1 and
+        v2 rows stay readable — this pins the current version so an
+        unintended bump fails loudly."""
+        self.assertEqual(d.SCHEMA_VERSION, 3)
 
-    def test_new_records_declare_version_two(self):
+    def test_new_records_declare_the_current_version(self):
         d.open_turn(); d.mark_identity("CLIENT")
-        self.assertEqual(d.build_record()["schema_version"], 2)
+        self.assertEqual(d.build_record()["schema_version"], 3)
 
 
 # ── 5 · Migration is additive ──────────────────────────────────────────────
@@ -290,13 +293,14 @@ class NothingElseChanged(Base):
             self.assertIsNotNone(d.flush())
             self.assertIsNone(d.flush())
 
-    def test_record_field_set_grew_by_exactly_one(self):
+    def test_record_field_set_is_exactly_as_approved(self):
         d.open_turn(); d.mark_identity("CLIENT")
         self.assertEqual(set(d.build_record()), {
             "tenant_id", "schema_version", "turn_id", "brain_version",
             "route", "role", "identity_degraded", "decisive_rung", "branch_id",
             "gate_results", "ai_consulted", "ai_consultation_reason",
-            "ai_provider", "selected_tools", "denied_tools", "latency_ms",
+            "ai_provider", "selected_tools", "denied_tools", "tool_results",
+            "latency_ms",
         })
 
     def test_writes_only_to_the_decision_table(self):

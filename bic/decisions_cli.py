@@ -43,7 +43,8 @@ COLUMNS = (
     "decided_at", "turn_id", "brain_version", "route", "role",
     "identity_degraded", "decisive_rung", "branch_id", "ai_consulted",
     "ai_consultation_reason", "ai_provider", "selected_tools",
-    "denied_tools", "latency_ms", "schema_version", "gate_results",
+    "denied_tools", "tool_results", "latency_ms", "schema_version",
+    "gate_results",
 )
 
 # Display abbreviations. Full values are always preserved in --json output;
@@ -129,6 +130,54 @@ def rung_summary(rows: list) -> list:
     return counts.most_common()
 
 
+def _fmt_execution(value) -> str:
+    """`send_brochure:OK` · `send_brochure:FAIL/DATABASE` · `-` · `none`.
+
+    Three display states, because three things are genuinely different:
+      `-`     NULL — no execution result recorded (a v1/v2 row)
+      `none`  [] — recorded, and nothing executed
+      entries a handler ran
+    Collapsing the first two would claim a historical row asserted something
+    it never did.
+    """
+    if value is None:
+        return "-"
+    if not value:
+        return "none"
+    out = []
+    for e in value:
+        tool = e.get("tool", "?")
+        if e.get("status") == "SUCCEEDED":
+            out.append(f"{tool}:OK")
+        else:
+            out.append(f"{tool}:FAIL/{e.get('failure_class') or 'UNKNOWN'}")
+    return ",".join(out)
+
+
+def execution_summary(rows: list) -> list:
+    """(label, count) over capabilities that actually RAN.
+
+    Rows with NULL tool_results are excluded entirely rather than counted as
+    zero executions — they are unknown, not empty.
+    """
+    counts = Counter()
+    for r in rows:
+        results = r.get("tool_results")
+        if results is None:
+            counts["<not recorded>"] += 1
+            continue
+        if not results:
+            counts["<none executed>"] += 1
+            continue
+        for e in results:
+            if e.get("status") == "SUCCEEDED":
+                counts[f"{e.get('tool', '?')} OK"] += 1
+            else:
+                counts[f"{e.get('tool', '?')} FAIL/"
+                       f"{e.get('failure_class') or 'UNKNOWN'}"] += 1
+    return counts.most_common()
+
+
 def branch_summary(rows: list) -> list:
     """(branch_id, count). `<none>` covers both the AI path and pre-v2 rows —
     the CLI cannot distinguish them, and pretending otherwise would invent a
@@ -159,7 +208,8 @@ def render_table(rows: list) -> str:
     if not rows:
         return "no decision records matched"
     head = (f"{'when':<15} {'rung':<10} {'branch':<17} {'ai':<4} "
-            f"{'provider':<9} {'tools':<16} {'denied':<10} {'ms':>8}")
+            f"{'provider':<9} {'tools':<16} {'execution':<22} "
+            f"{'denied':<10} {'ms':>8}")
     lines = [head, "-" * len(head)]
     for r in rows:
         rung = _RUNG_SHORT.get(r.get("decisive_rung"), r.get("decisive_rung") or "?")
@@ -173,6 +223,7 @@ def render_table(rows: list) -> str:
             f"{('yes' if r.get('ai_consulted') else 'no'):<4} "
             f"{(r.get('ai_provider') or '-'):<9} "
             f"{_fmt_list(r.get('selected_tools')):<16} "
+            f"{_fmt_execution(r.get('tool_results')):<22} "
             f"{_fmt_list(r.get('denied_tools')):<10} "
             f"{(f'{float(latency):.0f}' if latency is not None else '-'):>8}"
         )
@@ -202,6 +253,8 @@ def render_summary(rows: list) -> str:
     out += [f"  {name:<24} {n:>5}" for name, n in rung_summary(rows)]
     out += ["", "by deterministic branch:"]
     out += [f"  {name:<24} {n:>5}" for name, n in branch_summary(rows)]
+    out += ["", "by execution result:"]
+    out += [f"  {name:<24} {n:>5}" for name, n in execution_summary(rows)]
     return "\n".join(out)
 
 
@@ -269,7 +322,8 @@ def main(argv=None) -> int:
         print(json.dumps({"scanned": len(rows),
                           "providers": provider_summary(rows),
                           "rungs": rung_summary(rows),
-                          "branches": branch_summary(rows)}, indent=2)
+                          "branches": branch_summary(rows),
+                          "executions": execution_summary(rows)}, indent=2)
               if args.json else render_summary(rows))
     else:
         print(render_json(rows) if args.json else render_table(rows))

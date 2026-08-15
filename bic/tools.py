@@ -190,6 +190,33 @@ def _audit(principal, code, d, started, finished, ok, error, queries, args) -> N
         print(f"AUDIT_FALLBACK {json.dumps(safe, default=str)} (reason: {e})")
 
 
+def _failure_class(exc: BaseException) -> str:
+    """Map an exception to the Decision Record's bounded failure vocabulary.
+
+    Classification happens HERE, where the exception already is, so that only
+    a bounded string ever crosses into decision.py. The exception object, its
+    message and its traceback never leave this function — any of them could
+    carry customer data, and the Decision Record has no pruner.
+
+    Matched on TYPE, never on message text: matching on the message would make
+    the class depend on wording that changes between library versions, and
+    would put customer-derived strings on the classification path.
+    """
+    name = type(exc).__name__
+    if isinstance(exc, TimeoutError) or "Timeout" in name:
+        return decision.FAIL_TIMEOUT
+    if isinstance(exc, ConnectionError) or "Connection" in name:
+        return decision.FAIL_CONNECTION
+    if isinstance(exc, db.DbError) or name == "DbError":
+        return decision.FAIL_DATABASE
+    if isinstance(exc, PermissionError):
+        return decision.FAIL_PERMISSION
+    if isinstance(exc, (ValueError, TypeError, KeyError, IndexError,
+                        AttributeError)):
+        return decision.FAIL_VALUE
+    return decision.FAIL_UNKNOWN
+
+
 def invoke(principal: policy.Principal, code: str, **args) -> ToolResult:
     """THE execution entry point. Policy → Tool → Audit → Response.
 
@@ -230,11 +257,15 @@ def invoke(principal: policy.Principal, code: str, **args) -> ToolResult:
     decision.mark_tool_invoked(code)
     db.reset_query_count()
     started = time.time()
-    ok, value, error = True, None, None
+    ok, value, error, failure_class = True, None, None, None
     try:
         value = handler(principal=principal, timeout=d.get("timeout_seconds", 15), **args)
     except Exception as e:
         ok, error = False, str(e)
+        # Classified here, from the TYPE only. `error` (which holds the
+        # message) goes to the frozen 1C audit trail; only the bounded class
+        # below reaches the Decision Record.
+        failure_class = _failure_class(e)
         print(f"tools: {code} raised: {e}")
     finished = time.time()
 
@@ -242,6 +273,12 @@ def invoke(principal: policy.Principal, code: str, **args) -> ToolResult:
     _audit(principal, code, d, started, finished, ok, error, queries, args)
 
     latency_ms = int((finished - started) * 1000)
+
+    # Decision Record: the handler RAN and produced a result. Reached only on
+    # this path — a denied tool returned above, and a missing handler returned
+    # above, because neither executed. THE sole execution observation point.
+    decision.mark_tool_execution(code, ok, failure_class, latency_ms)
+
     expected = d.get("expected_latency_ms")
     if expected and latency_ms > expected * 3:
         # Declared expectation gives regressions something to regress against.

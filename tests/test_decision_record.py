@@ -317,7 +317,8 @@ class NoPiiEverEntersTheRecord(Base):
             "tenant_id", "schema_version", "turn_id", "brain_version",
             "route", "role", "identity_degraded", "decisive_rung", "branch_id",
             "gate_results", "ai_consulted", "ai_consultation_reason",
-            "ai_provider", "selected_tools", "denied_tools", "latency_ms",
+            "ai_provider", "selected_tools", "denied_tools", "tool_results",
+            "latency_ms",
         })
 
     def test_module_exposes_no_way_to_pass_text(self):
@@ -401,19 +402,20 @@ class PhaseOneCUnchanged(Base):
 
 class SchemaVersion(Base):
 
-    def test_schema_version_advanced_to_two(self):
-        """v2 adds branch_id. v1 rows remain readable, carrying NULL."""
+    def test_schema_version_advanced_additively(self):
+        """v2 added branch_id, v3 added tool_results. v1 and v2 rows remain
+        readable, carrying NULL in the columns that did not yet exist."""
         d.open_turn()
         d.mark_identity("CLIENT")
-        self.assertEqual(d.build_record()["schema_version"], 2)
+        self.assertEqual(d.build_record()["schema_version"], 3)
 
     def test_reader_tolerates_unknown_future_keys(self):
         """3D §10.1 — additive evolution; old readers must not break."""
         d.open_turn()
         d.mark_identity("CLIENT")
         rec = d.build_record()
-        rec["some_future_field_v3"] = "x"
-        self.assertEqual(json.loads(json.dumps(rec, default=str))["schema_version"], 2)
+        rec["some_future_field_v4"] = "x"
+        self.assertEqual(json.loads(json.dumps(rec, default=str))["schema_version"], 3)
 
     def test_brain_version_is_always_recorded(self):
         d.open_turn()
@@ -614,7 +616,7 @@ class SchemaConformance(Base):
 
     def test_migration_parses_to_the_expected_column_count(self):
         cols = _declared_columns()
-        self.assertEqual(len(cols), 18, f"parsed {sorted(cols)}")
+        self.assertEqual(len(cols), 19, f"parsed {sorted(cols)}")
 
     def test_every_written_field_exists_as_a_column(self):
         d.open_turn()

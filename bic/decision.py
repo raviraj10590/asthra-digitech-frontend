@@ -80,6 +80,26 @@ BRANCH_NEW_CONTACT = "NEW_CONTACT"
 BRANCH_IDS = (BRANCH_MENU_REQUEST, BRANCH_OFF_TOPIC, BRANCH_CHAT_PAUSED,
               BRANCH_BROCHURE_REQUEST, BRANCH_NEW_CONTACT)
 
+# Execution outcome (execution result ONLY — never business outcome, which is
+# 2I and lives outside the runtime).
+EXEC_SUCCEEDED = "SUCCEEDED"
+EXEC_FAILED = "FAILED"
+EXEC_STATUSES = (EXEC_SUCCEEDED, EXEC_FAILED)
+
+# Bounded failure vocabulary. Assigned in tools.py from the exception TYPE;
+# only this string crosses into this module. Exception messages, stack traces
+# and tool arguments never arrive here — any of them could carry customer
+# data, and this table has no pruner.
+FAIL_TIMEOUT = "TIMEOUT"
+FAIL_CONNECTION = "CONNECTION"
+FAIL_DATABASE = "DATABASE"
+FAIL_VALUE = "VALUE"
+FAIL_PERMISSION = "PERMISSION"
+FAIL_UNKNOWN = "UNKNOWN"
+
+FAILURE_CLASSES = (FAIL_TIMEOUT, FAIL_CONNECTION, FAIL_DATABASE,
+                   FAIL_VALUE, FAIL_PERMISSION, FAIL_UNKNOWN)
+
 CONSULTED_RESPONSE_GENERATION = "CONSULTED_RESPONSE_GENERATION"
 CONSULTED_ALL_PROVIDERS_FAILED = "CONSULTED_ALL_PROVIDERS_FAILED"
 NOT_CONSULTED_DETERMINISTIC_BRANCH = "NOT_CONSULTED_DETERMINISTIC_BRANCH"
@@ -106,10 +126,11 @@ GATES_WITHOUT_BACKING = ("policy", "sufficiency", "goal_alignment",
 
 TABLE = "bic_decision_records"
 
-# v2 adds branch_id. Additive only: rows written at v1 remain readable exactly
-# as they are, carrying NULL in the new column (3D §10.1 — every historical
-# schema version must stay readable, forever).
-SCHEMA_VERSION = 2
+# v2 adds branch_id, v3 adds tool_results. Additive only: rows written at v1
+# and v2 remain readable exactly as they are, carrying NULL in the newer
+# columns (3D §10.1 — every historical schema version must stay readable,
+# forever).
+SCHEMA_VERSION = 3
 
 # 3D §3.2 — the referenced-artifact manifest. Vercel injects the commit SHA at
 # build time, which makes it immutable per deploy and free. Everything else the
@@ -126,7 +147,7 @@ class _Turn:
     __slots__ = ("turn_id", "started", "route", "role", "identity_degraded",
                  "ai_consulted", "ai_provider", "all_providers_failed",
                  "deterministic_reason", "branch_id", "selected_tools",
-                 "denied_tools", "capability_failed", "closed")
+                 "denied_tools", "tool_results", "capability_failed", "closed")
 
     def __init__(self) -> None:
         self.turn_id = str(uuid.uuid4())
@@ -141,6 +162,7 @@ class _Turn:
         self.branch_id: Optional[str] = None
         self.selected_tools: list = []
         self.denied_tools: list = []
+        self.tool_results: list = []
         self.capability_failed = False
         self.closed = False
 
@@ -247,6 +269,45 @@ def mark_tool_denied(code: str) -> None:
         t.denied_tools.append(code)
 
 
+def mark_tool_execution(code: str, succeeded: bool,
+                        failure_class: Optional[str] = None,
+                        latency_ms: Optional[int] = None) -> None:
+    """A capability HANDLER RAN and produced a result.
+
+    Called ONLY from tools.invoke(), and only on the two paths where a handler
+    actually executed. A denied tool and a missing handler never reach here —
+    neither executed, so neither gets an execution result. The denial lives in
+    denied_tools, the missing handler in gate_results.capability.
+
+    This keeps four states distinct that are routinely collapsed:
+        selected · authorized · invoked · executed-with-a-result
+
+    `failure_class` is a BOUNDED vocabulary assigned by the caller from the
+    exception TYPE. This function never receives an exception object, a
+    message, a stack trace or the tool's arguments — so none of them can reach
+    the column. An unrecognised class is coerced to UNKNOWN and logged, never
+    stored verbatim: the only writable values are the six constants above.
+
+    Execution result only. Whether the act was commercially successful is 2I
+    Outcome Intelligence and is deliberately not observable from here.
+    """
+    t = current()
+    if not t:
+        return
+    if failure_class is not None and failure_class not in FAILURE_CLASSES:
+        print(f"DECISION_RECORD unknown failure_class {failure_class!r} "
+              f"— recorded as {FAIL_UNKNOWN}")
+        failure_class = FAIL_UNKNOWN
+    t.tool_results.append({
+        "tool": code,
+        "status": EXEC_SUCCEEDED if succeeded else EXEC_FAILED,
+        # Present on both branches so a reader never has to distinguish
+        # "succeeded" from "failed but the key is missing".
+        "failure_class": None if succeeded else (failure_class or FAIL_UNKNOWN),
+        "latency_ms": latency_ms,
+    })
+
+
 def mark_capability_failure() -> None:
     """The registry had no usable capability — unknown tool or missing handler.
     Distinct from a denial: 3B §4.2, *absent* is not *not permitted*."""
@@ -347,6 +408,9 @@ def build_record() -> Optional[dict]:
         "ai_provider": t.ai_provider if t.ai_consulted else None,
         "selected_tools": sorted(t.selected_tools),
         "denied_tools": sorted(t.denied_tools),
+        # [] means "recorded, nothing executed" — distinct from the NULL a
+        # v1/v2 row carries, which means "not recorded". Never conflate them.
+        "tool_results": t.tool_results,
         "latency_ms": round((time.perf_counter() - t.started) * 1000, 3),
     }
 
