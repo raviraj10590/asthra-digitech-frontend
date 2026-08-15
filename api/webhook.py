@@ -2405,7 +2405,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
         # this turn — recorded here rather than inferred later from the absence
         # of an AI call, because absence has several possible causes.
         if BIC_AVAILABLE:
-            bic_decision.mark_deterministic_branch()
+            bic_decision.mark_deterministic_branch(
+                bic_decision.BRANCH_MENU_REQUEST)
         send_welcome_menu(sender)
         save_messages([(sender, "user", user_text),
                        (sender, "assistant", "[ಮೆನು ಮರುಕಳಿಸಲಾಯಿತು]")])
@@ -2414,7 +2415,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
     # ── Off-topic guard: blatant non-business → polite redirect, no AI ──
     if is_off_topic(user_text):
         if BIC_AVAILABLE:
-            bic_decision.mark_deterministic_branch()
+            bic_decision.mark_deterministic_branch(
+                bic_decision.BRANCH_OFF_TOPIC)
         send_text(sender,
             "ಕ್ಷಮಿಸಿ 🙏 ನಾನು Asthra DigiTech ಸೇವೆಗಳ ಬಗ್ಗೆ ಮಾತ್ರ ಸಹಾಯ ಮಾಡಬಲ್ಲೆ.\n"
             "ನಿಮ್ಮ business ಗೆ website, social media, ads ಅಥವಾ design ಬೇಕಾ? "
@@ -2433,6 +2435,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
         # same fact as a rule matching the customer's words.
         if BIC_AVAILABLE:
             bic_decision.mark_deterministic_branch(
+                bic_decision.BRANCH_CHAT_PAUSED,
                 bic_decision.NOT_CONSULTED_CHAT_PAUSED)
         save_message(sender, "user", user_text)  # keep the record
         print(f"⏸️ bot paused for {sender} — staying silent")
@@ -2440,8 +2443,12 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
 
     # ── Brochure request? ─────────────────────────────────────────
     if is_brochure_request(user_text):
+        # Marked BEFORE invoke_tool, deliberately: if policy then denies the
+        # tool, the record carries this branch AND RUNG_2_POLICY — both are
+        # true, and dropping either would misstate what happened.
         if BIC_AVAILABLE:
-            bic_decision.mark_deterministic_branch()
+            bic_decision.mark_deterministic_branch(
+                bic_decision.BRANCH_BROCHURE_REQUEST)
         send_text(sender, "ಖಂಡಿತ! ನಮ್ಮ ಕಂಪನಿ ಪ್ರೊಫೈಲ್ ಇಲ್ಲಿದೆ 🙏")
         # H1: the return value used to be discarded. A policy denial or a failed
         # send produced a customer who was PROMISED a brochure, a transcript
@@ -2467,7 +2474,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
     # ── New contact: greet with services menu ─────────────────────
     elif is_new_contact:
         if BIC_AVAILABLE:
-            bic_decision.mark_deterministic_branch()
+            bic_decision.mark_deterministic_branch(
+                bic_decision.BRANCH_NEW_CONTACT)
         send_welcome_menu(sender)
         save_messages([(sender, "user", user_text),
                        (sender, "assistant", "[ಸ್ವಾಗತ + ಸೇವೆಗಳ ಮೆನು ಕಳಿಸಲಾಯಿತು]")])

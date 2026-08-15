@@ -55,7 +55,7 @@ class DecisiveRung(Base):
     def test_observed_deterministic_branch_yields_rung_3(self):
         d.open_turn()
         d.mark_identity("CLIENT")
-        d.mark_deterministic_branch()
+        d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST)
         self.assertEqual(d.build_record()["decisive_rung"], d.RUNG_3_DETERMINISTIC)
 
     def test_policy_denial_yields_rung_2(self):
@@ -73,7 +73,7 @@ class DecisiveRung(Base):
         """3C §2.1 — the ladder stops at the first decisive rung."""
         d.open_turn()
         d.mark_identity("CLIENT")
-        d.mark_deterministic_branch()
+        d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST)
         d.mark_ai_consulted("openai")
         d.mark_tool_denied("send_brochure")
         self.assertEqual(d.build_record()["decisive_rung"], d.RUNG_2_POLICY)
@@ -83,7 +83,7 @@ class DecisiveRung(Base):
         for marks in (
             lambda: None,
             lambda: d.mark_ai_consulted("openai"),
-            lambda: d.mark_deterministic_branch(),
+            lambda: d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST),
             lambda: d.mark_tool_denied("x"),
             lambda: d.mark_capability_failure(),
         ):
@@ -129,7 +129,7 @@ class Rung3RequiresAWitness(Base):
         settle the turn."""
         d.open_turn()
         d.mark_identity("CLIENT")
-        d.mark_deterministic_branch()
+        d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST)
         d.mark_ai_consulted("gemini")
         self.assertEqual(d.build_record()["decisive_rung"], d.RUNG_5_MODEL_ADVISORY)
 
@@ -206,7 +206,7 @@ class ConsultationIsPositivelyRecorded(Base):
         """3D §4.2 — silence is not an answer. The fields are always present."""
         d.open_turn()
         d.mark_identity("CLIENT")
-        d.mark_deterministic_branch()
+        d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST)
         rec = d.build_record()
         self.assertIn("ai_consulted", rec)
         self.assertIn("ai_consultation_reason", rec)
@@ -217,7 +217,7 @@ class ConsultationIsPositivelyRecorded(Base):
     def test_provider_is_null_when_not_consulted(self):
         d.open_turn()
         d.mark_identity("CLIENT")
-        d.mark_deterministic_branch()
+        d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST)
         self.assertIsNone(d.build_record()["ai_provider"])
 
     def test_all_providers_failed_is_still_consultation(self):
@@ -244,8 +244,8 @@ class ReasonIsStructured(Base):
             lambda: None,
             lambda: d.mark_ai_consulted("openai"),
             lambda: d.mark_ai_all_providers_failed(),
-            lambda: d.mark_deterministic_branch(),
-            lambda: d.mark_deterministic_branch(d.NOT_CONSULTED_CHAT_PAUSED),
+            lambda: d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST),
+            lambda: d.mark_deterministic_branch(d.BRANCH_CHAT_PAUSED, d.NOT_CONSULTED_CHAT_PAUSED),
             lambda: d.mark_tool_denied("x"),
             lambda: d.mark_capability_failure(),
         ):
@@ -256,14 +256,14 @@ class ReasonIsStructured(Base):
     def test_paused_chat_has_its_own_reason(self):
         d.open_turn()
         d.mark_identity("CLIENT")
-        d.mark_deterministic_branch(d.NOT_CONSULTED_CHAT_PAUSED)
+        d.mark_deterministic_branch(d.BRANCH_CHAT_PAUSED, d.NOT_CONSULTED_CHAT_PAUSED)
         self.assertEqual(d.build_record()["ai_consultation_reason"],
                          d.NOT_CONSULTED_CHAT_PAUSED)
 
     def test_denial_reason_beats_branch_reason(self):
         d.open_turn()
         d.mark_identity("CLIENT")
-        d.mark_deterministic_branch()
+        d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST)
         d.mark_tool_denied("send_brochure")
         self.assertEqual(d.build_record()["ai_consultation_reason"],
                          d.NOT_CONSULTED_POLICY_DENIED)
@@ -272,7 +272,7 @@ class ReasonIsStructured(Base):
         seen = set()
         for _ in range(25):
             d.close_turn(); d.open_turn(); d.mark_identity("CLIENT")
-            d.mark_deterministic_branch()
+            d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST)
             seen.add(d.build_record()["ai_consultation_reason"])
         self.assertEqual(len(seen), 1)
 
@@ -315,7 +315,7 @@ class NoPiiEverEntersTheRecord(Base):
         d.mark_identity("CLIENT")
         self.assertEqual(set(d.build_record()), {
             "tenant_id", "schema_version", "turn_id", "brain_version",
-            "route", "role", "identity_degraded", "decisive_rung",
+            "route", "role", "identity_degraded", "decisive_rung", "branch_id",
             "gate_results", "ai_consulted", "ai_consultation_reason",
             "ai_provider", "selected_tools", "denied_tools", "latency_ms",
         })
@@ -401,18 +401,19 @@ class PhaseOneCUnchanged(Base):
 
 class SchemaVersion(Base):
 
-    def test_schema_version_present_and_one(self):
+    def test_schema_version_advanced_to_two(self):
+        """v2 adds branch_id. v1 rows remain readable, carrying NULL."""
         d.open_turn()
         d.mark_identity("CLIENT")
-        self.assertEqual(d.build_record()["schema_version"], 1)
+        self.assertEqual(d.build_record()["schema_version"], 2)
 
     def test_reader_tolerates_unknown_future_keys(self):
         """3D §10.1 — additive evolution; old readers must not break."""
         d.open_turn()
         d.mark_identity("CLIENT")
         rec = d.build_record()
-        rec["some_future_field_v2"] = "x"
-        self.assertEqual(json.loads(json.dumps(rec, default=str))["schema_version"], 1)
+        rec["some_future_field_v3"] = "x"
+        self.assertEqual(json.loads(json.dumps(rec, default=str))["schema_version"], 2)
 
     def test_brain_version_is_always_recorded(self):
         d.open_turn()
@@ -458,7 +459,7 @@ class Lifecycle(Base):
         """Importing the module must never change behaviour on its own."""
         d.close_turn()
         d.mark_ai_consulted("openai")
-        d.mark_deterministic_branch()
+        d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST)
         d.mark_tool_invoked("x")
         self.assertIsNone(d.build_record())
 
@@ -555,10 +556,25 @@ class ProductionWiring(Base):
 MIGRATION = os.path.join(os.path.dirname(__file__), "..", "supabase",
                          "migrations", "20260811000001_bic_decision_records.sql")
 
+# Additive evolution spans several files: the CREATE TABLE plus every later
+# ALTER ... ADD COLUMN. Reading only the first would make a column added in a
+# follow-up migration look absent from the schema.
+import glob as _glob
+_MIGRATION_GLOB = os.path.join(os.path.dirname(__file__), "..", "supabase",
+                               "migrations", "*bic_decision*.sql")
+
 
 def _migration_sql():
     with open(MIGRATION, encoding="utf-8") as fh:
         return fh.read()
+
+
+def _all_decision_sql():
+    out = []
+    for path in sorted(_glob.glob(_MIGRATION_GLOB)):
+        with open(path, encoding="utf-8") as fh:
+            out.append(fh.read())
+    return "\n".join(out)
 
 
 def _declared_columns():
@@ -580,6 +596,10 @@ def _declared_columns():
                      line)
         if m:
             cols.append(m.group(1))
+    # Columns introduced by later additive migrations.
+    for m in re.finditer(r"add column if not exists\s+([a-z_]+)",
+                         _all_decision_sql(), re.I):
+        cols.append(m.group(1))
     return set(cols)
 
 
@@ -594,7 +614,7 @@ class SchemaConformance(Base):
 
     def test_migration_parses_to_the_expected_column_count(self):
         cols = _declared_columns()
-        self.assertEqual(len(cols), 17, f"parsed {sorted(cols)}")
+        self.assertEqual(len(cols), 18, f"parsed {sorted(cols)}")
 
     def test_every_written_field_exists_as_a_column(self):
         d.open_turn()
@@ -617,7 +637,7 @@ class SchemaConformance(Base):
         for marks in (
             lambda: None,
             lambda: d.mark_ai_consulted("openai"),
-            lambda: d.mark_deterministic_branch(),
+            lambda: d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST),
             lambda: d.mark_tool_denied("x"),
         ):
             d.close_turn(); d.open_turn(); d.mark_identity("CLIENT")
@@ -650,7 +670,7 @@ class SchemaConformance(Base):
     def test_provider_consistency_constraint_is_never_violated(self):
         """CHECK (ai_consulted = true or ai_provider is null)."""
         d.close_turn(); d.open_turn(); d.mark_identity("CLIENT")
-        d.mark_deterministic_branch()
+        d.mark_deterministic_branch(d.BRANCH_MENU_REQUEST)
         rec = d.build_record()
         self.assertFalse(rec["ai_consulted"])
         self.assertIsNone(rec["ai_provider"])

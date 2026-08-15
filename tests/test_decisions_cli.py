@@ -90,13 +90,22 @@ class CannotPrintCustomerData(unittest.TestCase):
 
     def test_allowlist_matches_the_committed_schema(self):
         """If a column is added to the table, this test forces a decision
-        about whether the diagnostic may print it."""
-        path = os.path.join(os.path.dirname(__file__), "..", "supabase",
-                            "migrations", "20260811000001_bic_decision_records.sql")
-        with open(path, encoding="utf-8") as fh:
-            sql = fh.read().lower()
+        about whether the diagnostic may print it.
+
+        Reads EVERY decision migration, not just the first: additive evolution
+        means a column can arrive in a later file, and checking only the
+        CREATE TABLE would report a real column as missing.
+        """
+        import glob
+        pattern = os.path.join(os.path.dirname(__file__), "..", "supabase",
+                               "migrations", "*bic_decision*.sql")
+        sql = ""
+        for path in sorted(glob.glob(pattern)):
+            with open(path, encoding="utf-8") as fh:
+                sql += fh.read().lower()
+        self.assertTrue(sql, "no decision migrations found")
         for col in cli.COLUMNS:
-            self.assertIn(col, sql, f"{col} is not in the migration")
+            self.assertIn(col, sql, f"{col} is not in any migration")
 
     def test_rendered_output_contains_no_unexpected_field(self):
         out = cli.render_table(ROWS)

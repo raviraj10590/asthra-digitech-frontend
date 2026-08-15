@@ -41,7 +41,7 @@ TABLE = "bic_decision_records"
 # Explicit allowlist. Never `select=*` — see the module docstring.
 COLUMNS = (
     "decided_at", "turn_id", "brain_version", "route", "role",
-    "identity_degraded", "decisive_rung", "ai_consulted",
+    "identity_degraded", "decisive_rung", "branch_id", "ai_consulted",
     "ai_consultation_reason", "ai_provider", "selected_tools",
     "denied_tools", "latency_ms", "schema_version", "gate_results",
 )
@@ -63,7 +63,7 @@ _RUNG_SHORT = {
 def build_params(limit: int = 20, since: Optional[str] = None,
                  until: Optional[str] = None, rung: Optional[str] = None,
                  ai: Optional[bool] = None, route: Optional[str] = None,
-                 role: Optional[str] = None) -> dict:
+                 role: Optional[str] = None, branch: Optional[str] = None) -> dict:
     """PostgREST query parameters. Pure — no I/O, so it is testable offline."""
     params = {
         "select": ",".join(COLUMNS),
@@ -80,6 +80,8 @@ def build_params(limit: int = 20, since: Optional[str] = None,
         )
     if rung is not None:
         params["decisive_rung"] = f"eq.{rung}"
+    if branch is not None:
+        params["branch_id"] = f"eq.{branch}"
     if ai is not None:
         params["ai_consulted"] = f"is.{str(ai).lower()}"
     if route is not None:
@@ -127,6 +129,14 @@ def rung_summary(rows: list) -> list:
     return counts.most_common()
 
 
+def branch_summary(rows: list) -> list:
+    """(branch_id, count). `<none>` covers both the AI path and pre-v2 rows —
+    the CLI cannot distinguish them, and pretending otherwise would invent a
+    fact the record does not carry."""
+    counts = Counter(r.get("branch_id") or "<none>" for r in rows)
+    return counts.most_common()
+
+
 # ── Rendering (pure) ───────────────────────────────────────────────────────
 
 def _fmt_time(value: str) -> str:
@@ -148,15 +158,18 @@ def _fmt_list(value) -> str:
 def render_table(rows: list) -> str:
     if not rows:
         return "no decision records matched"
-    head = (f"{'when':<15} {'rung':<10} {'ai':<4} {'provider':<9} "
-            f"{'tools':<16} {'denied':<10} {'ms':>8}")
+    head = (f"{'when':<15} {'rung':<10} {'branch':<17} {'ai':<4} "
+            f"{'provider':<9} {'tools':<16} {'denied':<10} {'ms':>8}")
     lines = [head, "-" * len(head)]
     for r in rows:
         rung = _RUNG_SHORT.get(r.get("decisive_rung"), r.get("decisive_rung") or "?")
         latency = r.get("latency_ms")
+        # `-` covers both "no branch fired" (the AI path) and a schema_version 1
+        # row written before this column existed. Both are legitimately absent.
         lines.append(
             f"{_fmt_time(r.get('decided_at')):<15} "
             f"{rung:<10} "
+            f"{(r.get('branch_id') or '-'):<17} "
             f"{('yes' if r.get('ai_consulted') else 'no'):<4} "
             f"{(r.get('ai_provider') or '-'):<9} "
             f"{_fmt_list(r.get('selected_tools')):<16} "
@@ -187,6 +200,8 @@ def render_summary(rows: list) -> str:
     out += [f"  {name:<12} {n:>5}" for name, n in provider_summary(rows)]
     out += ["", "by decisive rung:"]
     out += [f"  {name:<24} {n:>5}" for name, n in rung_summary(rows)]
+    out += ["", "by deterministic branch:"]
+    out += [f"  {name:<24} {n:>5}" for name, n in branch_summary(rows)]
     return "\n".join(out)
 
 
@@ -214,6 +229,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--since", help="ISO timestamp, e.g. 2026-08-15T05:00:00Z")
     p.add_argument("--until", help="ISO timestamp")
     p.add_argument("--rung", help="e.g. RUNG_5_MODEL_ADVISORY")
+    p.add_argument("--branch", help="e.g. MENU_REQUEST, BROCHURE_REQUEST")
     p.add_argument("--ai", help="true | false")
     p.add_argument("--route", help="client | owner")
     p.add_argument("--role", help="CLIENT | STAFF | MANAGER | OWNER")
@@ -235,7 +251,8 @@ def main(argv=None) -> int:
         return 1
 
     params = build_params(limit=args.limit, since=args.since, until=args.until,
-                          rung=args.rung, ai=ai, route=args.route, role=args.role)
+                          rung=args.rung, ai=ai, route=args.route,
+                          role=args.role, branch=args.branch)
     try:
         rows = fetch(params)
     except DbError as e:
@@ -251,7 +268,8 @@ def main(argv=None) -> int:
     elif args.providers:
         print(json.dumps({"scanned": len(rows),
                           "providers": provider_summary(rows),
-                          "rungs": rung_summary(rows)}, indent=2)
+                          "rungs": rung_summary(rows),
+                          "branches": branch_summary(rows)}, indent=2)
               if args.json else render_summary(rows))
     else:
         print(render_json(rows) if args.json else render_table(rows))

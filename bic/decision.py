@@ -65,6 +65,21 @@ NOT_EVALUATED = "NOT_EVALUATED"
 EMITTABLE_RUNGS = (RUNG_2_POLICY, RUNG_3_DETERMINISTIC,
                    RUNG_5_MODEL_ADVISORY, NOT_EVALUATED)
 
+# Deterministic branch identifiers (IDD-3D §4.4). CLOSED SET.
+#
+# Each names the RULE that fired, never the message that triggered it — a
+# branch id is a property of the code path, so no customer input can reach it.
+# These are the five branches that exist in run_client_pipeline today; adding
+# one means adding it here AND in a migration, deliberately.
+BRANCH_MENU_REQUEST = "MENU_REQUEST"
+BRANCH_OFF_TOPIC = "OFF_TOPIC"
+BRANCH_CHAT_PAUSED = "CHAT_PAUSED"
+BRANCH_BROCHURE_REQUEST = "BROCHURE_REQUEST"
+BRANCH_NEW_CONTACT = "NEW_CONTACT"
+
+BRANCH_IDS = (BRANCH_MENU_REQUEST, BRANCH_OFF_TOPIC, BRANCH_CHAT_PAUSED,
+              BRANCH_BROCHURE_REQUEST, BRANCH_NEW_CONTACT)
+
 CONSULTED_RESPONSE_GENERATION = "CONSULTED_RESPONSE_GENERATION"
 CONSULTED_ALL_PROVIDERS_FAILED = "CONSULTED_ALL_PROVIDERS_FAILED"
 NOT_CONSULTED_DETERMINISTIC_BRANCH = "NOT_CONSULTED_DETERMINISTIC_BRANCH"
@@ -90,7 +105,11 @@ GATES_WITHOUT_BACKING = ("policy", "sufficiency", "goal_alignment",
                          "budget", "consequence")
 
 TABLE = "bic_decision_records"
-SCHEMA_VERSION = 1
+
+# v2 adds branch_id. Additive only: rows written at v1 remain readable exactly
+# as they are, carrying NULL in the new column (3D §10.1 — every historical
+# schema version must stay readable, forever).
+SCHEMA_VERSION = 2
 
 # 3D §3.2 — the referenced-artifact manifest. Vercel injects the commit SHA at
 # build time, which makes it immutable per deploy and free. Everything else the
@@ -106,8 +125,8 @@ class _Turn:
 
     __slots__ = ("turn_id", "started", "route", "role", "identity_degraded",
                  "ai_consulted", "ai_provider", "all_providers_failed",
-                 "deterministic_reason", "selected_tools", "denied_tools",
-                 "capability_failed", "closed")
+                 "deterministic_reason", "branch_id", "selected_tools",
+                 "denied_tools", "capability_failed", "closed")
 
     def __init__(self) -> None:
         self.turn_id = str(uuid.uuid4())
@@ -119,6 +138,7 @@ class _Turn:
         self.ai_provider: Optional[str] = None
         self.all_providers_failed = False
         self.deterministic_reason: Optional[str] = None
+        self.branch_id: Optional[str] = None
         self.selected_tools: list = []
         self.denied_tools: list = []
         self.capability_failed = False
@@ -184,19 +204,35 @@ def mark_ai_all_providers_failed() -> None:
         t.all_providers_failed = True
 
 
-def mark_deterministic_branch(reason: str = NOT_CONSULTED_DETERMINISTIC_BRANCH) -> None:
-    """A deterministic branch SETTLED this turn and returned without consulting
-    a model.
+def mark_deterministic_branch(branch_id: str,
+                              reason: str = NOT_CONSULTED_DETERMINISTIC_BRANCH) -> None:
+    """A deterministic branch SETTLED this turn without consulting a model.
 
     This is the ONLY way RUNG_3_DETERMINISTIC can be emitted. It is never
     inferred from `ai_consulted is False`, because "no model ran" is also true
     when a model was unavailable, when the turn errored, and when nothing
     happened at all. Rung 3 is a claim that a rule decided — and a claim needs
     a witness.
+
+    `branch_id` says WHICH rule, and is REQUIRED — no default. A default would
+    let a branch added later record NULL silently, which is the exact failure
+    this field exists to remove.
+
+    An unrecognised id is DISCARDED (recorded as absent) and logged, not
+    stored. That makes it structurally impossible for arbitrary text — and so
+    for customer data — to reach the column: the only writable values are the
+    five constants above.
     """
     t = current()
-    if t:
-        t.deterministic_reason = reason
+    if not t:
+        return
+    t.deterministic_reason = reason
+    if branch_id in BRANCH_IDS:
+        t.branch_id = branch_id
+    else:
+        # Loud, because a silent None here would look like "no branch fired"
+        # — indistinguishable from the AI path, which is a different fact.
+        print(f"DECISION_RECORD unknown branch_id {branch_id!r} — not recorded")
 
 
 def mark_tool_invoked(code: str) -> None:
@@ -301,6 +337,10 @@ def build_record() -> Optional[dict]:
         "role": t.role or "UNKNOWN",
         "identity_degraded": t.identity_degraded,
         "decisive_rung": _derive_rung(t),
+        # Independent of the rung. A branch that fired and was then overruled
+        # by a policy denial is recorded here AND as RUNG_2_POLICY, because
+        # both happened; forcing NULL would delete an observed fact.
+        "branch_id": t.branch_id,
         "gate_results": _derive_gates(t),
         "ai_consulted": t.ai_consulted,
         "ai_consultation_reason": _derive_consultation_reason(t),
