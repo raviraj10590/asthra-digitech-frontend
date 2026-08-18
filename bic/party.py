@@ -63,6 +63,16 @@ class PartyError(RuntimeError):
     """A 2B/2D rule was violated. Never a database failure."""
 
 
+class DisputedIdentityError(PartyError):
+    """The identifier resolves to a DISPUTED party (IDD-2D §3.8).
+
+    A subclass of PartyError so existing best-effort callers keep catching it,
+    but a distinct type so a future review queue can single it out. DISPUTED
+    is "surfaced, never auto-resolved" — returning the party anyway would
+    attach new facts to a contested identity, silently.
+    """
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -112,22 +122,39 @@ def lookup(tenant_id: str, knowledge_id: str) -> Optional[dict]:
 
 # ── Identifiers (2D §3.2) ──────────────────────────────────────────────────
 
-def find_by_identifier(tenant_id: str, channel: str,
-                       identifier_value: str) -> Optional[str]:
+def find_by_identifier(tenant_id: str, channel: str, identifier_value: str,
+                       identifier_class: str = CONTACT) -> Optional[str]:
     """Exact match on a LIVE binding → knowledge_id, or None.
+
+    SCOPED BY CLASS, NOT BY TRANSPORT (D15, IDD-2D §3.2-3.3). A phone is the
+    same identity whether it arrived by WhatsApp or SMS, so `channel` is NOT
+    part of the key for CONTACT or SOVEREIGN. It remains part of the key for
+    CONTROLLED, which is unique only within its issuing system — Tally
+    customer 12345 and CRM customer 12345 are different people.
 
     Exact match only. No normalisation beyond the caller's, no fuzzy matching,
     no scoring — those are 2D §3.5 and are not implemented. Expired bindings
     are excluded: a recycled number must not resolve to its previous holder.
     """
-    rows = select(IDENTIFIERS_TABLE, {
+    rows = select(IDENTIFIERS_TABLE,
+                  dict(_identity_key(tenant_id, channel, identifier_value,
+                                     identifier_class), limit="1"),
+                  timeout=5)
+    return rows[0]["party_id"] if rows else None
+
+
+def _identity_key(tenant_id: str, channel: str, identifier_value: str,
+                  identifier_class: str) -> dict:
+    """The lookup key, mirroring the two partial unique indexes in SQL."""
+    key = {
         "tenant_id": f"eq.{tenant_id}",
-        "channel": f"eq.{channel}",
+        "identifier_class": f"eq.{identifier_class}",
         "identifier_value": f"eq.{identifier_value}",
         "valid_until": "is.null",
-        "limit": "1",
-    }, timeout=5)
-    return rows[0]["party_id"] if rows else None
+    }
+    if identifier_class == CONTROLLED:
+        key["channel"] = f"eq.{channel}"
+    return key
 
 
 def bind_identifier(tenant_id: str, party_id: str, channel: str,
@@ -157,18 +184,78 @@ def bind_identifier(tenant_id: str, party_id: str, channel: str,
 
 
 def expire_identifier(tenant_id: str, channel: str, identifier_value: str,
-                      when=None) -> None:
+                      when=None, identifier_class: str = CONTACT) -> None:
     """End a binding (2D R3). The row is kept — history is not rewritten.
 
     Numbers change hands. Expiring rather than deleting means a claim asserted
     while the binding was live stays explicable years later.
+
+    Keyed identically to find_by_identifier (D15): if lookup is class-scoped
+    but expiry stayed channel-scoped, a binding created via WhatsApp could not
+    be ended by a caller that only knew the number — it would keep resolving
+    while appearing to have been expired.
     """
-    update(IDENTIFIERS_TABLE, {
-        "tenant_id": f"eq.{tenant_id}",
-        "channel": f"eq.{channel}",
-        "identifier_value": f"eq.{identifier_value}",
-        "valid_until": "is.null",
-    }, {"valid_until": _iso(when or _now())}, timeout=5)
+    update(IDENTIFIERS_TABLE,
+           _identity_key(tenant_id, channel, identifier_value, identifier_class),
+           {"valid_until": _iso(when or _now())}, timeout=5)
+
+
+# ── Resolution-state gate (D14) ────────────────────────────────────────────
+
+# A merge chain longer than this is corrupt data, not deep history.
+_MAX_MERGE_DEPTH = 16
+
+
+def resolve_survivor(tenant_id: str, knowledge_id: str) -> str:
+    """Follow merged_into to the party that is actually usable today.
+
+    IDD-2D §6.1 point 5: "Both knowledge_ids remain valid forever; the
+    absorbed one resolves to the survivor." Claims are never rewritten to
+    point at the survivor — that is exactly what keeps a merge reversible
+    (§6.2) — so the redirection has to happen HERE, on every read.
+
+    This does NOT merge anything. It only honours a merge that some future,
+    human-approved 2D operation recorded. Today nothing can set MERGED, so in
+    practice this returns its argument unchanged.
+
+    Raises rather than guessing when the data is unusable:
+      • DISPUTED        §3.8 — surfaced, never auto-resolved
+      • MERGED, no ptr  the D13 orphan; the DB constraint forbids it, but a
+                        resolver that trusts a constraint blindly hands its
+                        caller a None it never checked
+      • cycle           corrupt; hanging forever is worse than failing loudly
+    """
+    seen = []
+    current = knowledge_id
+    for _ in range(_MAX_MERGE_DEPTH):
+        if current in seen:
+            raise PartyError(
+                f"merge cycle detected in party chain {seen + [current]} — "
+                f"refusing to resolve corrupt identity")
+        seen.append(current)
+
+        row = lookup(tenant_id, current)
+        if row is None:
+            raise PartyError(f"party {current} not found while resolving identity")
+
+        state = row.get("resolution_state")
+        if state == DISPUTED:
+            raise DisputedIdentityError(
+                f"party {current} is DISPUTED — contradicting identity evidence "
+                f"must be resolved by a human before new facts attach (2D §3.8)")
+        if state != MERGED:
+            return current
+
+        survivor = row.get("merged_into")
+        if not survivor:
+            raise PartyError(
+                f"party {current} is MERGED but names no survivor — orphaned "
+                f"identity (D13); claims pointing here cannot be redirected")
+        current = survivor
+
+    raise PartyError(
+        f"merge chain from {knowledge_id} exceeded {_MAX_MERGE_DEPTH} hops — "
+        f"refusing to resolve")
 
 
 # ── The one function the production path calls ─────────────────────────────
@@ -190,7 +277,11 @@ def resolve_or_create(tenant_id: str, channel: str, identifier_value: str,
     tenant = tenant_id or config.DEFAULT_TENANT_ID
     existing = find_by_identifier(tenant, channel, identifier_value)
     if existing:
-        return existing
+        # D14: an identifier binding is not automatically a usable identity.
+        # A MERGED party must redirect to its survivor and a DISPUTED one must
+        # not resolve at all — otherwise new facts attach to a dead or
+        # contested identity, silently.
+        return resolve_survivor(tenant, existing)
 
     party = create(tenant, kind=kind, resolution_state=PROVISIONAL)
     knowledge_id = party["knowledge_id"]
