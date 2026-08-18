@@ -1,0 +1,208 @@
+"""Party — the knowledge_id foundation (IDD-2B, with IDD-2D §3.2 identifiers).
+
+WHAT THIS MODULE IS FOR
+-----------------------
+bic_claims.subject must be a real knowledge_id. This is the smallest thing
+that legitimately provides one.
+
+A knowledge_id is MEANINGLESS and PERMANENT (2B V3). It is not derived from a
+phone, an email, a name or a CRM row id — anything derived from an attribute
+breaks when that attribute changes, and breaks silently. The database
+generates it; nothing here computes it.
+
+WHERE THE PII IS
+----------------
+Exactly one place: `bic_party_identifiers.identifier_value`. Claims carry the
+opaque knowledge_id, so the whole fact store is queryable without touching a
+phone number. That separation is the entire practical payoff of a meaningless
+identity, and this module is the only thing that crosses it.
+
+WHAT THIS MODULE DELIBERATELY DOES NOT DO (2D)
+----------------------------------------------
+No merge. No merge reversal. No match scoring. No corroborating signals. No
+DISPUTED resolution. No cross-class normalisation. There is no merge function
+below, and its ABSENCE is the guarantee that 2D has not leaked in early.
+
+    R1  a phone NEVER auto-merges two parties, at any confidence
+    R2  a party created from a phone alone starts PROVISIONAL, never RESOLVED
+    R3  a binding carries valid_from/valid_until — numbers change hands
+
+R1 is not a rule this module enforces so much as one it CANNOT break: exact
+match or create, and nothing in between.
+"""
+
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+
+from . import config
+from .db import DbError, insert, select, update
+
+PARTIES_TABLE = "bic_parties"
+IDENTIFIERS_TABLE = "bic_party_identifiers"
+
+# 2B §2.2 — assigned once, never changed.
+PERSON, ORGANIZATION = "PERSON", "ORGANIZATION"
+KINDS = (PERSON, ORGANIZATION)
+
+# 2D §2.1 lifecycle.
+UNRESOLVED, PROVISIONAL, RESOLVED, DISPUTED, MERGED = (
+    "UNRESOLVED", "PROVISIONAL", "RESOLVED", "DISPUTED", "MERGED")
+RESOLUTION_STATES = (UNRESOLVED, PROVISIONAL, RESOLVED, DISPUTED, MERGED)
+
+# 2D §3.2 — "not all identifiers are equal, and treating them equally is the
+# single most common cause of false merges."
+SOVEREIGN, CONTROLLED, CONTACT, NOMINAL = (
+    "SOVEREIGN", "CONTROLLED", "CONTACT", "NOMINAL")
+IDENTIFIER_CLASSES = (SOVEREIGN, CONTROLLED, CONTACT, NOMINAL)
+
+WHATSAPP = "whatsapp"
+
+
+class PartyError(RuntimeError):
+    """A 2B/2D rule was violated. Never a database failure."""
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt) -> str:
+    return dt.isoformat() if isinstance(dt, datetime) else dt
+
+
+# ── Creation ───────────────────────────────────────────────────────────────
+
+def create(tenant_id: str, kind: str = PERSON,
+           resolution_state: str = PROVISIONAL) -> dict:
+    """Create a party with a random, meaningless knowledge_id.
+
+    `uuid4()` — random, carrying nothing. 2B V3 requires the id to be
+    meaningless and permanent, which is a property of the VALUE, not of where
+    it was generated; bic/claims.py mints claim_id the same way. The column
+    keeps its `gen_random_uuid()` default as a backstop for any other writer.
+
+    What matters is what it is NOT derived from: no phone, no hash of one, no
+    email, no CRM row id, no name. Anything derived from an attribute breaks
+    when that attribute changes, and breaks silently.
+    """
+    if kind not in KINDS:
+        raise PartyError(f"kind must be one of {KINDS}, got {kind!r}")
+    if resolution_state not in RESOLUTION_STATES:
+        raise PartyError(f"unknown resolution_state {resolution_state!r}")
+
+    row = {
+        "knowledge_id": str(uuid.uuid4()),
+        "tenant_id": tenant_id or config.DEFAULT_TENANT_ID,
+        "kind": kind,
+        "resolution_state": resolution_state,
+    }
+    insert(PARTIES_TABLE, row, timeout=5)
+    return row
+
+
+def lookup(tenant_id: str, knowledge_id: str) -> Optional[dict]:
+    rows = select(PARTIES_TABLE, {
+        "tenant_id": f"eq.{tenant_id}",
+        "knowledge_id": f"eq.{knowledge_id}",
+        "limit": "1",
+    }, timeout=5)
+    return rows[0] if rows else None
+
+
+# ── Identifiers (2D §3.2) ──────────────────────────────────────────────────
+
+def find_by_identifier(tenant_id: str, channel: str,
+                       identifier_value: str) -> Optional[str]:
+    """Exact match on a LIVE binding → knowledge_id, or None.
+
+    Exact match only. No normalisation beyond the caller's, no fuzzy matching,
+    no scoring — those are 2D §3.5 and are not implemented. Expired bindings
+    are excluded: a recycled number must not resolve to its previous holder.
+    """
+    rows = select(IDENTIFIERS_TABLE, {
+        "tenant_id": f"eq.{tenant_id}",
+        "channel": f"eq.{channel}",
+        "identifier_value": f"eq.{identifier_value}",
+        "valid_until": "is.null",
+        "limit": "1",
+    }, timeout=5)
+    return rows[0]["party_id"] if rows else None
+
+
+def bind_identifier(tenant_id: str, party_id: str, channel: str,
+                    identifier_value: str,
+                    identifier_class: str = CONTACT) -> dict:
+    """Bind a channel identifier to a party.
+
+    CONTACT by default because that is what a phone number is (2D §3.3): no
+    uniqueness, recycled after disconnection, routinely shared. Recording the
+    class explicitly means a future resolver can never mistake it for a
+    sovereign identifier and auto-merge on it.
+    """
+    if identifier_class not in IDENTIFIER_CLASSES:
+        raise PartyError(f"unknown identifier_class {identifier_class!r}")
+    if not identifier_value:
+        raise PartyError("identifier_value is required")
+
+    row = {
+        "tenant_id": tenant_id or config.DEFAULT_TENANT_ID,
+        "party_id": party_id,
+        "identifier_class": identifier_class,
+        "channel": channel,
+        "identifier_value": identifier_value,
+    }
+    insert(IDENTIFIERS_TABLE, row, timeout=5)
+    return row
+
+
+def expire_identifier(tenant_id: str, channel: str, identifier_value: str,
+                      when=None) -> None:
+    """End a binding (2D R3). The row is kept — history is not rewritten.
+
+    Numbers change hands. Expiring rather than deleting means a claim asserted
+    while the binding was live stays explicable years later.
+    """
+    update(IDENTIFIERS_TABLE, {
+        "tenant_id": f"eq.{tenant_id}",
+        "channel": f"eq.{channel}",
+        "identifier_value": f"eq.{identifier_value}",
+        "valid_until": "is.null",
+    }, {"valid_until": _iso(when or _now())}, timeout=5)
+
+
+# ── The one function the production path calls ─────────────────────────────
+
+def resolve_or_create(tenant_id: str, channel: str, identifier_value: str,
+                      kind: str = PERSON) -> str:
+    """Exact match, or create a PROVISIONAL party. Returns a knowledge_id.
+
+    PROVISIONAL is not a placeholder to be upgraded later by this module —
+    2D R2 says a party known only by a phone number IS provisional, and only
+    corroborating evidence (which 2D, not this slice, evaluates) can change
+    that. Nothing here ever writes RESOLVED.
+
+    PERSON is the right kind for a WhatsApp sender rather than a fudge around
+    a frozen field: a sender is a human holding a handset. If they represent a
+    firm, that firm is a SEPARATE Organization party linked by a role later —
+    which is exactly why 2B allows a party any number of roles.
+    """
+    tenant = tenant_id or config.DEFAULT_TENANT_ID
+    existing = find_by_identifier(tenant, channel, identifier_value)
+    if existing:
+        return existing
+
+    party = create(tenant, kind=kind, resolution_state=PROVISIONAL)
+    knowledge_id = party["knowledge_id"]
+    try:
+        bind_identifier(tenant, knowledge_id, channel, identifier_value,
+                        identifier_class=CONTACT)
+    except DbError:
+        # A concurrent turn won the unique index. Re-read rather than retry:
+        # the other writer's party is as valid as ours, and creating a second
+        # one would be the auto-merge R1 forbids, arrived at by accident.
+        winner = find_by_identifier(tenant, channel, identifier_value)
+        if winner:
+            return winner
+        raise
+    return knowledge_id

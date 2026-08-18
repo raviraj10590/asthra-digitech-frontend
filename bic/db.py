@@ -89,3 +89,41 @@ def insert(table: str, rows, timeout: Optional[float] = None) -> None:
         raise DbError(f"{table} insert failed: {e}") from e
     if not r.ok:
         raise DbError(f"{table} insert {r.status_code}: {r.text[:200]}")
+
+
+def update(table: str, params: dict, patch: dict,
+           timeout: Optional[float] = None) -> None:
+    """PATCH rows matching `params`. Raises DbError on failure.
+
+    ⚠️ NARROW BY DESIGN. Added for ONE case: the semantic registry's
+    DRAFT → ACTIVE lifecycle transition (IDD-2A §5.2), which is a legitimate
+    state change on a concept whose *meaning* stays frozen thereafter.
+
+    IT MUST NOT BE USED ON APPEND-ONLY TABLES. `bic_claims`,
+    `bic_claim_retractions` and `bic_decision_records` are immutable by design
+    — corrections are new rows, errors are retractions. Two defences keep that
+    true rather than aspirational:
+
+      1. those modules import `insert`/`select` BY NAME, so `update` never
+         enters their namespace (tests assert `hasattr(...) is False`)
+      2. database triggers reject UPDATE and DELETE on those tables outright,
+         so even a direct console session cannot mutate them
+
+    Defence 2 is the one that matters: an import rule protects against
+    accident, a trigger protects against intent.
+    """
+    if not config.is_configured():
+        raise DbError("BIC not configured: SUPABASE_SERVICE_ROLE_KEY is missing")
+    _count()
+    try:
+        r = requests.patch(
+            f"{config.SUPABASE_URL}/rest/v1/{table}",
+            headers=_headers("return=minimal"),
+            params=params,
+            json=patch,
+            timeout=timeout or config.DB_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        raise DbError(f"{table} update failed: {e}") from e
+    if not r.ok:
+        raise DbError(f"{table} update {r.status_code}: {r.text[:200]}")

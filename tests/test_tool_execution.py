@@ -610,17 +610,23 @@ class EmptyOnlyForObservedTurns(Base):
             self.assertIsNotNone(d.build_record()["tool_results"])
 
 
-class SchemaParserHandlesThreeMigrations(Base):
+class SchemaParserHandlesDecisionMigrations(Base):
 
-    def test_all_three_decision_migrations_are_discovered(self):
+    def test_decision_migrations_are_exactly_the_expected_set(self):
+        """Pinned by NAME, not by count: a decision migration appearing here
+        unannounced is the thing worth catching, and an additive one (the
+        2026-08-16 append-only trigger) is recorded deliberately rather than
+        by bumping a number."""
         import glob
         pattern = os.path.join(os.path.dirname(__file__), "..", "supabase",
                                "migrations", "*bic_decision*.sql")
         names = sorted(os.path.basename(p) for p in glob.glob(pattern))
-        self.assertEqual(len(names), 3, names)
-        self.assertTrue(names[0].endswith("bic_decision_records.sql"))
-        self.assertTrue(names[1].endswith("bic_decision_branch_id.sql"))
-        self.assertTrue(names[2].endswith("bic_decision_tool_results.sql"))
+        self.assertEqual(names, [
+            "20260811000001_bic_decision_records.sql",
+            "20260815000001_bic_decision_branch_id.sql",
+            "20260815000002_bic_decision_tool_results.sql",
+            "20260816000005_bic_decision_records_append_only.sql",
+        ])
 
     def test_cli_allowlist_resolves_across_all_three(self):
         import glob

@@ -47,9 +47,10 @@ from urllib.parse import parse_qs, urlparse
 # api/, and `bic/` is a sibling of it, not a child.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
-    from bic import (brain as bic_brain, config as bic_config,
-                     contract as bic_contract, db as bic_db,
-                     decision as bic_decision, identity as bic_identity,
+    from bic import (brain as bic_brain, claims as bic_claims,
+                     config as bic_config, contract as bic_contract,
+                     db as bic_db, decision as bic_decision,
+                     identity as bic_identity, party as bic_party,
                      policy as bic_policy, replay as bic_replay,
                      tools as bic_tools)
     from adapters import whatsapp as wa_adapter
@@ -1506,13 +1507,82 @@ def handle_button_reply(to: str, btn_id: str, btn_title: str):
         reply = generate_reply(to, btn_title)
         send_text(to, reply)
 
-def handle_list_reply(to: str, row_id: str, row_title: str):
+# The rows that name a real service. `svc_other` is deliberately absent: it
+# means "no service determined yet", which is an ABSENCE, and an absence is
+# never recorded as a value. Anything not in this set was not a service
+# selection at all.
+CLAIMABLE_SERVICE_ROWS = frozenset(SERVICE_MENU_REPLIES) - {"svc_other"}
+
+# The first predicate to reach production. Registered as DATA by
+# 20260816000006_bic_seed_service_interest.sql — no Python enum mirrors it.
+SERVICE_INTEREST_PREDICATE = "core.party.declared_service_interest@1"
+
+
+def _safe_row_id(row_id: str) -> str:
+    """Log-safe rendering of an unrecognised row id.
+
+    The payload is HMAC-verified, so this is not an injection boundary — but a
+    row id we do not recognise is by definition not something we authored, and
+    logging unrecognised bytes verbatim is how log-injection and accidental
+    PII disclosure both start.
+    """
+    return row_id if re.fullmatch(r"[a-z0-9_]{1,32}", row_id or "") else "<malformed>"
+
+
+def record_service_interest(sender: str, service: str, message_id=None) -> None:
+    """Write the first real ValueClaim (2C) about a real knowledge_id (2B).
+
+    ENTIRELY BEST-EFFORT. A knowledge store that can break lead capture or a
+    customer reply is worse than no knowledge store: the lead is the revenue,
+    the claim is the analysis. Every failure below is swallowed after logging.
+
+    PROVENANCE — tier 5, confidence 0.50, at the cap and never above it.
+    IDD-2C §6 maps WhatsApp to "extraction is tier 4; what the customer claims
+    is tier 5". A menu tap is the customer's own declaration about themselves.
+    The capture is perfectly deterministic — a dict lookup over a list we
+    authored — which justifies sitting AT the tier ceiling rather than below
+    it; Article II.6 forbids going above it, however clean the capture.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return
+    try:
+        # 2B: the phone crosses into bic_party_identifiers here and nowhere
+        # else. What comes back is a meaningless knowledge_id.
+        knowledge_id = bic_party.resolve_or_create(
+            bic_config.DEFAULT_TENANT_ID, bic_party.WHATSAPP, sender)
+        # 2C: the registry validates the predicate and the value before this
+        # commits — an unregistered predicate or an off-menu value raises.
+        bic_claims.assert_claim(
+            bic_config.DEFAULT_TENANT_ID, knowledge_id,
+            SERVICE_INTEREST_PREDICATE, service,
+            source="whatsapp", provenance_tier=5,
+            asserted_by="whatsapp:menu_selection",
+            confidence=0.50,
+            source_ref=f"wa_msg:{message_id}" if message_id else None,
+        )
+    except Exception as e:
+        # TYPE ONLY, never str(e). DbError embeds the response body, and a
+        # unique-violation on bic_party_identifiers echoes the identifier —
+        # which is the customer's phone number. The class name says what
+        # broke; the phone number is not diagnostic information.
+        print(f"CLAIM_WRITE_FAILED predicate={SERVICE_INTEREST_PREDICATE} "
+              f"reason={type(e).__name__}")
+
+
+def handle_list_reply(to: str, row_id: str, row_title: str, message_id=None):
     """Respond to welcome-menu service selection + capture as lead."""
     service, reply = SERVICE_MENU_REPLIES.get(row_id, SERVICE_MENU_REPLIES["svc_other"])
     send_text(to, reply)
     save_messages([(to, "user", f"[ಆಯ್ಕೆ: {row_title}]"), (to, "assistant", reply)])
-    if row_id != "svc_other":
+    # D11 — an UNRECOGNISED row id used to fall through to the svc_other entry
+    # and capture the literal service "Other", inventing a lead attribute
+    # nobody selected. The reply still goes out (customer UX is unchanged);
+    # only the CAPTURE is now gated on a row we actually authored.
+    if row_id in CLAIMABLE_SERVICE_ROWS:
         upsert_lead(to, {"service_needed": service})
+        record_service_interest(to, service, message_id)
+    elif row_id not in SERVICE_MENU_REPLIES:
+        print(f"MENU_UNKNOWN_ROW row_id={_safe_row_id(row_id)} — no capture")
     if row_id in ("svc_election", "svc_govt"):
         notify_owner(f"🗳️ HOT: wa.me/{to} selected *{service}* from the menu — follow up personally!")
 
@@ -1557,6 +1627,53 @@ def tool_leads(sender: str, timeout: float = 5, **_) -> str:
     if not today_rows:
         lines.append("No leads captured today yet.")
     return "\n".join(lines)
+
+def tool_service_interest(sender: str, timeout: float = 5, **_) -> str:
+    """The 2C read path — proves a written claim is actually usable.
+
+    Reads the caller's OWN declared service interest through the full 2B→2C
+    path: resolve the knowledge_id from the channel identifier, then derive
+    current truth at read time. Status is COMPUTED here, never stored (2C C1),
+    which is why an expired or superseded claim reports honestly instead of
+    reporting whatever a stale column last said.
+
+    NO PHONE NUMBER IS EVER DISPLAYED. The knowledge_id is meaningless by
+    design and safe to show; the identifier that resolved it is not.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return "⚠️ BIC isn't configured yet."
+    try:
+        knowledge_id = bic_party.find_by_identifier(
+            bic_config.DEFAULT_TENANT_ID, bic_party.WHATSAPP, sender)
+        if not knowledge_id:
+            return "No party record yet — tap a service in the welcome menu first."
+
+        view = bic_claims.current(bic_config.DEFAULT_TENANT_ID, knowledge_id,
+                                  SERVICE_INTEREST_PREDICATE)
+        history = bic_claims.history(bic_config.DEFAULT_TENANT_ID, knowledge_id,
+                                     SERVICE_INTEREST_PREDICATE)
+    except Exception as e:
+        # Type only — a DbError body can echo the identifier that was queried.
+        return f"⚠️ Couldn't read claims ({type(e).__name__})."
+
+    lines = [f"🧠 Declared service interest",
+             f"party: {knowledge_id}",
+             f"cardinality: {view['cardinality']} · claims on record: {len(history)}"]
+    if not view["claims"]:
+        lines.append("\nNo ACTIVE claim (all superseded, expired or retracted).")
+    for claim in view["claims"]:
+        lines.append(
+            f"\n• {claim['value']}"
+            f"\n  status: {view['states'][claim['claim_id']]}"
+            f"\n  tier {claim['provenance_tier']} · confidence {claim['confidence']}"
+            f"\n  asserted_by: {claim['asserted_by']}"
+            f"\n  valid_from: {claim['valid_from']}"
+            f"\n  observed_at: {claim['observed_at']}")
+    if view["conflict"]:
+        lines.append(f"\n⚠️ UNRESOLVED CONFLICT: {', '.join(view['unresolved_values'])}"
+                     "\n(surfaced, not auto-resolved)")
+    return "\n".join(lines)
+
 
 def tool_clients(sender: str, timeout: float = 5, **_) -> str:
     """CRM client count + latest 5, from the Asthra CRM's clients table."""
@@ -1812,6 +1929,7 @@ OWNER_COMMANDS_HELP = (
     "🤖 Owner/staff commands:\n\n"
     "#leads — today's captured leads\n"
     "#clients — CRM client count + latest\n"
+    "#interest — your declared service interest (knowledge claims)\n"
     "#status — quick business snapshot\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
@@ -1875,6 +1993,8 @@ def try_owner_command(sender: str, role: str, text: str):
         return run_tool(sender, "leads_today", _fallback=tool_leads)
     if low == "#clients":
         return run_tool(sender, "crm_list_clients", _fallback=tool_clients)
+    if low == "#interest":
+        return run_tool(sender, "service_interest", _fallback=tool_service_interest)
     if low == "#status":
         return compose_status(sender)
     if low == "#roles":
@@ -2837,6 +2957,10 @@ if BIC_AVAILABLE:
     def _tool_h_crm_list_clients(principal, timeout=10, **_):
         return tool_clients(principal.sender_id, timeout=timeout)
 
+    @bic_tools.register("service_interest")
+    def _tool_h_service_interest(principal, timeout=10, **_):
+        return tool_service_interest(principal.sender_id, timeout=timeout)
+
     @bic_tools.register("roles_list")
     def _tool_h_roles_list(principal, timeout=10, **_):
         return tool_roles_list(principal.sender_id, timeout=timeout)
@@ -3067,7 +3191,10 @@ class handler(BaseHTTPRequestHandler):
                     handle_button_reply(sender, btn["id"], btn["title"])
                 elif iact.get("type") == "list_reply":
                     row = iact["list_reply"]
-                    handle_list_reply(sender, row["id"], row.get("title", ""))
+                    # msg["id"] is Meta's opaque message id — the claim's
+                    # source_ref. Not the phone, not the text.
+                    handle_list_reply(sender, row["id"], row.get("title", ""),
+                                      message_id=msg.get("id"))
                 self._ok(); return
 
             # ── Voice / Audio message ─────────────────────────────────────
