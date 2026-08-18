@@ -2358,7 +2358,54 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
 # ══════════════════════════════════════════════════════════════════════════════
 # LEAD / VIP ALERTS TO OWNER
 # ══════════════════════════════════════════════════════════════════════════════
-def maybe_alert_vip(sender: str, user_text: str, already_alerted: bool):
+# The second predicate to reach production, and the first sourced from
+# ORDINARY conversation rather than a UI path. Registered as DATA by
+# 20260816000011_bic_seed_engagement_segment.sql — no Python enum mirrors it.
+ENGAGEMENT_SEGMENT_PREDICATE = "core.party.engagement_segment@1"
+
+SEGMENT_VIP, SEGMENT_ELECTION = "VIP", "ELECTION"
+
+
+def record_engagement_segment(sender: str, segment: str, message_id=None) -> None:
+    """Record which Asthra engagement segment this party falls in (2C).
+
+    ENTIRELY BEST-EFFORT, and the stakes are higher here than for the menu
+    path: maybe_alert_vip() runs BEFORE the customer's reply is generated, so
+    an exception escaping this function would cost a real reply to a VIP lead.
+    Everything is swallowed.
+
+    PROVENANCE — tier 5, confidence 0.50. The DETECTION is deterministic
+    (fixed regex and substring vocabularies, no AI), but the CONTENT is a
+    customer describing themselves in their own words, which IDD-2C §6 maps to
+    tier 5 and Article II.6 caps at 0.50 permanently. A clean regex does not
+    make a self-description authoritative.
+
+    STORES THE LABEL AND NOTHING ELSE — never the message, never the matched
+    keyword, never the phone. Strictly less exposure than the owner alert
+    beside it, which already forwards 200 characters of the message.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return
+    try:
+        knowledge_id = bic_party.resolve_or_create(
+            bic_config.DEFAULT_TENANT_ID, bic_party.WHATSAPP, sender)
+        bic_claims.assert_claim(
+            bic_config.DEFAULT_TENANT_ID, knowledge_id,
+            ENGAGEMENT_SEGMENT_PREDICATE, segment,
+            source="whatsapp", provenance_tier=5,
+            asserted_by="whatsapp:vip_detection",
+            confidence=0.50,
+            source_ref=f"wa_msg:{message_id}" if message_id else None,
+        )
+    except Exception as e:
+        # TYPE ONLY. A DbError carries the response body, and a unique-violation
+        # on bic_party_identifiers echoes the customer's phone number.
+        print(f"CLAIM_WRITE_FAILED predicate={ENGAGEMENT_SEGMENT_PREDICATE} "
+              f"reason={type(e).__name__}")
+
+
+def maybe_alert_vip(sender: str, user_text: str, already_alerted: bool,
+                    message_id=None):
     """Instant owner alert for VIP / election messages — once per chat per 24h."""
     vip      = is_vip_message(user_text)
     election = is_election_message(user_text)
@@ -2372,6 +2419,12 @@ def maybe_alert_vip(sender: str, user_text: str, already_alerted: bool):
         f"Message: {user_text[:200]}\n\n"
         f"⚡ Call them personally ASAP."
     )
+    # AFTER the alert, never before: the owner hearing about a VIP lead is the
+    # revenue, the claim is the analysis. VIP wins when both match, mirroring
+    # the `tag` precedence above so a stored claim can never contradict an
+    # alert already sent.
+    record_engagement_segment(
+        sender, SEGMENT_VIP if vip else SEGMENT_ELECTION, message_id)
 
 def _pct(v):
     """Coerce a model-returned metric ('85', '85%', 85.0) to an int 0-100, else None."""
@@ -2503,7 +2556,8 @@ def maybe_alert_lead(sender: str, lead: dict, already_alerted: bool):
         log_reply_to_crm(sender, note)
 
 
-def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
+def run_client_pipeline(sender: str, user_text: str, ctx: dict,
+                        message_id=None) -> None:
     """The customer pipeline, EXTRACTED VERBATIM from do_POST.
 
     Slice 1C: extracted so both the legacy path and the Brain flow can call the
@@ -2547,7 +2601,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict) -> None:
         return
 
     # ── VIP / election detection → instant owner alert ────────────
-    maybe_alert_vip(sender, user_text, ctx["vip_alerted"])
+    maybe_alert_vip(sender, user_text, ctx["vip_alerted"], message_id)
 
     # ── Human handoff: owner paused this chat ─────────────────────
     if ctx["paused"]:
@@ -2916,7 +2970,8 @@ def _bic_client_turn(sender: str, user_text: str, ctx: dict,
     )
 
     def client_flow(principal, req):
-        run_client_pipeline(principal.sender_id, req.text, ctx)
+        run_client_pipeline(principal.sender_id, req.text, ctx,
+                            message_id=req.message_id)
         return bic_contract.BrainResponse(text="")   # pipeline already replied
 
     def owner_flow(principal, req):
@@ -3309,7 +3364,8 @@ class handler(BaseHTTPRequestHandler):
                 elif _bic_enabled():
                     _bic_client_turn(sender, user_text, ctx, msg.get("id"))
                 else:
-                    run_client_pipeline(sender, user_text, ctx)
+                    run_client_pipeline(sender, user_text, ctx,
+                                        message_id=msg.get("id"))
             finally:
                 # ── Decision Record: FLUSH ────────────────────────────────
                 # `finally`, so all four terminal paths through the fork are
