@@ -2358,6 +2358,67 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
 # ══════════════════════════════════════════════════════════════════════════════
 # LEAD / VIP ALERTS TO OWNER
 # ══════════════════════════════════════════════════════════════════════════════
+# The first TIER-1 predicate: our own transport recording when a message
+# arrived, not a customer describing themselves. Registered as DATA by
+# 20260816000012_bic_seed_first_seen_at.sql.
+FIRST_SEEN_PREDICATE = "core.party.first_seen_at@1"
+
+
+def record_first_seen(sender: str, first_seen, message_id=None) -> None:
+    """Record when this party first contacted us (2C), ONCE and only once.
+
+    TIER 1, CONFIDENCE 0.90 — and that is the point of this predicate. Both
+    existing predicates are tier 5, capped at 0.50 because a customer
+    describing themselves is weak evidence however cleanly it is detected.
+    This one is a system-generated timestamp from an HMAC-verified transport,
+    which IDD-2C §6 places at tier 1. It is the strongest evidence the store
+    will hold until a sovereign identifier appears.
+
+    A SECOND CLAIM IS A BUG, NOT A SUPERSESSION. A party has exactly one first
+    contact, so the writer READS BEFORE WRITING and declines rather than
+    appending a competing value. is_new_contact already gates this, but that
+    gate rests on conversation history being present — a pruned history or two
+    simultaneous first messages would otherwise mint a second "first".
+
+    BITEMPORAL, GENUINELY. `valid_from` is when they first contacted us (world
+    time); `observed_at` defaults to when the Brain recorded it (system time).
+    For live capture they differ by milliseconds, but they are conceptually
+    independent here rather than coincidentally equal — which is what makes
+    "what did we believe in March?" answerable later.
+
+    ENTIRELY BEST-EFFORT. Runs after the welcome menu has already been sent.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return
+    try:
+        knowledge_id = bic_party.resolve_or_create(
+            bic_config.DEFAULT_TENANT_ID, bic_party.WHATSAPP, sender)
+
+        # Read before write. Not a supersession check — a duplicate-first check.
+        if bic_claims.history(bic_config.DEFAULT_TENANT_ID, knowledge_id,
+                              FIRST_SEEN_PREDICATE):
+            print("FIRST_SEEN_DUPLICATE_SUPPRESSED "
+                  f"predicate={FIRST_SEEN_PREDICATE} — party already has a "
+                  f"first contact; a second is a defect, not a correction")
+            return
+
+        bic_claims.assert_claim(
+            bic_config.DEFAULT_TENANT_ID, knowledge_id,
+            FIRST_SEEN_PREDICATE, first_seen.isoformat(),
+            source="whatsapp", provenance_tier=1,
+            asserted_by="whatsapp:first_contact",
+            confidence=0.90,
+            source_ref=f"wa_msg:{message_id}" if message_id else None,
+            # WORLD time. observed_at is left to default to system time.
+            valid_from=first_seen,
+        )
+    except Exception as e:
+        # TYPE ONLY. A DbError carries the response body, and a unique-violation
+        # on bic_party_identifiers echoes the customer's phone number.
+        print(f"CLAIM_WRITE_FAILED predicate={FIRST_SEEN_PREDICATE} "
+              f"reason={type(e).__name__}")
+
+
 # The second predicate to reach production, and the first sourced from
 # ORDINARY conversation rather than a UI path. Registered as DATA by
 # 20260816000011_bic_seed_engagement_segment.sql — no Python enum mirrors it.
@@ -2653,6 +2714,10 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         send_welcome_menu(sender)
         save_messages([(sender, "user", user_text),
                        (sender, "assistant", "[ಸ್ವಾಗತ + ಸೇವೆಗಳ ಮೆನು ಕಳಿಸಲಾಯಿತು]")])
+        # AFTER the welcome is sent and saved: the greeting is the customer
+        # experience, the claim is the analysis. Forward capture only — the
+        # senders who predate this predicate are never backfilled.
+        record_first_seen(sender, datetime.now(timezone.utc), message_id)
 
     # ── Normal AI reply ───────────────────────────────────────────
     else:
