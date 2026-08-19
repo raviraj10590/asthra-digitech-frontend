@@ -52,7 +52,7 @@ try:
                      db as bic_db, decision as bic_decision,
                      identity as bic_identity, party as bic_party,
                      policy as bic_policy, replay as bic_replay,
-                     tools as bic_tools)
+                     tools as bic_tools, webhook_events as bic_events)
     from adapters import whatsapp as wa_adapter
     BIC_AVAILABLE = True
     print("BIC: package import OK")
@@ -3296,8 +3296,25 @@ class handler(BaseHTTPRequestHandler):
             msg      = messages[0]
             sender   = msg["from"]
             msg_type = msg.get("type", "")
+            wamid    = msg.get("id") or ""
 
             print(f"📨 {msg_type} from {sender}")
+
+            # ── DURABLE RETRY DEDUPLICATION ───────────────────────────────
+            # Placed HERE — the earliest point where Meta's delivery identity
+            # is known — so it protects every fork below: text, interactive
+            # menu taps, and media acknowledgements alike. Each of those
+            # already writes something (a reply, a lead, a claim) that must
+            # not happen twice.
+            #
+            # The legacy content check further down is deliberately KEPT: it
+            # still catches a genuine re-send that Meta gives a NEW wamid,
+            # which this claim cannot see. The two guards answer different
+            # questions and neither subsumes the other.
+            if BIC_AVAILABLE and bic_events.claim(wamid) == bic_events.DUPLICATE:
+                print(f"↩️ duplicate delivery (wamid claimed) — skipped")
+                turn["duplicate"] = True
+                self._ok(); return
 
             # Blue ticks + typing… within ~1s, before the slow work starts
             if msg.get("id") and msg_type in ("text", "audio", "interactive", "image", "video", "document"):
@@ -3416,6 +3433,10 @@ class handler(BaseHTTPRequestHandler):
             # guarantees a record is flushed even if dispatch raises.
             turn["decision_record"] = bool(
                 BIC_AVAILABLE and bic_decision.is_open())
+            # In flight. A row left in PROCESSING is the observable symptom of
+            # a crashed or timed-out invocation — visible, rather than silent.
+            if BIC_AVAILABLE:
+                bic_events.mark(wamid, bic_events.PROCESSING)
             try:
                 if role in INTERNAL_ROLES:
                     if _bic_enabled():
@@ -3431,6 +3452,17 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     run_client_pipeline(sender, user_text, ctx,
                                         message_id=msg.get("id"))
+                if BIC_AVAILABLE:
+                    bic_events.mark(wamid, bic_events.COMPLETED)
+            except Exception as _e:
+                # Terminal FAILED with the bounded class only — never the
+                # exception text, which can carry a phone number or a response
+                # body. Re-raised so the outer handlers behave exactly as
+                # before: this records, it does not swallow.
+                if BIC_AVAILABLE:
+                    bic_events.mark(wamid, bic_events.FAILED,
+                                    _turn_failure_class(_e))
+                raise
             finally:
                 # ── Decision Record: FLUSH ────────────────────────────────
                 # `finally`, so all four terminal paths through the fork are
