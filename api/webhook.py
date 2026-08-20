@@ -52,7 +52,7 @@ try:
                      db as bic_db, decision as bic_decision,
                      explain as bic_explain,
                      identity as bic_identity, knowledge as bic_knowledge,
-                     party as bic_party,
+                     owner_context as bic_owner_context, party as bic_party,
                      policy as bic_policy, replay as bic_replay,
                      tools as bic_tools, webhook_events as bic_events)
     from adapters import whatsapp as wa_adapter
@@ -1732,60 +1732,62 @@ def render_knowledge(envelope: dict, title: str = "🧠 Knowledge") -> str:
 
 
 def tool_knowledge_why(sender: str, timeout: float = 5, narrator=None, **_) -> str:
-    """`#why` — OWNER-only. Why do we believe what we believe about this party?
+    """`#why` — OWNER-only. Why do we believe what we believe about the
+    customer this owner is currently dealing with?
 
     THE FLOW, IN THIS ORDER AND NO OTHER
     ------------------------------------
-        identify party → knowledge.describe → knowledge.explain → render
+        owner context → knowledge.describe → knowledge.explain → render
 
-    The order is the guarantee, not a preference. A model that ran before
-    retrieval could choose which facts to look for, and an explanation of
-    facts selected to fit the story is the "plausible fiction" IDD-2G §7.4
-    exists to prevent. Retrieval finishes first; explanation only ever sees
-    what retrieval already returned.
+    The order is the guarantee. A model that ran before retrieval could choose
+    which facts to look for, and an explanation of facts selected to fit the
+    story is the "plausible fiction" IDD-2G §7.4 exists to prevent.
+
+    WHICH CUSTOMER — NOT THIS CONVERSATION
+    --------------------------------------
+    The first version resolved the party bound to THIS chat. For an owner that
+    is the owner's own party, which does not exist and never will, so `#why`
+    could only ever answer "cannot identify". Production confirmed exactly
+    that. The subject now comes from bic/owner_context.py: the customer the
+    owner explicitly took over (chat_pause/chat_resume), falling back to the
+    most recently active party, with the source always reported.
+
+    THERE IS NO SELF-IDENTITY FALLBACK. Answering about the owner when no
+    customer is selected would silently change the subject of the question.
 
     A COMPOSITE COMMAND, NOT A COMPOSITE TOOL (2G §5.1)
     ---------------------------------------------------
-    This calls two capabilities. Phase 1C established that "no registered
-    handler may call another" — `tools.invoke()` resets a shared query counter,
-    so a nesting handler under-reports the work its own audit row claims, and
-    `#status` was rebuilt as a composite COMMAND for exactly this reason. So
-    both capabilities are reached as library calls, never through run_tool().
-
-    WHICH PARTY
-    -----------
-    The one bound to THIS conversation, resolved from the transport-supplied
-    sender exactly as #interest does. The owner never types a phone number,
-    and nothing is guessed: if no live binding exists, this says so and stops.
-
-    NO NARRATION BY DEFAULT
-    -----------------------
-    `narrator` is None in production. The deterministic explanation is already
-    user-facing and complete (§7.4 makes narration optional), and an owner
-    command is the wrong place to add a second model round-trip to a turn
-    where AI generation is already ~21s of ~22.6s. Passing a narrator is
-    supported, and a failing or rejected one degrades to this same output.
+    Phase 1C: "no registered handler may call another" — tools.invoke() resets
+    a shared query counter, so a nesting handler under-reports its own audit
+    row. Both capabilities are reached as library calls, never via run_tool().
     """
     if not (BIC_AVAILABLE and bic_config.is_configured()):
         return "⚠️ BIC isn't configured yet."
 
     try:
-        knowledge_id = bic_party.find_by_identifier(
-            bic_config.DEFAULT_TENANT_ID, bic_party.WHATSAPP, sender)
+        context = bic_owner_context.resolve(bic_config.DEFAULT_TENANT_ID)
     except Exception as e:
         # Type only — a DbError body can echo the identifier that was queried.
-        return f"⚠️ Couldn't reach identity ({type(e).__name__})."
-    if not knowledge_id:
-        # Deterministic, and deliberately not a guess. Resolving "who did they
-        # probably mean" from conversation text is 2D matching, which is not
-        # implemented and must not be improvised here.
-        return ("🔎 Cannot identify a customer for this conversation.\n"
-                "No party is bound to this chat, so there is nothing to "
-                "explain. This is not a permission problem and not an outage.")
+        # An outage must not render as "no customer selected".
+        return f"⚠️ Couldn't read owner context ({type(e).__name__})."
+
+    if context["state"] == bic_owner_context.AMBIGUOUS:
+        # Two customers are equally current. Choosing one would be
+        # indistinguishable from knowing which was meant (§3.5 in spirit).
+        return ("🔎 Two customers are equally current — nothing selected.\n"
+                f"Reason: {context['reason']}.\n"
+                + "\n".join(f"• {c}" for c in context["candidates"])
+                + "\nUse #stop <number> on the one you mean, then #why.")
+
+    if context["state"] == bic_owner_context.NONE:
+        return ("🔎 No customer is currently selected.\n"
+                f"Reason: {context['reason']}.\n"
+                "Use #stop <number> to take over a customer's chat, then #why. "
+                "This is not a permission problem and not an outage.")
 
     try:
         evidence = bic_knowledge.describe(
-            bic_config.DEFAULT_TENANT_ID, knowledge_id)
+            bic_config.DEFAULT_TENANT_ID, context["party_id"])
     except Exception as e:
         return f"⚠️ Couldn't read knowledge ({type(e).__name__})."
 
@@ -1794,10 +1796,11 @@ def tool_knowledge_why(sender: str, timeout: float = 5, narrator=None, **_) -> s
     except Exception as e:
         return f"⚠️ Couldn't build the explanation ({type(e).__name__})."
 
-    return render_explanation(justification)
+    return render_explanation(justification, context=context)
 
 
-def render_explanation(justification: dict, title: str = "🔎 Why we believe this") -> str:
+def render_explanation(justification: dict, title: str = "🔎 Why we believe this",
+                       context: dict = None) -> str:
     """EXPLAIN envelope → WhatsApp text. Presentation only; decides nothing.
 
     Every judgement below was already made by the capability. This function
@@ -1813,6 +1816,16 @@ def render_explanation(justification: dict, title: str = "🔎 Why we believe th
     identity = justification.get("identity") or {}
     if identity.get("resolution_state"):
         head[-1] += f" · identity {identity['resolution_state']}"
+    if context:
+        # WHICH SIGNAL CHOSE THIS CUSTOMER. An explicit takeover and a
+        # most-recently-active guess are different claims about the subject,
+        # and collapsing them would let the weaker one pass for the stronger.
+        if context.get("state") == "OWNER_ACTION":
+            head.append(f"selected by: you ({context.get('source')}, "
+                        f"{context.get('age_seconds')}s ago)")
+        elif context.get("state") == "RECENT_ACTIVITY":
+            head.append("selected by: most recent activity — not an explicit "
+                        f"choice ({context.get('age_seconds')}s ago)")
 
     # DENIED / UNKNOWN / UNAVAILABLE are three different answers and get three
     # different replies. The capability already wrote each one from records.
