@@ -257,11 +257,32 @@ class WebhookIntegration(unittest.TestCase):
         self.assertIn("is_duplicate_webhook(ctx", inspect.getsource(w.handler.do_POST))
 
     def test_terminal_states_are_marked_around_dispatch(self):
+        """PROCESSING is written in do_POST; the terminals moved into
+        _finalize_delivery so that EVERY exit path reaches one — including the
+        six early-return branches that used to strand rows at ACCEPTED."""
         import inspect, webhook as w
         src = inspect.getsource(w.handler.do_POST)
-        for expected in ("bic_events.PROCESSING", "bic_events.COMPLETED",
-                         "bic_events.FAILED"):
-            self.assertIn(expected, src)
+        self.assertIn("bic_events.PROCESSING", src)
+        self.assertIn("_finalize_delivery(lifecycle", src)
+        fin = inspect.getsource(w._finalize_delivery)
+        self.assertIn("bic_events.COMPLETED", fin)
+        self.assertIn("bic_events.FAILED", fin)
+
+    def test_processing_is_marked_before_any_early_return(self):
+        """The regression guard for the original bug: no `return` may sit
+        between the claim and the PROCESSING mark."""
+        import inspect, re, webhook as w
+        src = inspect.getsource(w.handler.do_POST).splitlines()
+        claim = next(i for i, l in enumerate(src) if "bic_events.claim" in l)
+        proc = next(i for i, l in enumerate(src) if "bic_events.PROCESSING" in l)
+        # Comments stripped first. A comment reading "before ANY branch can
+        # return" is prose, not a return statement, and matching it reports a
+        # leak that does not exist.
+        code = [l.split("#", 1)[0] for l in src[claim + 1:proc]]
+        between = [l.strip() for l in code if re.search(r"\breturn\b", l)]
+        # Exactly one may precede it: the DUPLICATE path, which deliberately
+        # creates no new row and must not touch the winner's.
+        self.assertEqual(len(between), 1, f"unguarded returns: {between}")
 
     def test_failed_mark_uses_the_bounded_class_not_the_exception(self):
         import inspect, webhook as w

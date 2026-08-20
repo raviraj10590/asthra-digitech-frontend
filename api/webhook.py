@@ -3148,6 +3148,59 @@ def _turn_failure_class(exc: BaseException) -> str:
     return "UNKNOWN"
 
 
+def _new_lifecycle() -> dict:
+    """Per-request delivery-lifecycle state.
+
+    DELIBERATELY NOT PART OF `turn`. `turn` is serialised into the WEBHOOK_TURN
+    log line on every request, and the wamid is a Meta delivery identifier —
+    it belongs in the durable event row, never in a log that is emitted for
+    every message.
+    """
+    return {"wamid": "", "claimed": False, "terminal": False}
+
+
+def _finalize_delivery(lifecycle: dict, failure_class: str = None) -> None:
+    """Drive a claimed delivery to exactly one terminal state.
+
+    THE BUG THIS CLOSES
+    -------------------
+    claim() wrote ACCEPTED, then six ordinary early-return branches — an
+    interactive tap, an image, a video, a document, an unreadable type, a
+    failed transcription, a legacy duplicate — returned before the old
+    mark(PROCESSING) was ever reached. Those rows stayed ACCEPTED forever.
+    Production accumulated three, with `updated_at == created_at` and zero
+    rows in PROCESSING, which is what proved the cause was a missing call
+    rather than a crash.
+
+    WHY A SINGLE FINALIZER RATHER THAN A mark() PER BRANCH
+    ------------------------------------------------------
+    Seven scattered calls would work today and rot tomorrow: the seventh
+    branch anyone adds would leak exactly as these six did. This is invoked
+    from do_POST's existing `finally`, which already runs on every exit path
+    including the `return`s inside the try — so a NEW branch is covered
+    without anybody remembering to cover it.
+
+    IDEMPOTENT. The dispatch path finalizes explicitly so a terminal state is
+    recorded as close to the outcome as possible; the `finally` then no-ops.
+    Two terminal transitions for one delivery would make the audit trail lie
+    about when the turn ended.
+
+    COMPLETED IS THE DEFAULT, AND THAT IS DELIBERATE. A media acknowledgement
+    or an untranscribable voice note is a turn that WORKED — the customer got
+    a reply. Marking it FAILED because no AI ran would turn the failure rate
+    into a measure of message type.
+    """
+    if not lifecycle.get("claimed") or lifecycle.get("terminal"):
+        return
+    lifecycle["terminal"] = True
+    if not BIC_AVAILABLE:
+        return
+    if failure_class:
+        bic_events.mark(lifecycle["wamid"], bic_events.FAILED, failure_class)
+    else:
+        bic_events.mark(lifecycle["wamid"], bic_events.COMPLETED)
+
+
 def _decision_open(sender: str, role: str) -> None:
     """Open the Decision Record for this turn (3C §1.1, 3D).
 
@@ -3495,6 +3548,9 @@ class handler(BaseHTTPRequestHandler):
             "dispatch_began": False,
             "body_bytes": len(body),
         }
+        # Delivery lifecycle, kept out of `turn` so the wamid never reaches
+        # the WEBHOOK_TURN log line.
+        lifecycle = _new_lifecycle()
 
         try:
             data    = json.loads(body)
@@ -3531,7 +3587,22 @@ class handler(BaseHTTPRequestHandler):
             if BIC_AVAILABLE and bic_events.claim(wamid) == bic_events.DUPLICATE:
                 print(f"↩️ duplicate delivery (wamid claimed) — skipped")
                 turn["duplicate"] = True
+                # The winning worker owns this delivery's lifecycle. Touching
+                # its row here would let a loser overwrite a terminal state
+                # the winner had already written.
                 self._ok(); return
+
+            # ── ACCEPTED → PROCESSING, HERE ───────────────────────────────
+            # Immediately after the claim and before ANY branch can return.
+            # The old call site sat 125 lines further down, past six ordinary
+            # early returns; every one of them stranded a row at ACCEPTED.
+            # A row left in PROCESSING is a visible symptom of a crashed or
+            # timed-out turn — which is the point. ACCEPTED means "claimed and
+            # then nothing", and that is indistinguishable from a bug.
+            if BIC_AVAILABLE and wamid:
+                lifecycle["wamid"] = wamid
+                lifecycle["claimed"] = True
+                bic_events.mark(wamid, bic_events.PROCESSING)
 
             # Blue ticks + typing… within ~1s, before the slow work starts
             if msg.get("id") and msg_type in ("text", "audio", "interactive", "image", "video", "document"):
@@ -3650,10 +3721,8 @@ class handler(BaseHTTPRequestHandler):
             # guarantees a record is flushed even if dispatch raises.
             turn["decision_record"] = bool(
                 BIC_AVAILABLE and bic_decision.is_open())
-            # In flight. A row left in PROCESSING is the observable symptom of
-            # a crashed or timed-out invocation — visible, rather than silent.
-            if BIC_AVAILABLE:
-                bic_events.mark(wamid, bic_events.PROCESSING)
+            # PROCESSING was recorded at claim time, before any branch could
+            # return — see the ACCEPTED → PROCESSING block above.
             try:
                 if role in INTERNAL_ROLES:
                     if _bic_enabled():
@@ -3669,16 +3738,13 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     run_client_pipeline(sender, user_text, ctx,
                                         message_id=msg.get("id"))
-                if BIC_AVAILABLE:
-                    bic_events.mark(wamid, bic_events.COMPLETED)
+                _finalize_delivery(lifecycle)
             except Exception as _e:
                 # Terminal FAILED with the bounded class only — never the
                 # exception text, which can carry a phone number or a response
                 # body. Re-raised so the outer handlers behave exactly as
                 # before: this records, it does not swallow.
-                if BIC_AVAILABLE:
-                    bic_events.mark(wamid, bic_events.FAILED,
-                                    _turn_failure_class(_e))
+                _finalize_delivery(lifecycle, _turn_failure_class(_e))
                 raise
             finally:
                 # ── Decision Record: FLUSH ────────────────────────────────
@@ -3698,6 +3764,13 @@ class handler(BaseHTTPRequestHandler):
             turn["failure_class"] = _turn_failure_class(e)
             print(f"Unexpected error: {e}")
         finally:
+            # THE CATCH-ALL FOR THE DELIVERY LIFECYCLE. This block already ran
+            # on every exit path — the `return`s inside the try included —
+            # which is exactly the property the six leaking branches needed
+            # and never had. Any branch added later is covered by default.
+            # No-ops when the dispatch path already finalized.
+            _finalize_delivery(lifecycle, turn.get("failure_class"))
+
             # Exactly once per do_POST, on every exit path — the `return`s
             # inside the try included. Structured and greppable, like
             # WEBHOOK_AUTH, and carrying no payload contents: no sender, no
