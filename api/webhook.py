@@ -50,7 +50,8 @@ try:
     from bic import (brain as bic_brain, claims as bic_claims,
                      config as bic_config, contract as bic_contract,
                      db as bic_db, decision as bic_decision,
-                     identity as bic_identity, party as bic_party,
+                     identity as bic_identity, knowledge as bic_knowledge,
+                     party as bic_party,
                      policy as bic_policy, replay as bic_replay,
                      tools as bic_tools, webhook_events as bic_events)
     from adapters import whatsapp as wa_adapter
@@ -1629,49 +1630,103 @@ def tool_leads(sender: str, timeout: float = 5, **_) -> str:
     return "\n".join(lines)
 
 def tool_service_interest(sender: str, timeout: float = 5, **_) -> str:
-    """The 2C read path — proves a written claim is actually usable.
+    """A THIN RENDERER over the knowledge.describe capability (2G §8.2).
 
-    Reads the caller's OWN declared service interest through the full 2B→2C
-    path: resolve the knowledge_id from the channel identifier, then derive
-    current truth at read time. Status is COMPUTED here, never stored (2C C1),
-    which is why an expired or superseded claim reports honestly instead of
-    reporting whatever a stale column last said.
+    This function does no knowledge work. It resolves the caller's own
+    knowledge_id, hands the capability one fixed predicate, and turns the
+    envelope into WhatsApp text. Every judgement it used to make — which
+    claims are live, whether they disagree, how old they are, whether the
+    answer is complete — now comes back IN the envelope, because a renderer
+    that re-derives any of that is a second implementation of the thing the
+    capability exists to be.
+
+    The four states render as four DIFFERENT replies. That is the whole point
+    of §6.2/§6.3: "we have nothing on file", "you may not see this" and "we
+    couldn't reach the store" must never share a message, or an outage reads
+    to the owner as a customer with no interests.
 
     NO PHONE NUMBER IS EVER DISPLAYED. The knowledge_id is meaningless by
-    design and safe to show; the identifier that resolved it is not.
+    design and safe to show; the identifier that resolved it is not, and the
+    envelope does not carry it.
     """
     if not (BIC_AVAILABLE and bic_config.is_configured()):
         return "⚠️ BIC isn't configured yet."
     try:
         knowledge_id = bic_party.find_by_identifier(
             bic_config.DEFAULT_TENANT_ID, bic_party.WHATSAPP, sender)
-        if not knowledge_id:
-            return "No party record yet — tap a service in the welcome menu first."
-
-        view = bic_claims.current(bic_config.DEFAULT_TENANT_ID, knowledge_id,
-                                  SERVICE_INTEREST_PREDICATE)
-        history = bic_claims.history(bic_config.DEFAULT_TENANT_ID, knowledge_id,
-                                     SERVICE_INTEREST_PREDICATE)
     except Exception as e:
         # Type only — a DbError body can echo the identifier that was queried.
-        return f"⚠️ Couldn't read claims ({type(e).__name__})."
+        return f"⚠️ Couldn't reach identity ({type(e).__name__})."
+    if not knowledge_id:
+        return "No party record yet — tap a service in the welcome menu first."
 
-    lines = [f"🧠 Declared service interest",
-             f"party: {knowledge_id}",
-             f"cardinality: {view['cardinality']} · claims on record: {len(history)}"]
-    if not view["claims"]:
-        lines.append("\nNo ACTIVE claim (all superseded, expired or retracted).")
-    for claim in view["claims"]:
+    try:
+        envelope = bic_knowledge.describe(
+            bic_config.DEFAULT_TENANT_ID, knowledge_id,
+            predicates=[SERVICE_INTEREST_PREDICATE])
+    except Exception as e:
+        return f"⚠️ Couldn't read knowledge ({type(e).__name__})."
+
+    return render_knowledge(envelope, title="🧠 Declared service interest")
+
+
+def render_knowledge(envelope: dict, title: str = "🧠 Knowledge") -> str:
+    """Envelope → WhatsApp text. Presentation only; decides nothing.
+
+    Kept separate from the tool so the next binding gets a renderer instead of
+    a copy of one, and so the four-state distinction is tested in one place
+    rather than once per capability.
+    """
+    state = envelope.get("state")
+    head = [title, f"party: {envelope.get('subject') or envelope.get('entity')}"]
+    if envelope.get("redirected_from"):
+        head.append(f"(merged from {envelope['redirected_from']})")
+    identity = envelope.get("identity") or {}
+    if identity.get("resolution_state"):
+        head.append(f"identity: {identity['resolution_state']}")
+
+    if state == "DENIED":
+        # §6.2 — never an empty list. The caller is told they were refused.
+        return "\n".join(head + ["\n⛔ Not permitted to view this knowledge."])
+    if state == "UNAVAILABLE":
+        # §6.3 — never an empty list either. An outage that reads as "nothing
+        # on file" is the system lying without anyone writing a lie.
+        return "\n".join(head + [
+            f"\n⚠️ Knowledge is UNAVAILABLE ({envelope.get('reason')})."
+            "\nThis is NOT the same as having nothing on record."])
+    if state == "UNKNOWN":
+        consulted = len(envelope.get("coverage", {}).get("consulted") or [])
+        return "\n".join(head + [
+            f"\nNothing on record. Consulted {consulted} predicate(s) "
+            f"and found no live claim."])
+
+    lines = list(head)
+    for value in envelope.get("values") or []:
+        fresh = value.get("freshness") or {}
+        prov = value.get("provenance") or {}
         lines.append(
-            f"\n• {claim['value']}"
-            f"\n  status: {view['states'][claim['claim_id']]}"
-            f"\n  tier {claim['provenance_tier']} · confidence {claim['confidence']}"
-            f"\n  asserted_by: {claim['asserted_by']}"
-            f"\n  valid_from: {claim['valid_from']}"
-            f"\n  observed_at: {claim['observed_at']}")
-    if view["conflict"]:
-        lines.append(f"\n⚠️ UNRESOLVED CONFLICT: {', '.join(view['unresolved_values'])}"
-                     "\n(surfaced, not auto-resolved)")
+            f"\n• {value.get('value')}"
+            f"\n  {value.get('label') or value.get('predicate')}"
+            f"\n  status: {value.get('status')}"
+            f"\n  confidence {value.get('confidence')} "
+            f"(tier {prov.get('tier')}, cap {prov.get('cap')})"
+            f"\n  asserted_by: {prov.get('asserted_by')}"
+            f"\n  observed_at: {value.get('observed_at')}"
+            f"\n  freshness: {fresh.get('verdict')} "
+            f"({fresh.get('volatility_class')})")
+    for conflict in envelope.get("conflicts") or []:
+        lines.append(
+            f"\n⚠️ UNRESOLVED CONFLICT on {conflict.get('predicate')}: "
+            f"{', '.join(conflict.get('values') or [])}"
+            "\n(surfaced, not auto-resolved)")
+    if envelope.get("degraded"):
+        named = ", ".join(sorted({d["reason"] for d in envelope.get("degradation") or []}))
+        lines.append(f"\nℹ️ Degraded: {named}")
+    coverage = envelope.get("coverage") or {}
+    for ref in coverage.get("unavailable") or []:
+        lines.append(f"\n⚠️ Could not read {ref} — not the same as absent.")
+    for ref in coverage.get("unregistered") or []:
+        lines.append(f"\n⚠️ {ref} is not a registered predicate.")
     return "\n".join(lines)
 
 

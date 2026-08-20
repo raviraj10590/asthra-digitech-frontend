@@ -199,6 +199,20 @@ def lookup_ref(ref: str) -> Optional[dict]:
     return _fetch(*parse_ref(ref))
 
 
+def active_concepts() -> list:
+    """Every ACTIVE concept, newest version first.
+
+    Read-only. Exists because a 2G capability's `predicates` input is
+    OPTIONAL (IDD-2G §3.1) — with none supplied it must consult the whole
+    live vocabulary, and asking the registry is the only way to do that
+    without a Python list that would drift from the rows (P5).
+    """
+    return select(TABLE, {
+        "lifecycle": f"eq.{ACTIVE}",
+        "order": "namespace.asc,concept.asc,version.desc",
+    }, timeout=5)
+
+
 # ── The consumer-facing gate ───────────────────────────────────────────────
 
 def validate_assertion(ref: str, value) -> dict:
