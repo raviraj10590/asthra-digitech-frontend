@@ -50,6 +50,7 @@ try:
     from bic import (brain as bic_brain, claims as bic_claims,
                      config as bic_config, contract as bic_contract,
                      db as bic_db, decision as bic_decision,
+                     explain as bic_explain,
                      identity as bic_identity, knowledge as bic_knowledge,
                      party as bic_party,
                      policy as bic_policy, replay as bic_replay,
@@ -1730,6 +1731,147 @@ def render_knowledge(envelope: dict, title: str = "🧠 Knowledge") -> str:
     return "\n".join(lines)
 
 
+def tool_knowledge_why(sender: str, timeout: float = 5, narrator=None, **_) -> str:
+    """`#why` — OWNER-only. Why do we believe what we believe about this party?
+
+    THE FLOW, IN THIS ORDER AND NO OTHER
+    ------------------------------------
+        identify party → knowledge.describe → knowledge.explain → render
+
+    The order is the guarantee, not a preference. A model that ran before
+    retrieval could choose which facts to look for, and an explanation of
+    facts selected to fit the story is the "plausible fiction" IDD-2G §7.4
+    exists to prevent. Retrieval finishes first; explanation only ever sees
+    what retrieval already returned.
+
+    A COMPOSITE COMMAND, NOT A COMPOSITE TOOL (2G §5.1)
+    ---------------------------------------------------
+    This calls two capabilities. Phase 1C established that "no registered
+    handler may call another" — `tools.invoke()` resets a shared query counter,
+    so a nesting handler under-reports the work its own audit row claims, and
+    `#status` was rebuilt as a composite COMMAND for exactly this reason. So
+    both capabilities are reached as library calls, never through run_tool().
+
+    WHICH PARTY
+    -----------
+    The one bound to THIS conversation, resolved from the transport-supplied
+    sender exactly as #interest does. The owner never types a phone number,
+    and nothing is guessed: if no live binding exists, this says so and stops.
+
+    NO NARRATION BY DEFAULT
+    -----------------------
+    `narrator` is None in production. The deterministic explanation is already
+    user-facing and complete (§7.4 makes narration optional), and an owner
+    command is the wrong place to add a second model round-trip to a turn
+    where AI generation is already ~21s of ~22.6s. Passing a narrator is
+    supported, and a failing or rejected one degrades to this same output.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return "⚠️ BIC isn't configured yet."
+
+    try:
+        knowledge_id = bic_party.find_by_identifier(
+            bic_config.DEFAULT_TENANT_ID, bic_party.WHATSAPP, sender)
+    except Exception as e:
+        # Type only — a DbError body can echo the identifier that was queried.
+        return f"⚠️ Couldn't reach identity ({type(e).__name__})."
+    if not knowledge_id:
+        # Deterministic, and deliberately not a guess. Resolving "who did they
+        # probably mean" from conversation text is 2D matching, which is not
+        # implemented and must not be improvised here.
+        return ("🔎 Cannot identify a customer for this conversation.\n"
+                "No party is bound to this chat, so there is nothing to "
+                "explain. This is not a permission problem and not an outage.")
+
+    try:
+        evidence = bic_knowledge.describe(
+            bic_config.DEFAULT_TENANT_ID, knowledge_id)
+    except Exception as e:
+        return f"⚠️ Couldn't read knowledge ({type(e).__name__})."
+
+    try:
+        justification = bic_explain.explain(evidence, narrator=narrator)
+    except Exception as e:
+        return f"⚠️ Couldn't build the explanation ({type(e).__name__})."
+
+    return render_explanation(justification)
+
+
+def render_explanation(justification: dict, title: str = "🔎 Why we believe this") -> str:
+    """EXPLAIN envelope → WhatsApp text. Presentation only; decides nothing.
+
+    Every judgement below was already made by the capability. This function
+    chooses line breaks. It must never re-rank, re-word a confidence, pick
+    between conflicting values, or omit a conflict to keep the message short —
+    the last of those is exactly the budget-pruning §3.5 forbids.
+    """
+    state = justification.get("state")
+    head = [title]
+    subject = justification.get("subject") or justification.get("entity")
+    if subject:
+        head.append(f"party: {subject}")
+    identity = justification.get("identity") or {}
+    if identity.get("resolution_state"):
+        head[-1] += f" · identity {identity['resolution_state']}"
+
+    # DENIED / UNKNOWN / UNAVAILABLE are three different answers and get three
+    # different replies. The capability already wrote each one from records.
+    if state in ("DENIED", "UNKNOWN", "UNAVAILABLE"):
+        icon = {"DENIED": "⛔", "UNKNOWN": "∅", "UNAVAILABLE": "⚠️"}[state]
+        body = "\n".join(justification.get("explanation") or [])
+        # A denial must not carry the party it was refused for.
+        return f"{icon} {state}\n{body}" if state == "DENIED" else \
+               "\n".join(head + [f"\n{icon} {state}", body])
+
+    lines = list(head)
+    for chain in justification["questions"]["why_this_source"]:
+        conf = None
+        for value in justification["evidence"]:
+            if value.get("claim_id") == chain.get("evidence_ref"):
+                conf = value.get("confidence")
+        lines.append(
+            f"\n• {chain['predicate']}"
+            f"\n  = {chain['value']}"
+            f"\n  tier {chain['tier']} (cap {chain['tier_cap']}) · "
+            f"confidence {conf}"
+            f"\n  {chain['freshness_verdict']} ({chain['volatility_class']}) · "
+            f"learned {chain['observed_at']}"
+            f"\n  by {chain['asserted_by']} · via {chain['source_kind']}"
+            f"\n  evidence {chain['evidence_ref']}")
+
+    for competing in justification["questions"]["why_not_another"]:
+        lines.append(
+            f"\n⚠️ EVIDENCE CONFLICTS on {competing['predicate']}: "
+            f"{', '.join(str(v) for v in competing['competing_values'])}"
+            f"\n  No value has been selected. {competing['rung_note']}")
+
+    why_info = justification["questions"]["why_this_information"]
+    if why_info.get("absent"):
+        lines.append(f"\n∅ Not on record: {', '.join(why_info['absent'])}"
+                     "\n  (absence of record, not a statement about the party)")
+    if why_info.get("unreadable"):
+        lines.append(f"\n⚠️ Could not read: {', '.join(why_info['unreadable'])}"
+                     "\n  (unknown whether facts exist there)")
+
+    conf = justification["confidence"]
+    lines.append(
+        f"\n📊 Confidence vector: {conf['vector']}"
+        f"\n  projected {conf['projected_scalar']} ({conf['projection_rule']})"
+        f"\n  dominating: {conf['dominating_dimension']} — "
+        f"{conf['dominating_because']}")
+
+    if justification.get("degraded"):
+        named = ", ".join(sorted({d["reason"]
+                                  for d in justification.get("degradation") or []}))
+        lines.append(f"\nℹ️ Degraded: {named}")
+    if justification.get("narration_rejected"):
+        lines.append(f"\nℹ️ Narration refused ({justification['narration_rejected']}) "
+                     "— the explanation above is generated from records only.")
+    elif justification.get("narration"):
+        lines.append(f"\n🗣 {justification['narration']}")
+    return "\n".join(lines)
+
+
 def tool_clients(sender: str, timeout: float = 5, **_) -> str:
     """CRM client count + latest 5, from the Asthra CRM's clients table."""
     if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
@@ -1985,6 +2127,7 @@ OWNER_COMMANDS_HELP = (
     "#leads — today's captured leads\n"
     "#clients — CRM client count + latest\n"
     "#interest — your declared service interest (knowledge claims)\n"
+    "#why — why we believe what we believe (evidence + provenance)\n"
     "#status — quick business snapshot\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
@@ -2050,6 +2193,8 @@ def try_owner_command(sender: str, role: str, text: str):
         return run_tool(sender, "crm_list_clients", _fallback=tool_clients)
     if low == "#interest":
         return run_tool(sender, "service_interest", _fallback=tool_service_interest)
+    if low == "#why":
+        return run_tool(sender, "knowledge_why", _fallback=tool_knowledge_why)
     if low == "#status":
         return compose_status(sender)
     if low == "#roles":
@@ -3135,6 +3280,10 @@ if BIC_AVAILABLE:
     @bic_tools.register("service_interest")
     def _tool_h_service_interest(principal, timeout=10, **_):
         return tool_service_interest(principal.sender_id, timeout=timeout)
+
+    @bic_tools.register("knowledge_why")
+    def _tool_h_knowledge_why(principal, timeout=10, **_):
+        return tool_knowledge_why(principal.sender_id, timeout=timeout)
 
     @bic_tools.register("roles_list")
     def _tool_h_roles_list(principal, timeout=10, **_):

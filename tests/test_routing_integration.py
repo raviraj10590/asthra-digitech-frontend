@@ -135,15 +135,19 @@ class TestHandlerRegistration(unittest.TestCase):
     def test_all_registered(self):
         """5 → 9 when the bypass was closed, → 13 when the review found the
         privileged commands still bypassing (C1, H4), → 14 with the 2C read
-        path (`service_interest`, STAFF, read-only). This list IS the tool
-        surface. `#status` is absent by design — composed from two invocations
-        at the dispatch site, not a tool that invokes tools (compose_status)."""
+        path (`service_interest`, STAFF, read-only), → 15 with `knowledge_why`
+        (#why, OWNER-only, read-only, the first consumer of the 2G EXPLAIN
+        capability). This list IS the tool surface. `#status` is absent by
+        design — composed from two invocations at the dispatch site, not a
+        tool that invokes tools (compose_status); `knowledge_why` composes the
+        same way, calling knowledge.describe and knowledge.explain as library
+        calls rather than through the registry (2G §5.1)."""
         self.assertEqual(
             sorted(tools._HANDLERS),
             ["add_role", "aitest", "chat_pause", "chat_resume",
              "crm_capture_self", "crm_list_clients", "crm_sync_lead",
-             "leads_today", "memory_clear", "memory_show", "remove_role",
-             "roles_list", "send_brochure", "service_interest"])
+             "knowledge_why", "leads_today", "memory_clear", "memory_show",
+             "remove_role", "roles_list", "send_brochure", "service_interest"])
 
     def test_handlers_wrap_not_reimplement(self):
         """Each handler delegates to the existing function."""
