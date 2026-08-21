@@ -137,7 +137,9 @@ class TestHandlerRegistration(unittest.TestCase):
         privileged commands still bypassing (C1, H4), → 14 with the 2C read
         path (`service_interest`, STAFF, read-only), → 15 with `knowledge_why`
         (#why, OWNER-only, read-only, the first consumer of the 2G EXPLAIN
-        capability). This list IS the tool surface. `#status` is absent by
+        capability), → 16 with `knowledge_suffice` (#suffice, OWNER-only,
+        read-only, the first consumer of the 2H Context + Sufficiency layer).
+        This list IS the tool surface. `#status` is absent by
         design — composed from two invocations at the dispatch site, not a
         tool that invokes tools (compose_status); `knowledge_why` composes the
         same way, calling knowledge.describe and knowledge.explain as library
@@ -146,8 +148,9 @@ class TestHandlerRegistration(unittest.TestCase):
             sorted(tools._HANDLERS),
             ["add_role", "aitest", "chat_pause", "chat_resume",
              "crm_capture_self", "crm_list_clients", "crm_sync_lead",
-             "knowledge_why", "leads_today", "memory_clear", "memory_show",
-             "remove_role", "roles_list", "send_brochure", "service_interest"])
+             "knowledge_suffice", "knowledge_why", "leads_today",
+             "memory_clear", "memory_show", "remove_role", "roles_list",
+             "send_brochure", "service_interest"])
 
     def test_handlers_wrap_not_reimplement(self):
         """Each handler delegates to the existing function."""

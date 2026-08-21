@@ -426,12 +426,30 @@ class HistoricalRows(Base):
         self.post(text_msg())
         self.assertEqual(self.db.rows["wamid.historical"], before)
 
-    def test_no_migration_is_added_by_this_slice(self):
-        import subprocess
-        out = subprocess.run(["git", "status", "--porcelain", "supabase/"],
-                             capture_output=True, text=True,
-                             cwd=os.path.join(os.path.dirname(__file__), "..")).stdout
-        self.assertEqual(out.strip(), "")
+    def test_no_migration_touches_the_event_table(self):
+        """The lifecycle fix is entirely in the caller — migration 13's schema
+        already carried every state used.
+
+        This asserted "no migration exists anywhere" to prove "this slice adds
+        none", which was over-broad: it failed the moment an unrelated slice
+        added one. The real claim is that nothing re-shapes or rewrites
+        bic_webhook_events, so that is what it now checks.
+        """
+        import glob
+        root = os.path.join(os.path.dirname(__file__), "..")
+        offenders = []
+        for path in glob.glob(os.path.join(root, "supabase", "migrations", "*.sql")):
+            sql = open(path).read()
+            if "bic_webhook_events" not in sql:
+                continue
+            name = os.path.basename(path)
+            # Migration 13 CREATED the table; nothing after it may alter,
+            # delete from, or update it.
+            if name.startswith("20260816000013"):
+                continue
+            offenders.append(name)
+        self.assertEqual(offenders, [],
+                         f"a later migration touches bic_webhook_events: {offenders}")
 
 
 if __name__ == "__main__":

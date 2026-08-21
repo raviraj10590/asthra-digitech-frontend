@@ -50,7 +50,8 @@ try:
     from bic import (brain as bic_brain, claims as bic_claims,
                      config as bic_config, contract as bic_contract,
                      db as bic_db, decision as bic_decision,
-                     explain as bic_explain,
+                     context as bic_context, explain as bic_explain,
+                     goals as bic_goals,
                      identity as bic_identity, knowledge as bic_knowledge,
                      owner_context as bic_owner_context, party as bic_party,
                      policy as bic_policy, replay as bic_replay,
@@ -1885,6 +1886,145 @@ def render_explanation(justification: dict, title: str = "🔎 Why we believe th
     return "\n".join(lines)
 
 
+def tool_suffice(sender: str, goal_id: str = "", timeout: float = 5, **_) -> str:
+    """`#suffice <goal>` — OWNER-only. Do we have enough to proceed?
+
+    THE QUESTION, WHICH IS NOT THE ONE #why ASKS
+    --------------------------------------------
+    #why asks "what do we believe, and on what evidence". This asks "is that
+    enough to DO the thing" — and the answer depends on the thing. IDD-2H
+    §4.4: sufficiency is a property of the (evidence, action) pair, never of
+    the evidence alone. The identical customer fact can be sufficient to
+    answer an enquiry and insufficient to price a transformer.
+
+    THE FLOW, IN THIS ORDER
+    -----------------------
+        owner context → knowledge.describe → assemble packet → gate → render
+
+    Identity is resolved BEFORE assembly (I12): a packet without a subject has
+    no visibility scope and therefore cannot be safe.
+
+    THE GOAL IS NAMED, NEVER INFERRED
+    ---------------------------------
+    A goal decides which facts are required and how good they must be. Reading
+    it out of free text would let a customer's phrasing lower the evidence bar
+    for a quotation — the gate would be negotiable by whoever wrote the
+    message. Unknown goal is a deterministic refusal, not a default.
+
+    NO MODEL RUNS. The verdict is computed by bic/context.py from records
+    alone (I11). A model could narrate this; it cannot decide it.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return "⚠️ BIC isn't configured yet."
+
+    goal_def = bic_goals.lookup(goal_id)
+    if goal_def is None:
+        return ("🎯 UNKNOWN_GOAL\n"
+                f"'{(goal_id or '').strip()[:40]}' is not a registered goal.\n"
+                "Known goals: " + ", ".join(bic_goals.known_ids()) + "\n"
+                "Usage: #suffice <goal>")
+
+    try:
+        context = bic_owner_context.resolve(bic_config.DEFAULT_TENANT_ID)
+    except Exception as e:
+        # Type only — a store error body can echo an identifier.
+        return f"⚠️ UNAVAILABLE — couldn't read owner context ({type(e).__name__})."
+
+    if context["state"] in (bic_owner_context.NONE,
+                            bic_owner_context.AMBIGUOUS):
+        return ("🎯 NO_CUSTOMER_CONTEXT\n"
+                f"Reason: {context['reason']}.\n"
+                "Use #stop <number> to take over a customer's chat, then "
+                "#suffice. This is not a permission problem and not an outage.")
+
+    try:
+        packet = bic_context.assemble(
+            bic_config.DEFAULT_TENANT_ID, f"#suffice {goal_def['goal_id']}",
+            None, goal_def, context["party_id"],
+            describe=bic_knowledge.describe)
+    except Exception as e:
+        return f"⚠️ UNAVAILABLE — couldn't assemble context ({type(e).__name__})."
+
+    return render_sufficiency(packet, context)
+
+
+_VERDICT_ICON = {"PROCEED": "✅", "CLARIFY": "❓", "RETRIEVE": "🔄",
+                 "ESCALATE": "⬆️", "REFUSE": "⛔"}
+
+_NEXT_ACTION = {
+    "PROCEED": "Go ahead — the evidence meets this goal's bar.",
+    "CLARIFY": "Ask the customer for the missing item(s) below.",
+    "RETRIEVE": "The system should fetch or re-confirm the item(s) below.",
+    "ESCALATE": "Evidence is sufficient, but this action needs an approver.",
+    "REFUSE": "Do not proceed — the gap(s) below cannot be closed right now.",
+}
+
+
+def render_sufficiency(packet: dict, context: dict = None) -> str:
+    """Packet → WhatsApp text. Presentation only; decides nothing.
+
+    Every judgement was made by the gate. This chooses line breaks. It must
+    never re-rank, re-word a verdict, or drop a gap to shorten the message —
+    the last of those is the budget-pruning §5.2 forbids, arriving by the
+    back door.
+
+    NO PACKET INTERNALS. Storage concepts, evidence refs and the packet id
+    stay out of the reply: §2.2 keeps them out of the packet, and leaking
+    them here would undo that at the last step.
+    """
+    s = packet["epistemic"]["sufficiency"]
+    verdict = s["verdict"]
+    lines = [f"{_VERDICT_ICON.get(verdict, '•')} {verdict} — {packet['goal_ref']}",
+             f"party: {packet.get('subject') or ''}".rstrip(),
+             f"risk tier {s['risk_tier']} · confidence floor {s['confidence_floor']}"
+             + ("" if s["accepts_stale_evidence"] else " · stale evidence not accepted")
+             + (" · human approval required" if s["requires_human_approval"] else "")]
+    if context:
+        lines.append(
+            "customer selected by: you"
+            if context.get("state") == "OWNER_ACTION"
+            else "customer selected by: most recent activity — not an explicit choice")
+
+    known = packet["evidence"]["facts"]
+    if known:
+        lines.append("\n✔ Known:")
+        for f in known:
+            fresh = f.get("freshness") or {}
+            prov = f.get("provenance") or {}
+            lines.append(
+                f"  • {f['predicate']} = {f['value']}"
+                f"\n    tier {prov.get('tier')} (cap {prov.get('cap')}) · "
+                f"confidence {f.get('confidence')} · {fresh.get('verdict')}")
+    else:
+        lines.append("\n✔ Known: nothing on record for this goal.")
+
+    gaps = s["gaps"]
+    if gaps:
+        lines.append("\n✖ Missing:")
+        for g in gaps:
+            lines.append(f"  • {g['slot']} [{g['class']}]\n    {g['why']}")
+
+    for c in packet["epistemic"]["conflicts"]:
+        lines.append(
+            f"\n⚠️ CONFLICT ({c['severity']}) on {c['predicate']}: "
+            f"{', '.join(str(v) for v in c['claims_in_tension'])}"
+            f"\n  {c['business_consequence']}")
+
+    weak = s.get("weakest_fact")
+    if weak:
+        lines.append(f"\n📊 Weakest fact: {weak['predicate']} at "
+                     f"{weak['confidence']} (tier {weak['provenance_tier']}, "
+                     f"{weak['freshness']})")
+
+    if packet["epistemic"]["degradation"]:
+        named = ", ".join(sorted({d.get("reason") or "?" for d in
+                                  packet["epistemic"]["degradation"]}))
+        lines.append(f"\nℹ️ Degraded: {named}")
+
+    lines.append(f"\n👉 {_NEXT_ACTION.get(verdict, '')}")
+    return "\n".join(lines)
+
+
 def tool_clients(sender: str, timeout: float = 5, **_) -> str:
     """CRM client count + latest 5, from the Asthra CRM's clients table."""
     if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
@@ -2141,6 +2281,7 @@ OWNER_COMMANDS_HELP = (
     "#clients — CRM client count + latest\n"
     "#interest — your declared service interest (knowledge claims)\n"
     "#why — why we believe what we believe (evidence + provenance)\n"
+    "#suffice <goal> — is there enough to proceed? (context + sufficiency)\n"
     "#status — quick business snapshot\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
@@ -2208,6 +2349,11 @@ def try_owner_command(sender: str, role: str, text: str):
         return run_tool(sender, "service_interest", _fallback=tool_service_interest)
     if low == "#why":
         return run_tool(sender, "knowledge_why", _fallback=tool_knowledge_why)
+    if low == "#suffice" or low.startswith("#suffice "):
+        # The goal is NAMED, never inferred from the rest of the message.
+        target = stripped[len("#suffice"):].strip()
+        return run_tool(sender, "knowledge_suffice",
+                        _fallback=tool_suffice, goal_id=target)
     if low == "#status":
         return compose_status(sender)
     if low == "#roles":
@@ -3350,6 +3496,11 @@ if BIC_AVAILABLE:
     @bic_tools.register("knowledge_why")
     def _tool_h_knowledge_why(principal, timeout=10, **_):
         return tool_knowledge_why(principal.sender_id, timeout=timeout)
+
+    @bic_tools.register("knowledge_suffice")
+    def _tool_h_knowledge_suffice(principal, timeout=10, goal_id="", **_):
+        return tool_suffice(principal.sender_id, goal_id=goal_id,
+                            timeout=timeout)
 
     @bic_tools.register("roles_list")
     def _tool_h_roles_list(principal, timeout=10, **_):
