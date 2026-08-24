@@ -26,6 +26,7 @@ Stage ⑦ PLAN is intentionally absent (IDD-3B §0.1: most turns are
 single-action and skip planning; this is exactly that case).
 """
 
+import re
 from typing import Optional
 
 from . import context as ctx_mod
@@ -87,6 +88,15 @@ _SOCIAL_MARKERS = (
     "youtube", "linkedin", "ಸೋಶಿಯಲ್", "ಇನ್ಸ್ಟಾಗ್ರಾಂ", "ಫೇಸ್‌ಬುಕ್",
 )
 
+# MATCHED ON WORD BOUNDARIES, NOT AS BARE SUBSTRINGS. A plain `in` test made
+# "insta" match "install", "instant" and "instantly" — admitting the goal for
+# messages that are not enquiries at all, which is precisely the "activates
+# only where the goal is reliably identified" rule being broken by accident.
+# `(?<!\w)…(?!\w)` rather than `\b` because the Kannada markers are \w runs
+# too, and \b around them behaves differently than it does around ASCII.
+_MARKER_RE = re.compile(
+    "|".join(rf"(?<!\w){re.escape(m)}(?!\w)" for m in _SOCIAL_MARKERS))
+
 UNSUPPORTED = "UNSUPPORTED"
 
 
@@ -100,8 +110,7 @@ def admit_goal(text: str) -> Optional[dict]:
     every unmatched message would replace the whole bot in one step, which
     this slice explicitly must not do.
     """
-    t = (text or "").lower()
-    if not any(marker in t for marker in _SOCIAL_MARKERS):
+    if not _MARKER_RE.search((text or "").lower()):
         return None
     return goals.lookup(GOAL_ID)
 

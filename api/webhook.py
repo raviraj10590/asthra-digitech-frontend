@@ -3482,25 +3482,42 @@ def _bic_decide_and_record(sender: str, user_text: str, ctx: dict,
     if goal_def is None:
         return None  # UNSUPPORTED — legacy behaviour, unchanged
 
-    principal = bic_identity.resolve(sender, channel="whatsapp")
-    subject = bic_party.resolve_or_create(bic_config.DEFAULT_TENANT_ID,
-                                          bic_party.WHATSAPP, sender)
-    packet = bic_decide.assemble_context(
-        bic_config.DEFAULT_TENANT_ID, user_text, principal, goal_def,
-        subject, describe=bic_knowledge.describe)
+    # ONCE ADMITTED, THIS TURN NEVER FALLS BACK TO AN UNADJUDICATED REPLY.
+    # An earlier revision let any error here propagate to the caller's
+    # generic handler, which answered with the raw provider output — an
+    # I5 breach ("the LLM proposes; the state machine decides") reached by
+    # accident rather than by argument, and exactly the corrosion §9.1
+    # predicts for I5. It is also §6.3's first rule inverted: a legacy reply
+    # to an admitted goal is a degraded answer that looks completely normal,
+    # which the IDD rates worse than a refusal. So a failure after admission
+    # degrades LOUDLY, to a deterministic refusal, and still passes through
+    # the same record gate below.
+    try:
+        principal = bic_identity.resolve(sender, channel="whatsapp")
+        subject = bic_party.resolve_or_create(bic_config.DEFAULT_TENANT_ID,
+                                              bic_party.WHATSAPP, sender)
+        packet = bic_decide.assemble_context(
+            bic_config.DEFAULT_TENANT_ID, user_text, principal, goal_def,
+            subject, describe=bic_knowledge.describe)
 
-    # ⑧ CONSULT — the existing provider chain, unchanged. The LLM proposes;
-    # it does not get to decide whether the system acts on its own proposal.
-    llm_proposal = generate_reply(sender, user_text, history=ctx["history"],
-                                  memory=memory)
+        # ⑧ CONSULT — the existing provider chain, unchanged. The LLM
+        # proposes; it does not decide whether the system acts.
+        llm_proposal = generate_reply(sender, user_text,
+                                      history=ctx["history"], memory=memory)
 
-    outcome = bic_decide.decide(goal_def, packet, llm_proposal)
+        outcome = bic_decide.decide(goal_def, packet, llm_proposal)
 
-    auth = bic_decide.authorize(principal, packet, goal_def,
-                                bic_config.DEFAULT_TENANT_ID)
-    if outcome["outcome"] == bic_decide.PROCEED and not auth["allowed"]:
+        auth = bic_decide.authorize(principal, packet, goal_def,
+                                    bic_config.DEFAULT_TENANT_ID)
+        if outcome["outcome"] == bic_decide.PROCEED and not auth["allowed"]:
+            outcome = bic_decide.refusal_result(
+                f"authorization denied: {auth['reason']}")
+    except Exception as e:
+        # Type only — a store error body can echo an identifier.
+        print(f"brain path failed after goal admission — refusing rather than "
+             f"answering unadjudicated: {type(e).__name__}")
         outcome = bic_decide.refusal_result(
-            f"authorization denied: {auth['reason']}")
+            f"brain path error: {type(e).__name__}")
 
     # ⑬ RECORD, strictly — before ⑮ RESPOND. bic_decision.flush() is
     # deliberately best-effort everywhere else in this file (correct for
@@ -3509,18 +3526,26 @@ def _bic_decide_and_record(sender: str, user_text: str, ctx: dict,
     # webhook handler's existing `finally: _decision_flush()` still runs
     # afterward — a safe no-op on success (turn already closed below), or a
     # second best-effort attempt if this raises.
-    decision_ref = None
-    if BIC_AVAILABLE and bic_decision.is_open():
-        turn = bic_decision.current()
-        decision_ref = turn.turn_id if turn else None
-        record = bic_decision.build_record()
-        try:
-            bic_db.insert(bic_decision.TABLE, record, timeout=3)
-        except Exception as e:
-            print(f"BRAIN_RECORD write failed — response withheld "
-                 f"(3A record-before-respond): {e}")
-            raise _BrainRecordFailure(str(e)) from e
-        bic_decision.close_turn()
+    # NO OPEN TURN IS ALSO A RECORDING FAILURE. It previously fell through
+    # this block and returned an outcome the caller then SENT — a Brain
+    # decision delivered with no Decision Record at all, which is I10
+    # ("record before respond") broken on the one path built to honour it.
+    # "Cannot record" and "record write failed" get the same answer.
+    if not (BIC_AVAILABLE and bic_decision.is_open()):
+        print("BRAIN_RECORD unavailable (no open decision turn) — response "
+             "withheld (3A I10 record-before-respond)")
+        raise _BrainRecordFailure("no open decision turn")
+
+    turn = bic_decision.current()
+    decision_ref = turn.turn_id if turn else None
+    record = bic_decision.build_record()
+    try:
+        bic_db.insert(bic_decision.TABLE, record, timeout=3)
+    except Exception as e:
+        print(f"BRAIN_RECORD write failed — response withheld "
+             f"(3A record-before-respond): {e}")
+        raise _BrainRecordFailure(str(e)) from e
+    bic_decision.close_turn()
 
     # ⑭ REGISTER EXPECTATION (2I) — before ⑮ RESPOND, per 3A's stage order.
     # Only on PROCEED: that is the turn where a business action actually went

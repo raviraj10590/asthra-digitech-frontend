@@ -187,25 +187,90 @@ class RecordBeforeRespond(Base):
         with self.with_packet(proceed_packet()):
             self.run_pipeline()  # must not raise out of the test
 
+    def test_no_open_turn_withholds_the_response(self):
+        """AUDIT REGRESSION (3A I10). 'Cannot record' previously fell through
+        the record block and the caller SENT the decision anyway — a Brain
+        response with no Decision Record at all."""
+        bic_decision.close_turn()
+        with self.with_packet(proceed_packet()):
+            self.run_pipeline()
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.saved, [])
+        self.assertEqual(self.inserted, [])
+
 
 # ── 2 · goal handling / fallback ────────────────────────────────────────
 
 class FallbackToLegacy(Base):
-
-    def test_brain_infrastructure_error_falls_back_to_legacy_reply(self):
-        """An unexpected error in context assembly must not brick the
-        customer's reply — the legacy AI path still answers."""
-        self.stack.enter_context(mock.patch.object(
-            w.bic_context, "assemble", side_effect=RuntimeError("boom")))
-        self.run_pipeline()
-        self.assertEqual(len(self.sent), 1)
-        self.assertEqual(self.sent[0], (CLIENT, "LLM PROPOSAL TEXT"))
 
     def test_bic_unavailable_falls_back_to_legacy_reply(self):
         self.stack.enter_context(mock.patch.object(w, "BIC_AVAILABLE", False))
         self.run_pipeline()
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(self.sent[0], (CLIENT, "LLM PROPOSAL TEXT"))
+
+
+# ── AUDIT REGRESSION · I5 — no unadjudicated reply after admission ──────
+
+class AdmittedGoalNeverFallsBackToRawLlm(Base):
+    """3A I5 ("the LLM proposes; the state machine decides") and §6.3 rule 1
+    ("a degraded answer that looks normal is worse than a refusal").
+
+    An earlier revision let any post-admission error reach the caller's
+    generic handler, which answered with the raw provider output."""
+
+    def test_context_failure_refuses_rather_than_answering(self):
+        self.stack.enter_context(mock.patch.object(
+            w.bic_context, "assemble", side_effect=RuntimeError("boom")))
+        self.run_pipeline()
+        self.assertEqual(len(self.sent), 1)
+        self.assertNotIn("LLM PROPOSAL TEXT", self.sent[0][1])
+
+    def test_decide_failure_refuses_rather_than_answering(self):
+        self.stack.enter_context(mock.patch.object(
+            w.bic_decide, "decide", side_effect=RuntimeError("decide crashed")))
+        self.run_pipeline()
+        self.assertEqual(len(self.sent), 1)
+        self.assertNotIn("LLM PROPOSAL TEXT", self.sent[0][1])
+
+    def test_the_refusal_is_still_recorded_before_it_is_sent(self):
+        order = []
+        self.stack.enter_context(mock.patch.object(
+            w.bic_decide, "decide", side_effect=RuntimeError("decide crashed")))
+        self.stack.enter_context(mock.patch.object(
+            w.bic_db, "insert", lambda t, r, **k: order.append("insert")))
+        self.stack.enter_context(mock.patch.object(
+            w, "send_text", lambda to, t, **k: order.append("send")))
+        self.run_pipeline()
+        self.assertEqual(order, ["insert", "send"])
+
+    def test_failure_after_admission_consults_the_provider_only_once(self):
+        """The old fallback re-invoked the provider on the legacy path,
+        doubling cost and latency on every Brain-path error."""
+        calls = []
+        self.stack.enter_context(mock.patch.object(
+            w, "generate_reply",
+            lambda *a, **k: calls.append(1) or "LLM PROPOSAL TEXT"))
+        self.stack.enter_context(mock.patch.object(
+            w.bic_decide, "decide", side_effect=RuntimeError("decide crashed")))
+        self.run_pipeline()
+        self.assertEqual(len(calls), 1)
+
+    def test_provider_failure_degrades_loudly_instead_of_silently(self):
+        """§6.3 / T4 'never silence': a provider outage on an admitted goal
+        now yields a recorded deterministic refusal, not nothing."""
+        self.stack.enter_context(mock.patch.object(
+            w, "generate_reply", side_effect=RuntimeError("provider down")))
+        self.run_pipeline()
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(self.sent[0][1].strip())
+        self.assertEqual(len(self.inserted), 1)
+
+    def test_no_expectation_is_registered_for_a_failed_turn(self):
+        self.stack.enter_context(mock.patch.object(
+            w.bic_decide, "decide", side_effect=RuntimeError("decide crashed")))
+        self.run_pipeline()
+        self.assertFalse(self.producers.expect_customer_reply.called)
 
 
 # ── 15, 16 · tenant isolation carried through the wiring ────────────────
@@ -351,13 +416,16 @@ class ConsultFailure(Base):
                          "no expectation for an action that never went out")
 
     def test_llm_exception_does_not_send_a_fabricated_reply(self):
+        """A provider outage must never produce an invented answer. Since
+        the audit fix it degrades LOUDLY (§6.3 rule 1, T4 'never silence'):
+        a deterministic refusal, recorded — not the silence it used to be,
+        and never model output."""
         self.stack.enter_context(mock.patch.object(
             w, "generate_reply", side_effect=RuntimeError("provider down")))
-        try:
-            self.run_pipeline()
-        except RuntimeError:
-            pass  # propagates to do_POST, which marks the delivery FAILED
-        self.assertEqual(self.sent, [])
+        self.run_pipeline()
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][1], w.bic_decide.REFUSAL_TEXT)
+        self.assertEqual(len(self.inserted), 1, "the refusal is recorded")
 
 
 # ── 37 · webhook dedupe is untouched by this slice ──────────────────────

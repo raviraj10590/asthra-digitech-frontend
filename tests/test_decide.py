@@ -139,6 +139,23 @@ class GoalRecognition(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(decide.admit_goal(text))
 
+    def test_markers_match_on_word_boundaries_not_substrings(self):
+        """AUDIT REGRESSION. A bare `in` test made "insta" match "install",
+        "instant" and "instantly", admitting the goal for messages that are
+        not enquiries — breaking "activates only where the goal is reliably
+        identified" by accident."""
+        for text in ("please install the app", "I need it instantly",
+                     "instant reply needed", "is this instant?",
+                     "constant contact"):
+            with self.subTest(text=text):
+                self.assertIsNone(decide.admit_goal(text), text)
+
+    def test_the_colloquial_abbreviation_still_admits(self):
+        """The boundary fix must not cost the real short form."""
+        self.assertIsNotNone(decide.admit_goal("do you do insta?"))
+        self.assertIsNotNone(decide.admit_goal("insta and fb please"
+                                               .replace("fb", "facebook")))
+
     def test_high_risk_goals_are_unreachable_from_text(self):
         """A customer's wording must never select transformer/real-estate —
         their predicates are unregistered and their tiers are 4 and 2."""
