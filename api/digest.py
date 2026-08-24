@@ -4,12 +4,25 @@ Runs via Vercel Cron (9:00 AM IST daily) → sends yesterday's bot summary
 to the owner's WhatsApp.
 """
 
-import json, os
+import json, os, sys
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 import requests
+
+# IDD-2I: the daily cron is the only scheduler on this plan (Vercel Hobby
+# caps at 2 crons, both already in use — see the rollup/prune blocks below),
+# so the customer_reply timeout sweep rides here rather than adding a third.
+# Guarded exactly like webhook.py's BIC import: a bundling failure must
+# degrade to a log line, never break the digest that already works.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from bic import outcome_producers as bic_outcome_producers
+    BIC_AVAILABLE = True
+except Exception as _bic_err:  # pragma: no cover - environment dependent
+    BIC_AVAILABLE = False
+    print(f"BIC: package import FAILED ({_bic_err}) — timeout sweep skipped")
 
 VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN",    "asthra_secret_2024")
 WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN",  "")
@@ -147,6 +160,19 @@ class handler(BaseHTTPRequestHandler):
             print(f"bic replay retention: {r.status_code} {r.text[:80]}")
         except Exception as e:
             print(f"bic replay retention failed (ignored): {e}")
+
+        # IDD-2I Step 5: sweep customer_reply expectations whose window
+        # closed with no reply. Reports as data (I7) rather than discarding —
+        # every swept row becomes a NO_RESPONSE/TIMED_OUT observation.
+        # No-ops harmlessly until migration 17 is applied (table won't exist
+        # yet) and BIC_AVAILABLE is False if the import failed — either way
+        # this must never affect the digest send above, which already ran.
+        if BIC_AVAILABLE:
+            try:
+                result = bic_outcome_producers.sweep_customer_reply_timeouts()
+                print(f"bic outcome timeout sweep: {result}")
+            except Exception as e:
+                print(f"bic outcome timeout sweep failed (ignored): {e}")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

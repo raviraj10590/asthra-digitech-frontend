@@ -32,6 +32,7 @@ v2.7 — OWNER / STAFF / CLIENT role system (2026-07-28):
 import hashlib, hmac, json, os, re, sys, time, tempfile, requests
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 # ── BIC availability probe (Slice 1C prerequisite) ─────────────────────────────
@@ -50,9 +51,11 @@ try:
     from bic import (brain as bic_brain, claims as bic_claims,
                      config as bic_config, contract as bic_contract,
                      db as bic_db, decision as bic_decision,
-                     context as bic_context, explain as bic_explain,
+                     context as bic_context, decide as bic_decide,
+                     explain as bic_explain,
                      goals as bic_goals,
                      identity as bic_identity, knowledge as bic_knowledge,
+                     outcome_producers as bic_outcome_producers,
                      owner_context as bic_owner_context, party as bic_party,
                      policy as bic_policy, replay as bic_replay,
                      tools as bic_tools, webhook_events as bic_events)
@@ -2991,6 +2994,16 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
     """
     memory = fetch_memory(sender)  # env-gated: {} until MEMORY_TABLE is set
 
+    # IDD-2I: this inbound turn may be the reply to a still-open
+    # customer_reply expectation from a prior AI turn. Deterministic
+    # chronology only — no content inspection, no AI. Best-effort: a failed
+    # observation write must never affect the reply this turn sends back.
+    if BIC_AVAILABLE:
+        try:
+            bic_outcome_producers.observe_customer_reply(sender)
+        except Exception as e:
+            print(f"outcome_producers.observe_customer_reply failed (ignored): {e}")
+
     is_new_contact = not ctx["history"]
 
     # ── Menu escape hatch: reset any stuck chat to the services menu ──
@@ -3080,11 +3093,55 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
 
     # ── Normal AI reply ───────────────────────────────────────────
     else:
-        reply = generate_reply(sender, user_text, history=ctx["history"], memory=memory)
-        print(f"🤖 {reply[:80]}")
-        send_text(sender, reply + after_hours_note())
-        save_messages([(sender, "user", user_text),
-                       (sender, "assistant", reply)])
+        # IDD-3A stage ⑨ DECIDE (smallest slice — see bic/decide.py). The
+        # LLM's output is no longer sent directly: it is CONSULT's proposal,
+        # adjudicated against the 2H sufficiency verdict before anything is
+        # authorized to reach the customer.
+        decide_result = None
+        if BIC_AVAILABLE:
+            try:
+                decide_result = _bic_decide_and_record(sender, user_text, ctx, memory)
+            except _BrainRecordFailure:
+                # Record-before-respond (IDD-3A §1.3): the Decision Record
+                # could not be written, so no reply is sent this turn. The
+                # existing webhook `finally` still runs its own flush
+                # attempt and the delivery is marked accordingly — this is
+                # the one deliberate fail-closed path in this slice.
+                return
+            except Exception as e:
+                print(f"brain decide path failed, falling back to legacy AI reply (ignored): {e}")
+
+        if decide_result is not None:
+            reply = decide_result["text"]
+            print(f"🧠 [{decide_result['outcome']}] {reply[:80]}")
+            send_text(sender, reply + after_hours_note())
+            save_messages([(sender, "user", user_text),
+                           (sender, "assistant", reply)])
+        else:
+            # Legacy path — unchanged. Reached when the Brain path isn't
+            # available or hit an infrastructure error unrelated to the
+            # decision itself; a bug in new code must not brick the
+            # customer's reply.
+            reply = generate_reply(sender, user_text, history=ctx["history"], memory=memory)
+            print(f"🤖 {reply[:80]}")
+            send_text(sender, reply + after_hours_note())
+            save_messages([(sender, "user", user_text),
+                           (sender, "assistant", reply)])
+
+            # IDD-2I: the one eligible action for the first outcome producer
+            # (smallest safe set — see bic/outcome_producers.py). Opens the
+            # observation window at decision time (I6), attributed to THIS
+            # turn's Decision Record. Best-effort: never affects the reply
+            # already sent. Only wired for this legacy fallback path — the
+            # Brain-decided path above intentionally leaves ⑭ REGISTER
+            # EXPECTATION as a clean boundary for a later slice (see
+            # _bic_decide_and_record's docstring).
+            if BIC_AVAILABLE and bic_decision.is_open():
+                try:
+                    bic_outcome_producers.expect_customer_reply(
+                        sender, bic_decision.current().turn_id)
+                except Exception as e:
+                    print(f"outcome_producers.expect_customer_reply failed (ignored): {e}")
 
         # Lead extraction: EVERY turn while the chat is short (early
         # drop-offs are exactly the leads we must not lose), then every
@@ -3394,6 +3451,99 @@ def _decision_flush() -> None:
             print(f"DECISION_RECORD {json.dumps(record, default=str)}")
     except Exception as e:
         print(f"decision record flush failed (ignored, production unaffected): {e}")
+
+
+class _BrainRecordFailure(Exception):
+    """Record-before-respond (IDD-3A §1.3): raised when the Decision Record
+    for a Brain-decided turn could not be written. The caller must not send
+    a reply — 'the failures that break recording are the failures that
+    matter.'"""
+
+
+def _bic_decide_and_record(sender: str, user_text: str, ctx: dict,
+                           memory: dict) -> Optional[dict]:
+    """The first real Brain decision loop — IDD-3A stage ⑨, smallest slice.
+
+    ③/④ GOAL → ⑤ CONTEXT → ⑥ SUFFICIENCY → ⑧ CONSULT → ⑨ DECIDE →
+    ⑩ AUTHORIZE → ⑬ RECORD → ⑭ REGISTER EXPECTATION, in that order, with
+    BOTH record steps strictly before the caller may RESPOND (⑮). ⑦ PLAN is
+    intentionally absent (IDD-3B §0.1 — single-action turns skip planning).
+
+    Returns a decide() result dict the caller should send, or None meaning
+    UNSUPPORTED — the request is outside this first slice, and the caller
+    must fall back to its existing behaviour. None is also returned on an
+    infrastructure error in assembly: a bug in NEW code must never brick the
+    customer path.
+
+    Raises _BrainRecordFailure if durable recording fails — the caller must
+    not call send_text in that case.
+    """
+    goal_def = bic_decide.admit_goal(user_text)
+    if goal_def is None:
+        return None  # UNSUPPORTED — legacy behaviour, unchanged
+
+    principal = bic_identity.resolve(sender, channel="whatsapp")
+    subject = bic_party.resolve_or_create(bic_config.DEFAULT_TENANT_ID,
+                                          bic_party.WHATSAPP, sender)
+    packet = bic_decide.assemble_context(
+        bic_config.DEFAULT_TENANT_ID, user_text, principal, goal_def,
+        subject, describe=bic_knowledge.describe)
+
+    # ⑧ CONSULT — the existing provider chain, unchanged. The LLM proposes;
+    # it does not get to decide whether the system acts on its own proposal.
+    llm_proposal = generate_reply(sender, user_text, history=ctx["history"],
+                                  memory=memory)
+
+    outcome = bic_decide.decide(goal_def, packet, llm_proposal)
+
+    auth = bic_decide.authorize(principal, packet, goal_def,
+                                bic_config.DEFAULT_TENANT_ID)
+    if outcome["outcome"] == bic_decide.PROCEED and not auth["allowed"]:
+        outcome = bic_decide.refusal_result(
+            f"authorization denied: {auth['reason']}")
+
+    # ⑬ RECORD, strictly — before ⑮ RESPOND. bic_decision.flush() is
+    # deliberately best-effort everywhere else in this file (correct for
+    # every other decision-record site); this is the one path where a write
+    # failure must stop the turn rather than be swallowed. The outer
+    # webhook handler's existing `finally: _decision_flush()` still runs
+    # afterward — a safe no-op on success (turn already closed below), or a
+    # second best-effort attempt if this raises.
+    decision_ref = None
+    if BIC_AVAILABLE and bic_decision.is_open():
+        turn = bic_decision.current()
+        decision_ref = turn.turn_id if turn else None
+        record = bic_decision.build_record()
+        try:
+            bic_db.insert(bic_decision.TABLE, record, timeout=3)
+        except Exception as e:
+            print(f"BRAIN_RECORD write failed — response withheld "
+                 f"(3A record-before-respond): {e}")
+            raise _BrainRecordFailure(str(e)) from e
+        bic_decision.close_turn()
+
+    # ⑭ REGISTER EXPECTATION (2I) — before ⑮ RESPOND, per 3A's stage order.
+    # Only on PROCEED: that is the turn where a business action actually went
+    # out and a customer reply is the outcome worth watching. A CLARIFY is a
+    # question about our own missing evidence, not the action whose result
+    # 2I models here.
+    #
+    # BEST-EFFORT, DELIBERATELY — unlike ⑬ above. 3A's stage-contract table
+    # gives ⑬ a failure mode ("the audit may lag, never vanish") and gives ⑭
+    # none, so the record-before-respond rule binds the Decision Record, not
+    # this. It MUST stay non-fatal for a concrete reason: migration 17 is
+    # deliberately unapplied, so bic_outcome_records does not exist in
+    # production yet. Making this fatal would silence every social-media
+    # customer until that migration ships — introducing an outage to record
+    # an expectation about a reply we would then never send.
+    if decision_ref and outcome["outcome"] == bic_decide.PROCEED:
+        try:
+            bic_outcome_producers.expect_customer_reply(
+                sender, decision_ref, goal_ref=goal_def["goal_id"])
+        except Exception as e:
+            print(f"brain expectation registration failed (ignored): {e}")
+
+    return outcome
 
 
 def _bic_owner_turn(sender: str, user_text: str, ctx: dict,
