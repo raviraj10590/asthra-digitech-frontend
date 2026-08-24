@@ -3132,16 +3132,27 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # (smallest safe set — see bic/outcome_producers.py). Opens the
             # observation window at decision time (I6), attributed to THIS
             # turn's Decision Record. Best-effort: never affects the reply
-            # already sent. Only wired for this legacy fallback path — the
-            # Brain-decided path above intentionally leaves ⑭ REGISTER
-            # EXPECTATION as a clean boundary for a later slice (see
-            # _bic_decide_and_record's docstring).
+            # already sent. This is the LEGACY path's registration; the
+            # Brain-decided path registers its own ⑭ inside
+            # _bic_decide_and_record, before it responds.
             if BIC_AVAILABLE and bic_decision.is_open():
                 try:
                     bic_outcome_producers.expect_customer_reply(
                         sender, bic_decision.current().turn_id)
                 except Exception as e:
                     print(f"outcome_producers.expect_customer_reply failed (ignored): {e}")
+
+        # A REFUSED turn executes NOTHING downstream. The block below runs a
+        # second model over the transcript to extract lead facts, writes
+        # them, alerts the owner and fires workflows — and on a refusal the
+        # last assistant turn it reads is the canned refusal itself. Mining
+        # that for business facts is §6.3's "never fabricate to preserve
+        # fluency", and alerting the owner off it makes a refusal look like
+        # a qualified lead. PROCEED and CLARIFY are genuine conversational
+        # turns and keep the existing behaviour unchanged.
+        if decide_result is not None and \
+                decide_result["outcome"] == bic_decide.REFUSE:
+            return
 
         # Lead extraction: EVERY turn while the chat is short (early
         # drop-offs are exactly the leads we must not lose), then every

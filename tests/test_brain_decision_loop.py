@@ -111,9 +111,21 @@ class Base(unittest.TestCase):
     # vocabulary the bot's own menu already uses for this row.
     ADMITTING_TEXT = "I need help with instagram and social media marketing"
 
-    def run_pipeline(self, text=None):
+    # The post-reply lead/workflow block is gated on `len(history) >= 4`
+    # (history = ctx history + this turn's 2 messages). The default CTX has
+    # ONE entry, so that block is unreachable with it — a fixture that made
+    # "no downstream side effects" assertions pass vacuously. Tests about
+    # downstream execution must pass long_history=True.
+    LONG_HISTORY = [{"role": "user", "content": "a"},
+                    {"role": "assistant", "content": "b"},
+                    {"role": "user", "content": "c"}]
+
+    def run_pipeline(self, text=None, long_history=False):
+        ctx = dict(CTX)
+        if long_history:
+            ctx["history"] = list(self.LONG_HISTORY)
         w.run_client_pipeline(CLIENT, text if text is not None else self.ADMITTING_TEXT,
-                              dict(CTX), message_id="wamid.T1")
+                              ctx, message_id="wamid.T1")
 
 
 # ── 1, 7, 13 · the Brain path runs and produces a normal response ─────────
@@ -381,14 +393,62 @@ class ExecutionSurface(Base):
             self.run_pipeline()
         self.assertEqual(len(self.sent), 1)
 
-    def test_no_crm_or_external_side_effects_added(self):
+    def _wire_downstream(self):
+        """Capture the post-reply business block. NOTE: an earlier version of
+        this fixture left extract_lead_info returning {} from Base, so the
+        `if lead:` body never ran and the assertions below passed
+        vacuously — the block was in fact firing on every Brain turn."""
+        ev = {"extract": 0, "lead": 0, "owner": 0, "workflow": 0, "memory": 0}
+        s = self.stack.enter_context
+
+        def bump(key):
+            def _f(*a, **k):
+                ev[key] += 1
+            return _f
+
+        s(mock.patch.object(w, "extract_lead_info",
+                            lambda h: (ev.__setitem__("extract", ev["extract"] + 1),
+                                       {"name": "X", "service_needed": "social"})[1]))
+        s(mock.patch.object(w, "upsert_lead", bump("lead")))
+        s(mock.patch.object(w, "maybe_alert_lead", bump("owner")))
+        s(mock.patch.object(w, "run_workflows", bump("workflow")))
+        s(mock.patch.object(w, "update_memory", bump("memory")))
+        s(mock.patch.object(w, "notify_owner", bump("owner")))
+        return ev
+
+    def test_a_refused_turn_executes_nothing_downstream(self):
+        """AUDIT REGRESSION. A REFUSE still ran a SECOND model over the
+        transcript, wrote a lead, alerted the owner and fired workflows —
+        mining the canned refusal for business facts (§6.3 rule 2) and
+        making a refusal look like a qualified lead."""
+        ev = self._wire_downstream()
+        with self.with_packet(refuse_packet()):
+            self.run_pipeline(long_history=True)
+        self.assertEqual(len(self.sent), 1, "the refusal itself is still sent")
+        self.assertEqual(ev, {"extract": 0, "lead": 0, "owner": 0,
+                              "workflow": 0, "memory": 0})
+
+    def test_proceed_keeps_the_existing_downstream_behaviour(self):
+        """The fix must be surgical — PROCEED is a genuine conversational
+        turn and must not lose lead capture."""
+        ev = self._wire_downstream()
+        with self.with_packet(proceed_packet()):
+            self.run_pipeline(long_history=True)
+        self.assertEqual(ev["extract"], 1)
+        self.assertEqual(ev["lead"], 1)
+
+    def test_clarify_keeps_the_existing_downstream_behaviour(self):
+        ev = self._wire_downstream()
+        with self.with_packet(clarify_packet()):
+            self.run_pipeline(long_history=True)
+        self.assertEqual(ev["extract"], 1)
+
+    def test_no_crm_mirror_or_lead_sync_added_by_the_brain_path(self):
         crm = []
         self.stack.enter_context(mock.patch.object(
             w, "log_reply_to_crm", lambda *a, **k: crm.append(1)))
         self.stack.enter_context(mock.patch.object(
             w, "sync_lead_to_crm", lambda *a, **k: crm.append(1)))
-        self.stack.enter_context(mock.patch.object(
-            w, "upsert_lead", lambda *a, **k: crm.append(1)))
         with self.with_packet(proceed_packet()):
             self.run_pipeline()
         self.assertEqual(crm, [])
@@ -426,6 +486,96 @@ class ConsultFailure(Base):
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(self.sent[0][1], w.bic_decide.REFUSAL_TEXT)
         self.assertEqual(len(self.inserted), 1, "the refusal is recorded")
+
+
+# ── Phase 10 · the loop's states, made explicit ─────────────────────────
+
+class StateTransitions(Base):
+    """One assertion per reachable state of the first Brain loop.
+
+    Deliberately NOT a state-machine framework (3A §2 is not implemented and
+    is out of scope here) — these observe the states from OUTSIDE, through
+    effects the contract makes observable: whether a decision was recorded,
+    whether an expectation was registered, what reached the customer, and
+    whether downstream execution ran.
+    """
+
+    def observe(self, packet=None, text=None, **patches):
+        """Run one turn and report the externally observable state."""
+        ev = {"extract": 0}
+        self.stack.enter_context(mock.patch.object(
+            w, "extract_lead_info",
+            lambda h: (ev.__setitem__("extract", ev["extract"] + 1), {})[1]))
+        for target, kw in patches.items():
+            self.stack.enter_context(mock.patch.object(w, target, **kw))
+        ctx = mock.patch.object(w.bic_context, "assemble",
+                                lambda *a, **k: packet) if packet else None
+        if ctx:
+            self.stack.enter_context(ctx)
+        self.run_pipeline(text, long_history=True)
+        return {
+            "sent": [t for _, t in self.sent],
+            "recorded": len(self.inserted),
+            "expected": self.producers.expect_customer_reply.called,
+            "executed_downstream": ev["extract"] > 0,
+        }
+
+    # ── success path ────────────────────────────────────────────────
+    def test_admitted_context_sufficient_consulted_decided_recorded_responded(self):
+        st = self.observe(proceed_packet())
+        self.assertEqual(st["sent"], ["LLM PROPOSAL TEXT"])   # RESPONDED
+        self.assertEqual(st["recorded"], 1)                    # RECORDED
+        self.assertTrue(st["expected"])                        # EXPECTED
+        self.assertTrue(st["executed_downstream"])             # EXECUTED
+
+    # ── failure states ──────────────────────────────────────────────
+    def test_state_unsupported(self):
+        st = self.observe(text="what are your prices?")
+        self.assertEqual(st["sent"], ["LLM PROPOSAL TEXT"])  # legacy, unchanged
+        self.assertFalse(st["expected"] is False and st["recorded"] > 0,
+                         "legacy path must not write a brain decision record")
+
+    def test_state_clarify(self):
+        st = self.observe(clarify_packet())
+        self.assertIn("service_interest", st["sent"][0])
+        self.assertEqual(st["recorded"], 1)
+        self.assertFalse(st["expected"], "no action went out to await a reply to")
+
+    def test_state_refused(self):
+        st = self.observe(refuse_packet())
+        self.assertEqual(st["sent"], [w.bic_decide.REFUSAL_TEXT])
+        self.assertEqual(st["recorded"], 1)
+        self.assertFalse(st["expected"])
+        self.assertFalse(st["executed_downstream"])
+
+    def test_state_unauthorized(self):
+        pkt = proceed_packet()
+        pkt["goal_ref"] = "a_mismatched_goal"
+        st = self.observe(pkt)
+        self.assertEqual(st["sent"], [w.bic_decide.REFUSAL_TEXT])
+        self.assertEqual(st["recorded"], 1)
+        self.assertFalse(st["expected"])
+
+    def test_state_unavailable_context(self):
+        self.stack.enter_context(mock.patch.object(
+            w.bic_context, "assemble", side_effect=RuntimeError("store down")))
+        self.run_pipeline()
+        self.assertEqual([t for _, t in self.sent], [w.bic_decide.REFUSAL_TEXT])
+        self.assertEqual(len(self.inserted), 1)
+
+    def test_state_record_failed(self):
+        self.stack.enter_context(mock.patch.object(
+            w.bic_db, "insert", side_effect=DbError("store down")))
+        with self.with_packet(proceed_packet()):
+            self.run_pipeline()
+        self.assertEqual(self.sent, [])          # nothing responded
+        self.assertFalse(self.producers.expect_customer_reply.called)
+
+    def test_state_no_open_record(self):
+        bic_decision.close_turn()
+        with self.with_packet(proceed_packet()):
+            self.run_pipeline()
+        self.assertEqual(self.sent, [])
 
 
 # ── 37 · webhook dedupe is untouched by this slice ──────────────────────
