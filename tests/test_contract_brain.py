@@ -60,6 +60,19 @@ class TestContract(unittest.TestCase):
 
 
 class TestBrainRouting(unittest.TestCase):
+
+    def setUp(self):
+        self._saved_fetcher = identity._fetch_row
+
+    def tearDown(self):
+        # configure() installs a PROCESS-WIDE fetcher; these tests install
+        # stubs inline. Without this restore they re-role every later test's
+        # phone numbers — the defect that failed the webhook lifecycle suite
+        # from ~130 tests away. Same discipline as
+        # test_1c_closure_validation.py.
+        identity.configure(self._saved_fetcher)
+        identity.clear_cache()
+
     def test_owner_takes_owner_flow(self):
         rec = []
         resp = brain.handle(req(sender=OWNER), flows(rec))

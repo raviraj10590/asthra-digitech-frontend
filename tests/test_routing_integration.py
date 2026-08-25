@@ -75,8 +75,20 @@ def run(path: str, sender: str, text: str):
 
 class TestOwnerRoutingEquivalence(unittest.TestCase):
     def setUp(self):
+        self._saved_fetcher = identity._fetch_row
         identity.clear_cache()
         identity.configure(lambda p: None)
+
+    def tearDown(self):
+        # IDENTITY IS MODULE-LEVEL STATE. configure() installs a fetcher for
+        # the whole process, so a test that installs one and walks away
+        # re-roles every later test's phone numbers. This module left a
+        # fetcher returning STAFF for ANY number, which routed the webhook
+        # lifecycle suite down the OWNER branch and failed five of its tests
+        # ~130 tests later. Same save/restore discipline as
+        # test_1c_closure_validation.py.
+        identity.configure(self._saved_fetcher)
+        identity.clear_cache()
 
     def test_owner_reply_identical(self):
         legacy, brain = run("legacy", OWNER, "status?"), run("brain", OWNER, "status?")
@@ -89,8 +101,20 @@ class TestOwnerRoutingEquivalence(unittest.TestCase):
 
 class TestClientRoutingEquivalence(unittest.TestCase):
     def setUp(self):
+        self._saved_fetcher = identity._fetch_row
         identity.clear_cache()
         identity.configure(lambda p: None)
+
+    def tearDown(self):
+        # IDENTITY IS MODULE-LEVEL STATE. configure() installs a fetcher for
+        # the whole process, so a test that installs one and walks away
+        # re-roles every later test's phone numbers. This module left a
+        # fetcher returning STAFF for ANY number, which routed the webhook
+        # lifecycle suite down the OWNER branch and failed five of its tests
+        # ~130 tests later. Same save/restore discipline as
+        # test_1c_closure_validation.py.
+        identity.configure(self._saved_fetcher)
+        identity.clear_cache()
 
     def test_normal_ai_reply_identical(self):
         legacy, brain = run("legacy", CLIENT, "website price?"), run("brain", CLIENT, "website price?")
