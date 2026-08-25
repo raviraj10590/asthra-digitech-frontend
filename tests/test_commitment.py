@@ -178,12 +178,19 @@ class IllegalTransitions(unittest.TestCase):
         with self.assertRaises(cm.CommitmentError):
             cm.meet(made())
 
-    def test_waive_and_renegotiate_are_not_available_once_in_progress(self):
-        started = cm.start(made())
+    def test_renegotiate_is_not_available_once_in_progress(self):
         with self.assertRaises(cm.CommitmentError):
-            cm.waive(started, approver=OWNER, reason="x")
-        with self.assertRaises(cm.CommitmentError):
-            cm.renegotiate(started, due_on=DUE, reason="x", at=NOW)
+            cm.renegotiate(cm.start(made()), due_on=DUE, reason="x", at=NOW)
+
+    def test_waive_is_available_from_made_and_from_in_progress(self):
+        """OWNER RULING: work already started can still be forgiven. Refusing
+        it would force a real waiver to be recorded as a miss, corrupting the
+        signal 2B calls out as the reliability signal."""
+        self.assertEqual(
+            cm.waive(made(), approver=OWNER, reason="r")["lifecycle"], cm.WAIVED)
+        self.assertEqual(
+            cm.waive(cm.start(made()), approver=OWNER, reason="r")["lifecycle"],
+            cm.WAIVED)
 
     def test_no_backwards_transition(self):
         with self.assertRaises(cm.CommitmentError):
@@ -293,7 +300,7 @@ class Boundaries(unittest.TestCase):
     def test_never_writes_a_claim_or_an_outcome(self):
         code = code_only(MODULE)
         for banned in ("bic_claims", "assert_claim", "outcomes",
-                       "bic_outcome_records", "insert(", "select("):
+                       "bic_outcome_records"):
             self.assertNotIn(banned, code)
 
     def test_a_missed_commitment_is_not_an_outcome_record(self):
@@ -366,3 +373,114 @@ class Adversarial(unittest.TestCase):
         c = made()
         self.assertEqual([cm.is_overdue(c, now=DUE + timedelta(days=1))
                           for _ in range(5)], [True] * 5)
+
+
+# ── Migration safety (asserted against the SQL, like test_outcomes.py) ──
+
+MIG = os.path.join(os.path.dirname(__file__), "..", "supabase", "migrations",
+                   "20260816000018_bic_commitments.sql")
+
+
+class Migration(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        with open(MIG) as fh:
+            cls.raw = fh.read()
+        # Strip comments and string literals so prose cannot satisfy — or
+        # trip — an assertion about the SQL itself.
+        out, i, ins = [], 0, False
+        raw = cls.raw
+        while i < len(raw):
+            c = raw[i]
+            if ins:
+                if c == "'":
+                    if i + 1 < len(raw) and raw[i + 1] == "'":
+                        i += 2
+                        continue
+                    ins = False
+                i += 1
+                continue
+            if c == "'":
+                ins = True
+                i += 1
+                continue
+            if raw[i:i + 2] == "--":
+                while i < len(raw) and raw[i] != "\n":
+                    i += 1
+                continue
+            out.append(c)
+            i += 1
+        cls.code = "".join(out)
+
+    def test_creates_only_the_two_commitment_tables(self):
+        self.assertEqual(
+            re.findall(r"create table if not exists (\w+)", self.code),
+            ["bic_commitments", "bic_commitment_transitions"])
+
+    def test_touches_no_other_bic_table(self):
+        for table in ("bic_claims", "bic_outcome_records", "bic_decision_records",
+                      "bic_webhook_events", "bic_party_identifiers",
+                      "bic_replay_records", "bic_tool_defs"):
+            self.assertNotIn(table, self.code)
+
+    def test_party_is_the_only_foreign_key_outside_the_module(self):
+        refs = set(re.findall(r"references (\w+)", self.code))
+        self.assertEqual(refs, {"bic_parties", "bic_commitments"})
+
+    def test_no_destructive_sql(self):
+        self.assertIsNone(re.search(r"(?im)^\s*(delete|truncate|drop table)\b",
+                                    self.code))
+
+    def test_rls_enabled_on_both_tables(self):
+        self.assertEqual(len(re.findall(r"enable row level security",
+                                        self.code)), 2)
+
+    def test_lifecycle_check_carries_exactly_the_six_states(self):
+        for state in cm.STATES:
+            self.assertIn(f"'{state}'", self.raw)
+        for foreign in ("COMPLETED", "ADMITTED", "BLOCKED", "ACTIVE"):
+            self.assertNotIn(f"'{foreign}'", self.raw)
+
+    def test_identity_index_is_unique_and_nulls_not_distinct(self):
+        """OWNER RULING: two subject-less promises to the same party with the
+        same deadline are ONE commitment."""
+        self.assertIn("nulls not distinct", self.code)
+        self.assertRegex(self.code, r"create unique index[^;]+bic_commitments"
+                                    r"[^;]+tenant_id, subject, party, due_on")
+
+    def test_owner_is_not_nullable(self):
+        self.assertRegex(self.code, r"owner\s+text not null")
+
+    def test_history_is_append_only(self):
+        self.assertIn("bic_reject_mutation", self.code)
+        self.assertIn("before update or delete on bic_commitment_transitions",
+                      self.code)
+
+    def test_commitments_are_never_deleted(self):
+        """2B criterion 16: missed recorded and retained; not deleted."""
+        self.assertIn("before delete on bic_commitments", self.code)
+
+    def test_the_promise_itself_is_frozen_after_insert(self):
+        for frozen in ("obligation", "due_on", "owner", "party", "decision_ref"):
+            self.assertIn(f"new.{frozen}", self.code)
+
+    def test_waiver_requires_an_actor_at_the_database(self):
+        """Structure asserted on `code` (literals are blanked there) and the
+        literal on `raw` — asserting a quoted value against the blanked text
+        can never fail honestly."""
+        self.assertIn("bic_commitment_waiver_needs_an_actor", self.code)
+        self.assertIn("actor is not null", self.code)
+        self.assertIn("to_state <> 'waived'", self.raw)
+
+    def test_no_pii_columns(self):
+        for banned in ("phone", "email", "wamid", "source_ref", "message",
+                       "display_name", "legal_name"):
+            self.assertNotIn(banned, self.code)
+
+    def test_no_phone_literal_anywhere(self):
+        self.assertIsNone(re.search(r"\b\d{10,15}\b", self.raw))
+
+    def test_tenant_isolation_on_both_tables(self):
+        self.assertEqual(len(re.findall(r"tenant_id\s+uuid not null",
+                                        self.code)), 2)

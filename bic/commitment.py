@@ -33,7 +33,9 @@ Read off the diagram, and deliberately no wider:
     having been worked on.
   · `missed` branches from BOTH `made` and `in_progress` — that is what the
     `├────────┴─►` spans.
-  · `waived` and `renegotiated` branch from `made` only.
+  · `renegotiated` branches from `made` only.
+  · `waived` is reachable from `made` AND `in_progress` — an owner ruling
+    where the diagram was ambiguous; see _ALLOWED.
   · `renegotiated` CLOSES this commitment and names its successor; it does
     not reopen. 2B applies the same rule to Document: "`superseded` requires
     naming the successor. Revision is modelled; deletion is not."
@@ -88,7 +90,12 @@ TERMINALS = (MET, MISSED, WAIVED, RENEGOTIATED)
 # including made → met, because nothing is met without being worked on.
 _ALLOWED = {
     MADE: (IN_PROGRESS, MISSED, WAIVED, RENEGOTIATED),
-    IN_PROGRESS: (MET, MISSED),
+    # `waived` from in_progress is an OWNER RULING (2026-08-25), not a
+    # reading of the diagram: the ASCII branches waived off `made` only, but
+    # work already started can still be forgiven, and refusing that would
+    # force a real waiver to be recorded as a miss — corrupting the one
+    # signal 2B calls out as the reliability signal.
+    IN_PROGRESS: (MET, MISSED, WAIVED),
 }
 
 
