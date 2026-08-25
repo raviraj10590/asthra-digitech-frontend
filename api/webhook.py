@@ -52,6 +52,7 @@ try:
                      config as bic_config, contract as bic_contract,
                      db as bic_db, decision as bic_decision,
                      context as bic_context, decide as bic_decide,
+                     escalation as bic_escalation,
                      explain as bic_explain,
                      goal_lifecycle as bic_goal_lifecycle,
                      observe as bic_observe,
@@ -3177,12 +3178,25 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # still reported the enquiry answered and the goal COMPLETED.
             _goal = decide_result.get("goal_instance")
             if _goal is not None:
-                try:
-                    _goal = bic_goal_lifecycle.complete(
-                        _goal,
-                        {"response_delivered": bic_observe.delivered(_obs)})
-                except bic_goal_lifecycle.GoalError:
-                    pass    # not completable — its state already says why
+                if _rec["needs_human"]:
+                    # NOT completed and NOT terminal. The intention still
+                    # exists and is waiting on a human, which is exactly what
+                    # BLOCKED means (3B §1.3) — UNAVAILABLE because the
+                    # channel is the thing that failed. Creating a Commitment
+                    # does not finish the goal: 3B keeps them distinct, and
+                    # completion is still judged only by RESPONSE_DELIVERED.
+                    try:
+                        _goal = bic_goal_lifecycle.block(
+                            _goal, bic_goal_lifecycle.BLOCKED_UNAVAILABLE)
+                    except bic_goal_lifecycle.GoalError:
+                        pass
+                else:
+                    try:
+                        _goal = bic_goal_lifecycle.complete(
+                            _goal,
+                            {"response_delivered": bic_observe.delivered(_obs)})
+                    except bic_goal_lifecycle.GoalError:
+                        pass    # not completable — its state already says why
                 print("GOAL_STATE " + json.dumps(
                     bic_goal_lifecycle.describe(_goal), default=str))
 
@@ -3194,13 +3208,42 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                 # thing that just failed, and a blind resend is the one move
                 # that could double-send.
                 if _rec["needs_human"]:
+                    # ⑮ ESCALATE → 2B COMMITMENT. Durable deferred work is a
+                    # promise the business holds itself to (3B §1.2), not a
+                    # queue row. Only on PROCEED: a CLARIFY or REFUSE that
+                    # failed to send leaves no obligation outstanding — we
+                    # never promised anything — and recording one would put
+                    # a debt in the ledger the business does not owe.
+                    #
+                    # Records NOTHING while no due_on policy exists, and says
+                    # so in the alert. Inventing a deadline here would author
+                    # the SLA the firm is later judged against.
+                    _esc = {"escalation": bic_escalation.NOT_APPLICABLE}
+                    if decide_result["outcome"] == bic_decide.PROCEED:
+                        try:
+                            _esc = bic_escalation.escalate(
+                                _rec,
+                                tenant_id=bic_config.DEFAULT_TENANT_ID,
+                                party=decide_result.get("_party_ref"),
+                                decision_ref=decide_result.get("_decision_ref"),
+                                owner=bic_escalation.resolve_owner(),
+                                goal_ref=(_goal or {}).get("goal_id"))
+                            print("EXECUTION_ESCALATION " + json.dumps(
+                                bic_escalation.describe(_esc), default=str))
+                        except Exception as _e:
+                            # Never let escalation bookkeeping turn an
+                            # undelivered reply into a 500 on a live webhook.
+                            print(f"brain escalation failed (ignored): "
+                                  f"{type(_e).__name__}")
                     try:
                         notify_owner(
                             f"⚠️ Reply NOT delivered to wa.me/{sender}\n"
                             f"Channel: {_obs['failure_class'] or 'UNKNOWN'} "
                             f"after {_rec['attempt']} attempt(s)\n"
                             f"👉 Delivery is uncertain — check before resending "
-                            f"so the customer is not messaged twice.")
+                            f"so the customer is not messaged twice."
+                            + (f"\n{bic_escalation.owner_note(_esc)}"
+                               if bic_escalation.owner_note(_esc) else ""))
                     except Exception as _e:
                         print(f"owner escalation failed (ignored): {_e}")
                 # Nothing reached the customer. Do not run the post-reply
@@ -3593,10 +3636,14 @@ def _bic_decide_and_record(sender: str, user_text: str, ctx: dict,
     # degrades LOUDLY, to a deterministic refusal, and still passes through
     # the same record gate below.
     goal_instance = None
+    # The customer's opaque 2B party id, hoisted out of the try so the caller
+    # can still attribute an escalation when assembly failed partway.
+    party_ref = None
     try:
         principal = bic_identity.resolve(sender, channel="whatsapp")
         subject = bic_party.resolve_or_create(bic_config.DEFAULT_TENANT_ID,
                                               bic_party.WHATSAPP, sender)
+        party_ref = subject
         # ④ The admitted goal INSTANCE (IDD-3B §1.1). Admission raises if the
         # definition declares no completion condition, so a goal that could
         # never end cannot enter the loop.
@@ -3702,6 +3749,12 @@ def _bic_decide_and_record(sender: str, user_text: str, ctx: dict,
     # delivered — the completion condition is RESPONSE_DELIVERED, and at this
     # point nothing has been sent yet.
     outcome["goal_instance"] = goal_instance
+    # Attribution for a possible ⑮ escalation (IDD-2B: a Commitment names the
+    # party it is owed to and the Decision Record that created it). Carried
+    # separately from _pending_expectation, which is a 2I concept with its own
+    # PROCEED-only rule — conflating them would make one field mean two things.
+    outcome["_decision_ref"] = decision_ref
+    outcome["_party_ref"] = party_ref
     return outcome
 
 

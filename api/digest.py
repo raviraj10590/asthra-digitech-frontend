@@ -18,7 +18,8 @@ import requests
 # degrade to a log line, never break the digest that already works.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
-    from bic import outcome_producers as bic_outcome_producers
+    from bic import (commitment as bic_commitment, config as bic_config,
+                     outcome_producers as bic_outcome_producers)
     BIC_AVAILABLE = True
 except Exception as _bic_err:  # pragma: no cover - environment dependent
     BIC_AVAILABLE = False
@@ -173,6 +174,35 @@ class handler(BaseHTTPRequestHandler):
                 print(f"bic outcome timeout sweep: {result}")
             except Exception as e:
                 print(f"bic outcome timeout sweep failed (ignored): {e}")
+
+        # IDD-2B: "what have we promised and are we about to miss it?" — the
+        # question Commitment exists to answer. READ-ONLY, deliberately.
+        #
+        # NOTHING IS MARKED MISSED HERE. "`missed` is recorded, never
+        # deleted... missed commitments are the reliability signal", and a
+        # cron that transitioned rows would manufacture that judgement from a
+        # clock tick, with no reason and no actor. A real miss goes through
+        # the transition RPC with both. This only reports.
+        #
+        # Rides the existing daily cron — no third scheduler, per the note at
+        # the top of this file.
+        if BIC_AVAILABLE:
+            try:
+                due = bic_commitment.overdue(bic_config.DEFAULT_TENANT_ID)
+                if due:
+                    # Counts and obligation names only: a commitment id is an
+                    # internal UUID and the party is an opaque knowledge id —
+                    # neither is usable by the person reading this on a phone.
+                    kinds = sorted({str(c.get("obligation")) for c in due})
+                    send_to_owner(
+                        f"⏰ {len(due)} overdue commitment(s): "
+                        f"{', '.join(kinds)}\n"
+                        f"👉 Review and close them — nothing is marked missed "
+                        f"automatically.")
+                print(f"bic overdue commitments: {len(due)}")
+            except Exception as e:
+                print(f"bic overdue commitment check failed (ignored): "
+                      f"{type(e).__name__}")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
