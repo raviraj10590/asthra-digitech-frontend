@@ -91,6 +91,48 @@ def insert(table: str, rows, timeout: Optional[float] = None) -> None:
         raise DbError(f"{table} insert {r.status_code}: {r.text[:200]}")
 
 
+def rpc(function: str, params: dict, timeout: Optional[float] = None):
+    """POST /rest/v1/rpc/<function>. Raises DbError on failure.
+
+    ⚠️ NARROW BY DESIGN, like `update` above. This exists for ONE reason: a
+    Postgres function is the only place this architecture can perform TWO
+    writes atomically. PostgREST gives `insert` and `update` as independent
+    HTTP calls, so a two-write operation done here would be interruptible
+    halfway — and for a commitment transition the bad half is a lifecycle
+    change with no audit trail, which is exactly what the append-only history
+    exists to prevent.
+
+    IT IS NOT A GENERIC ESCAPE HATCH. It executes NAMED functions that ship
+    in migrations and are `revoke`d from public/anon/authenticated; it cannot
+    run arbitrary SQL, and no caller may pass a statement. Adding a function
+    is a migration, reviewable like any other schema change — which is the
+    property that keeps this from becoming an ORM.
+
+    The repository already uses this mechanism: api/digest.py calls
+    bic_rollup_tool_invocations and bic_prune_replay_records the same way.
+    """
+    if not config.is_configured():
+        raise DbError("BIC not configured: SUPABASE_SERVICE_ROLE_KEY is missing")
+    _count()
+    try:
+        r = requests.post(
+            f"{config.SUPABASE_URL}/rest/v1/rpc/{function}",
+            headers=_headers(),
+            json=params,
+            timeout=timeout or config.DB_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        raise DbError(f"{function} rpc failed: {e}") from e
+    if not r.ok:
+        # Body truncated for the same reason every other helper truncates it:
+        # a Postgres error can echo a row value back.
+        raise DbError(f"{function} rpc {r.status_code}: {r.text[:200]}")
+    try:
+        return r.json()
+    except ValueError:
+        return None
+
+
 def update(table: str, params: dict, patch: dict,
            timeout: Optional[float] = None) -> None:
     """PATCH rows matching `params`. Raises DbError on failure.

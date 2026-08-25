@@ -657,27 +657,222 @@ class Overdue(PersistenceBase):
         self.assertIn("IN_PROGRESS", code)
 
 
-class TransitionsAreNotPersistableYet(PersistenceBase):
-    """bic.db has no transaction across two writes, so a lifecycle move
-    could land as a state change with no audit trail — the one failure the
-    append-only history exists to prevent."""
+class FakeRpc:
+    """CONTRACT FAKE for bic_commitment_transition, NOT a database.
 
-    def test_record_transition_refuses_rather_than_half_writing(self):
-        c = cm.save(made())
+    It reproduces the function's semantics — tenant-scoped lookup, the legal
+    transition map, waiver actor, successor validation, and ALL-OR-NOTHING
+    application of the two writes — so the Python side can be tested against
+    the contract offline. It is not evidence that the SQL is correct; only
+    applying migration 18 against Postgres proves that. Labelled here so the
+    distinction is never lost.
+    """
+
+    ALLOWED = {"made": ("in_progress", "missed", "waived", "renegotiated"),
+               "in_progress": ("met", "missed", "waived")}
+    TERMINAL = ("met", "missed", "waived", "renegotiated")
+
+    def __init__(self, store):
+        self.store = store
+        self.calls = 0
+
+    def __call__(self, function, params, timeout=None):
+        self.calls += 1
+        assert function == cm.RPC_TRANSITION, function
+        tenant = params["p_tenant_id"]
+        cid = params["p_commitment_id"]
+        to_state = params["p_to_state"]
+        reason, actor = params["p_reason"], params.get("p_actor")
+        successor = params.get("p_successor")
+
+        if not reason:
+            raise DbError("a transition requires a reason")
+        row = next((r for r in self.store.rows
+                    if r["commitment_id"] == cid and r["tenant_id"] == tenant),
+                   None)
+        if row is None:
+            raise DbError("no such commitment in this tenant")
+        frm = row["lifecycle"]
+        if frm in self.TERMINAL:
+            raise DbError(f"commitment is already terminal ({frm})")
+        if to_state not in self.ALLOWED.get(frm, ()):
+            raise DbError(f"illegal transition {frm} -> {to_state}")
+        if to_state == "waived" and not actor:
+            raise DbError("waiving a commitment requires an actor")
+        if to_state == "renegotiated":
+            if not successor:
+                raise DbError("renegotiation must name its successor")
+            if successor == cid:
+                raise DbError("a commitment cannot supersede itself")
+            succ = next((r for r in self.store.rows
+                         if r["commitment_id"] == successor
+                         and r["tenant_id"] == tenant), None)
+            if succ is None:
+                raise DbError("successor does not exist in this tenant")
+            if succ["lifecycle"] != "made":
+                raise DbError("successor must be a newly made commitment")
+        elif successor:
+            raise DbError("only a renegotiation may name a successor")
+
+        # Both writes, or neither — every raise above happened first.
+        row["lifecycle"] = to_state
+        if to_state == "renegotiated":
+            row["superseded_by"] = successor
+        self.store.transitions.append({
+            "tenant_id": tenant, "commitment_id": cid, "from_state": frm,
+            "to_state": to_state, "reason": reason, "actor": actor,
+            "occurred_at": f"2026-08-25T06:00:0{len(self.store.transitions)}+00:00"})
+        return dict(row)
+
+
+class AtomicTransitions(PersistenceBase):
+    """Contract tests against FakeRpc (see its docstring on what this does
+    and does not prove)."""
+
+    def setUp(self):
+        super().setUp()
+        self.rpc = FakeRpc(self.store)
+        self._r = mock.patch.object(cm, "rpc", self.rpc)
+        self._r.start()
+        self.addCleanup(self._r.stop)
+        self.c = cm.save(made())
+
+    def state(self):
+        return self.store.rows[0]["lifecycle"]
+
+    # 1 · success writes both halves
+    def test_successful_transition_updates_row_and_appends_history(self):
+        out = cm.record_transition(self.c, cm.IN_PROGRESS, reason="started")
+        self.assertEqual(out["lifecycle"], cm.IN_PROGRESS)
+        self.assertEqual(self.state(), cm.IN_PROGRESS)
+        self.assertEqual(len(self.store.transitions), 1)
+
+    def test_exactly_one_transition_row_and_one_rpc_call(self):
+        cm.record_transition(self.c, cm.IN_PROGRESS, reason="started")
+        self.assertEqual(len(self.store.transitions), 1)
+        self.assertEqual(self.rpc.calls, 1)
+
+    def test_history_records_both_endpoints(self):
+        cm.record_transition(self.c, cm.IN_PROGRESS, reason="started")
+        t = self.store.transitions[0]
+        self.assertEqual((t["from_state"], t["to_state"]),
+                         (cm.MADE, cm.IN_PROGRESS))
+        self.assertTrue(t["reason"])
+
+    # 2-5 · every rejection changes NEITHER half
+    def test_illegal_transition_changes_neither(self):
         with self.assertRaises(cm.CommitmentError):
-            cm.record_transition(c, cm.IN_PROGRESS, reason="started")
+            cm.record_transition(self.c, cm.MET, reason="skip ahead")
+        self.assertEqual(self.state(), cm.MADE)
         self.assertEqual(self.store.transitions, [])
-        self.assertEqual(self.store.rows[0]["lifecycle"], cm.MADE)
+        self.assertEqual(self.rpc.calls, 0, "rejected before any round trip")
 
-    def test_the_module_never_imports_update(self):
-        """db.update is documented as narrow by design; this slice takes no
-        second use of it."""
+    def test_waiver_without_actor_changes_neither(self):
+        with self.assertRaises(cm.CommitmentError):
+            cm.record_transition(self.c, cm.WAIVED, reason="forgiven")
+        self.assertEqual(self.state(), cm.MADE)
+        self.assertEqual(self.store.transitions, [])
+
+    def test_invalid_successor_changes_neither(self):
+        with self.assertRaises(DbError):
+            cm.record_transition(self.c, cm.RENEGOTIATED, reason="slipped",
+                                 successor="dddddddd-0000-4000-8000-00000000000d")
+        self.assertEqual(self.state(), cm.MADE)
+        self.assertEqual(self.store.transitions, [])
+
+    def test_tenant_mismatch_changes_neither(self):
+        foreign = dict(self.c, tenant_id=OTHER_TENANT)
+        with self.assertRaises(DbError):
+            cm.record_transition(foreign, cm.IN_PROGRESS, reason="started")
+        self.assertEqual(self.state(), cm.MADE)
+        self.assertEqual(self.store.transitions, [])
+
+    # 6 · a database failure leaves nothing behind
+    def test_database_failure_changes_neither(self):
+        with mock.patch.object(cm, "rpc", side_effect=DbError("connection lost")):
+            with self.assertRaises(DbError):
+                cm.record_transition(self.c, cm.IN_PROGRESS, reason="started")
+        self.assertEqual(self.state(), cm.MADE)
+        self.assertEqual(self.store.transitions, [])
+
+    def test_an_empty_rpc_result_is_treated_as_not_applied(self):
+        with mock.patch.object(cm, "rpc", lambda *a, **k: None):
+            with self.assertRaises(cm.CommitmentError):
+                cm.record_transition(self.c, cm.IN_PROGRESS, reason="started")
+
+    # 7-8 · repetition stays consistent
+    def test_repeating_a_transition_is_refused_and_history_stays_consistent(self):
+        moved = cm.record_transition(self.c, cm.IN_PROGRESS, reason="started")
+        with self.assertRaises(cm.CommitmentError):
+            cm.record_transition(moved, cm.IN_PROGRESS, reason="started again")
+        self.assertEqual(len(self.store.transitions), 1)
+
+    # 9 · frozen fields
+    def test_transition_never_sends_a_frozen_field(self):
+        sent = {}
+        self.stack_rpc = mock.patch.object(
+            cm, "rpc", lambda f, p, **k: sent.update(p) or dict(self.store.rows[0]))
+        with self.stack_rpc:
+            cm.record_transition(self.c, cm.IN_PROGRESS, reason="started")
+        for frozen in ("obligation", "due_on", "owner", "party", "subject",
+                       "decision_ref", "created_at"):
+            self.assertNotIn(f"p_{frozen}", sent)
+
+    def test_persistence_never_calls_update(self):
+        """A bare UPDATE would be the second write with no history."""
         self.assertFalse(hasattr(cm, "update"))
 
-    def test_domain_transitions_still_work_in_memory(self):
-        """The contract is unaffected — only its persistence is deferred."""
-        c = cm.meet(cm.start(made()))
-        self.assertEqual(c["lifecycle"], cm.MET)
+    # 10 · terminal
+    def test_terminal_commitment_cannot_reopen(self):
+        done = cm.record_transition(
+            cm.record_transition(self.c, cm.IN_PROGRESS, reason="started"),
+            cm.MET, reason="delivered")
+        self.assertEqual(done["lifecycle"], cm.MET)
+        for target in (cm.IN_PROGRESS, cm.MISSED):
+            with self.assertRaises(cm.CommitmentError):
+                cm.record_transition(done, target, reason="again")
+        self.assertEqual(len(self.store.transitions), 2)
+
+    # 11 · renegotiation
+    def test_renegotiation_links_a_valid_successor(self):
+        successor = cm.save(made(due_on=DUE + timedelta(days=30),
+                                 subject="cccccccc-0000-4000-8000-00000000000c"))
+        out = cm.record_transition(self.c, cm.RENEGOTIATED, reason="extended",
+                                   successor=successor["commitment_id"])
+        self.assertEqual(out["lifecycle"], cm.RENEGOTIATED)
+        self.assertEqual(out["superseded_by"], successor["commitment_id"])
+
+    def test_a_successor_is_only_valid_on_a_renegotiation(self):
+        successor = cm.save(made(due_on=DUE + timedelta(days=30),
+                                 subject="cccccccc-0000-4000-8000-00000000000c"))
+        with self.assertRaises(cm.CommitmentError):
+            cm.record_transition(self.c, cm.IN_PROGRESS, reason="started",
+                                 successor=successor["commitment_id"])
+
+    def test_waiver_is_allowed_from_both_active_states(self):
+        cm.record_transition(self.c, cm.WAIVED, reason="withdrawn", actor=OWNER)
+        self.assertEqual(self.state(), cm.WAIVED)
+        self.assertEqual(self.store.transitions[0]["actor"], OWNER)
+
+    def test_waiver_from_in_progress(self):
+        moved = cm.record_transition(self.c, cm.IN_PROGRESS, reason="started")
+        cm.record_transition(moved, cm.WAIVED, reason="withdrawn", actor=OWNER)
+        self.assertEqual(self.state(), cm.WAIVED)
+
+    # 12 · overdue stays read-only even with transitions available
+    def test_overdue_still_never_transitions(self):
+        cm.overdue(TENANT, now=DUE + timedelta(days=99))
+        self.assertEqual(self.state(), cm.MADE)
+        self.assertEqual(self.store.transitions, [])
+        self.assertEqual(self.rpc.calls, 0)
+
+    # due_on remains a required input — no SLA is invented anywhere
+    def test_due_on_is_required_and_never_defaulted(self):
+        with self.assertRaises(cm.CommitmentError):
+            made(due_on=None)
+        code = code_only(MODULE).lower()
+        for sla in ("timedelta(hours", "timedelta(days", "24", "business_day"):
+            self.assertNotIn(sla, code)
 
 
 class PersistenceBoundaries(PersistenceBase):
@@ -712,3 +907,118 @@ class PersistenceBoundaries(PersistenceBase):
         for _ in range(3):
             with self.assertRaises(cm.CommitmentError):
                 cm.save(made())
+
+
+# ── db.rpc() primitive ──────────────────────────────────────────────────
+
+from bic import db as bic_db                                    # noqa: E402
+
+DB_MODULE = os.path.join(os.path.dirname(__file__), "..", "bic", "db.py")
+
+
+class RpcPrimitive(unittest.TestCase):
+
+    def test_rpc_exists_and_update_is_still_narrow(self):
+        self.assertTrue(callable(bic_db.rpc))
+        self.assertTrue(callable(bic_db.update))
+
+    def test_rpc_refuses_when_unconfigured(self):
+        with mock.patch.object(bic_db.config, "is_configured", lambda: False):
+            with self.assertRaises(bic_db.DbError):
+                bic_db.rpc("bic_commitment_transition", {})
+
+    def test_rpc_cannot_execute_arbitrary_sql(self):
+        """It posts to /rpc/<name>; there is no statement parameter, so a
+        caller cannot smuggle SQL through it."""
+        code = code_only(DB_MODULE).lower()
+        for banned in ("execute", "query=", "sql", "raw"):
+            self.assertNotIn(banned, code)
+
+    def test_rpc_truncates_error_bodies(self):
+        """A Postgres error can echo a row value back."""
+        class Bad:
+            ok = False
+            status_code = 400
+            text = "x" * 5000
+        with mock.patch.object(bic_db.config, "is_configured", lambda: True), \
+             mock.patch.object(bic_db.requests, "post", lambda *a, **k: Bad()):
+            with self.assertRaises(bic_db.DbError) as ctx:
+                bic_db.rpc("f", {})
+        self.assertLess(len(str(ctx.exception)), 400)
+
+    def test_rpc_uses_the_same_auth_as_other_helpers(self):
+        seen = {}
+
+        class OK:
+            ok = True
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {}
+        def spy(url, headers=None, json=None, timeout=None):
+            seen["url"], seen["headers"] = url, headers
+            return OK()
+        with mock.patch.object(bic_db.config, "is_configured", lambda: True), \
+             mock.patch.object(bic_db.requests, "post", spy):
+            bic_db.rpc("bic_commitment_transition", {"p_to_state": "met"})
+        self.assertIn("/rest/v1/rpc/bic_commitment_transition", seen["url"])
+        self.assertEqual(set(seen["headers"]),
+                         {"apikey", "Authorization", "Content-Type"})
+
+    def test_rpc_counts_as_a_query_like_every_other_helper(self):
+        class OK:
+            ok = True
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {}
+        bic_db.reset_query_count()
+        with mock.patch.object(bic_db.config, "is_configured", lambda: True), \
+             mock.patch.object(bic_db.requests, "post", lambda *a, **k: OK()):
+            bic_db.rpc("f", {})
+        self.assertEqual(bic_db.query_count(), 1)
+
+
+class MigrationRpcFunction(Migration):
+    """Structural assertions on the SQL function. NOT proof it runs — only
+    applying migration 18 against Postgres proves that."""
+
+    def test_the_transition_function_exists(self):
+        self.assertIn("create or replace function bic_commitment_transition",
+                      self.code)
+
+    def test_it_is_backend_only(self):
+        self.assertRegex(self.code,
+                         r"revoke all on function bic_commitment_transition")
+        self.assertIn("from public, anon, authenticated", self.code)
+
+    def test_it_locks_and_scopes_by_tenant(self):
+        self.assertIn("for update", self.code)
+        self.assertIn("tenant_id = p_tenant_id", self.code)
+
+    def test_it_performs_exactly_one_update_and_one_insert(self):
+        body = self.code[self.code.index("bic_commitment_transition("):]
+        self.assertEqual(body.count("update bic_commitments"), 1)
+        self.assertEqual(body.count("insert into bic_commitment_transitions"), 1)
+
+    def test_it_rejects_terminal_reopen_and_illegal_transitions(self):
+        self.assertIn("cannot reopen", self.raw)
+        self.assertIn("illegal transition", self.raw)
+
+    def test_it_enforces_the_waiver_actor_and_the_successor(self):
+        self.assertIn("requires an actor", self.raw)
+        self.assertIn("must name its successor", self.raw)
+        self.assertIn("successor does not exist in this tenant", self.raw)
+        self.assertIn("cannot supersede itself", self.raw)
+
+    def test_it_never_touches_another_bic_table(self):
+        body = self.code[self.code.index("bic_commitment_transition("):]
+        for table in ("bic_claims", "bic_outcome_records", "bic_parties",
+                      "bic_decision_records"):
+            self.assertNotIn(table, body)
+
+    def test_it_contains_no_delete(self):
+        body = self.code[self.code.index("bic_commitment_transition("):]
+        self.assertNotIn("delete", body.lower())

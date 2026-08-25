@@ -207,3 +207,125 @@ comment on column bic_commitments.owner is
 comment on column bic_commitments.superseded_by is
   'Set only when lifecycle = renegotiated: the new commitment that replaced
    this one. One direction; the reverse is a query, not a column.';
+
+
+-- ── The atomic transition ──────────────────────────────────────────────────
+-- A lifecycle move is TWO writes: the commitment row and its history row.
+-- PostgREST performs `update` and `insert` as independent HTTP calls with no
+-- transaction between them, so doing it from the client leaves both halves
+-- reachable alone. The bad half is a lifecycle change with NO audit trail —
+-- precisely what the append-only history exists to prevent.
+--
+-- A function body is one transaction: every RAISE below rolls back the whole
+-- thing, so a rejected transition leaves the row and the history untouched.
+--
+-- The Python domain (bic/commitment.py) remains authoritative for transition
+-- semantics. These checks are not a second domain model; they are the subset
+-- that must hold even if the caller is wrong, buggy, or someone at a console.
+create or replace function bic_commitment_transition(
+  p_tenant_id     uuid,
+  p_commitment_id uuid,
+  p_to_state      text,
+  p_reason        text,
+  p_actor         text default null,
+  p_successor     uuid default null
+) returns jsonb
+language plpgsql
+as $$
+declare
+  v_row       bic_commitments%rowtype;
+  v_from      text;
+  v_successor bic_commitments%rowtype;
+begin
+  if p_reason is null or btrim(p_reason) = '' then
+    raise exception 'a transition requires a reason';
+  end if;
+
+  -- TENANT SCOPING IS THE LOOKUP, not a filter applied afterwards: a foreign
+  -- tenant finds nothing, which is indistinguishable from "no such row" and
+  -- therefore discloses nothing. FOR UPDATE serialises concurrent callers so
+  -- two transitions cannot interleave on one commitment.
+  select * into v_row
+  from bic_commitments
+  where commitment_id = p_commitment_id and tenant_id = p_tenant_id
+  for update;
+
+  if not found then
+    raise exception 'no such commitment in this tenant';
+  end if;
+
+  v_from := v_row.lifecycle;
+
+  -- No terminal reopen. 2B's lifecycle has no arrow out of a terminal state;
+  -- a renegotiated promise is a NEW commitment, never a revived one.
+  if v_from in ('met','missed','waived','renegotiated') then
+    raise exception 'commitment is already terminal (%): it cannot reopen', v_from;
+  end if;
+
+  -- The legal moves, mirroring bic/commitment.py's _ALLOWED. `met` is
+  -- reachable only through in_progress; `renegotiated` only from `made`;
+  -- `waived` from either active state (owner ruling 2026-08-25).
+  if not (
+       (v_from = 'made'        and p_to_state in ('in_progress','missed','waived','renegotiated'))
+    or (v_from = 'in_progress' and p_to_state in ('met','missed','waived'))
+  ) then
+    raise exception 'illegal transition % -> %', v_from, p_to_state;
+  end if;
+
+  -- 2B's diagram: waived "(requires approver)". Enforced here as well as by
+  -- the transitions CHECK, so the rule holds even for a direct INSERT.
+  if p_to_state = 'waived' and (p_actor is null or btrim(p_actor) = '') then
+    raise exception 'waiving a commitment requires an actor';
+  end if;
+
+  if p_to_state = 'renegotiated' then
+    if p_successor is null then
+      raise exception 'renegotiation must name its successor';
+    end if;
+    if p_successor = p_commitment_id then
+      raise exception 'a commitment cannot supersede itself';
+    end if;
+    select * into v_successor
+    from bic_commitments
+    where commitment_id = p_successor and tenant_id = p_tenant_id;
+    if not found then
+      raise exception 'successor does not exist in this tenant';
+    end if;
+    -- A successor is a promise not yet worked: anything else means the
+    -- caller pointed at an unrelated or already-closed commitment.
+    if v_successor.lifecycle <> 'made' then
+      raise exception 'successor must be a newly made commitment, not %',
+        v_successor.lifecycle;
+    end if;
+  elsif p_successor is not null then
+    raise exception 'only a renegotiation may name a successor';
+  end if;
+
+  -- WRITE 1. Only lifecycle and superseded_by move; the freeze trigger
+  -- rejects any attempt to touch the promise itself.
+  update bic_commitments
+     set lifecycle = p_to_state,
+         superseded_by = case when p_to_state = 'renegotiated'
+                              then p_successor else superseded_by end
+   where commitment_id = p_commitment_id and tenant_id = p_tenant_id
+   returning * into v_row;
+
+  -- WRITE 2. Exactly one history row, in the same transaction as write 1.
+  insert into bic_commitment_transitions
+    (tenant_id, commitment_id, from_state, to_state, reason, actor)
+  values
+    (p_tenant_id, p_commitment_id, v_from, p_to_state, p_reason, p_actor);
+
+  return to_jsonb(v_row);
+end;
+$$;
+
+-- Backend-only, exactly as the retention functions are. A commitment must
+-- never be transitionable by an anon key or by anything a model can reach.
+revoke all on function bic_commitment_transition(uuid, uuid, text, text, text, uuid)
+  from public, anon, authenticated;
+
+comment on function bic_commitment_transition(uuid, uuid, text, text, text, uuid) is
+  'The ONLY way a commitment lifecycle moves. Updates the row and appends its
+   history row in ONE transaction, so a state change can never exist without
+   the audit trail that explains it. Any validation failure rolls back both.';

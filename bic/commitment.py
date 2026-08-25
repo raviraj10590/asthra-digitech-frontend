@@ -67,17 +67,18 @@ PERSISTENCE
 -----------
 The four schema questions 2B left open were ruled on 2026-08-25 and are
 implemented in migration 18. Creation and reads are persisted below;
-lifecycle TRANSITIONS are not, because they cannot be made atomic with the
-current bic.db primitives — see record_transition().
+lifecycle transitions go through one atomic Postgres function — see
+record_transition().
 
 `update` is deliberately NOT imported: db.py documents it as narrow by
-design, and this module has no safe use for it yet.
+design, and a commitment's lifecycle moves only through the RPC, never
+through a bare UPDATE from here.
 """
 
 from datetime import datetime, timezone
 from typing import Optional
 
-from .db import DbError, insert, select
+from .db import DbError, insert, rpc, select
 
 # ── §2B lifecycle states ───────────────────────────────────────────────────
 MADE = "made"
@@ -289,19 +290,13 @@ def describe(c: dict) -> dict:
 # Everything above is pure. Everything below writes, and only through the
 # existing bic.db primitives — no repository framework, no ORM, no cache.
 #
-# ⚠️ TRANSITIONS ARE DELIBERATELY ABSENT. Moving a commitment's lifecycle is
-# TWO writes — update the current row, append the history row — and bic.db
-# offers `select`, `insert` and `update` as separate PostgREST calls with no
-# transaction between them. Either half can land alone:
-#
-#   history first, row fails  → an auditable, replayable inconsistency
-#   row first, history fails  → a state change with NO audit trail, which is
-#                               precisely what the append-only history exists
-#                               to make impossible
-#
-# There is no ordering that makes this safe, only orderings that choose which
-# corruption to prefer. So `record_transition` raises rather than shipping
-# half-atomic semantics; see its docstring for the fix.
+# TRANSITIONS GO THROUGH ONE POSTGRES FUNCTION, never two HTTP writes.
+# Moving a lifecycle means updating the current row AND appending its history
+# row; bic.db performs `insert` and `update` as independent PostgREST calls
+# with no transaction between them, so doing it here would leave both halves
+# reachable alone. The bad half is a state change with NO audit trail —
+# exactly what the append-only history exists to prevent. A function body is
+# a single transaction, so a rejected transition rolls back both writes.
 
 TABLE = "bic_commitments"
 TRANSITIONS_TABLE = "bic_commitment_transitions"
@@ -418,23 +413,53 @@ def history(tenant_id: str, commitment_id: str) -> list:
     }, timeout=5)
 
 
-def record_transition(*_a, **_k):
-    """NOT IMPLEMENTED — and failing loudly is the point.
+RPC_TRANSITION = "bic_commitment_transition"
 
-    A lifecycle transition is two writes (UPDATE the commitment, INSERT the
-    history row) and bic.db has no transaction: `select`, `insert` and
-    `update` are independent PostgREST calls. Writing them back to back would
-    make a state change with no audit trail reachable in production, which is
-    the one failure the append-only history exists to prevent.
 
-    THE FIX, using the mechanism this repository already has: a Postgres
-    function doing both in one statement, invoked over `/rest/v1/rpc/` —
-    exactly how api/digest.py already calls bic_rollup_tool_invocations and
-    bic_prune_replay_records. That needs a function added to migration 18 and
-    an `rpc()` primitive on bic.db, which is a schema and API decision rather
-    than something to slip in behind a persistence slice.
+def record_transition(c: dict, to_state: str, *, reason: str,
+                      actor: str = None, successor: str = None) -> dict:
+    """Move a commitment's lifecycle. ONE atomic RPC, never two writes.
+
+    The domain validates FIRST, so a caller's mistake fails locally and
+    deterministically without a round trip. The database validates AGAIN,
+    because persistence cannot depend on the caller being correct — and the
+    function body is a single transaction, so a rejected transition leaves
+    the row and its history exactly as they were.
+
+    There is deliberately no `update` and no history `insert` in this
+    function. Two independent writes would make a lifecycle change with no
+    audit trail reachable in production, which is the one failure the
+    append-only history exists to prevent.
     """
-    raise CommitmentError(
-        "commitment transitions are not persistable atomically with the "
-        "current bic.db primitives (no transaction across two writes). "
-        "See record_transition.__doc__ for the RPC fix.")
+    if to_state not in STATES:
+        raise CommitmentError(f"unknown state {to_state!r}")
+    if not reason:
+        raise CommitmentError("a transition requires a reason")
+    if not c.get("commitment_id") or not c.get("tenant_id"):
+        raise CommitmentError("record_transition needs a persisted commitment")
+
+    current = c.get("lifecycle")
+    if current in TERMINALS:
+        raise CommitmentError(
+            f"{current} is terminal — 2B's lifecycle has no arrow out of it")
+    if to_state not in _ALLOWED.get(current, ()):
+        raise CommitmentError(f"illegal transition {current} → {to_state}")
+    if to_state == WAIVED and not actor:
+        raise CommitmentError("2B requires an approver to waive a commitment")
+    if to_state == RENEGOTIATED and not successor:
+        raise CommitmentError("renegotiation must name its successor")
+    if to_state != RENEGOTIATED and successor:
+        raise CommitmentError("only a renegotiation may name a successor")
+
+    row = rpc(RPC_TRANSITION, {
+        "p_tenant_id": c["tenant_id"],
+        "p_commitment_id": c["commitment_id"],
+        "p_to_state": to_state,
+        "p_reason": reason,
+        "p_actor": actor,
+        "p_successor": successor,
+    }, timeout=5)
+    if not row:
+        raise CommitmentError(
+            "transition returned no commitment — treat as not applied")
+    return row
