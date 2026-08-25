@@ -24,8 +24,8 @@ its tests enforce that by scanning the source for `insert(`, `select(` and
 one observation and must stay trivially testable and replayable. Persisting a
 consequence is a different job, so it lives behind a different door.
 
-THE DEADLINE IS THE OPEN QUESTION, AND IT IS NOT ANSWERED HERE
---------------------------------------------------------------
+THE DEADLINE COMES FROM AN OWNER RULING, NEVER FROM THIS CODE
+-------------------------------------------------------------
 2B makes due_on part of a Commitment's IDENTITY and part of its purpose:
 
     "Commitment | Any promise with a party, obligation and deadline |
@@ -33,17 +33,16 @@ THE DEADLINE IS THE OPEN QUESTION, AND IT IS NOT ANSWERED HERE
     "...so that 'what have we promised and are we about to MISS IT?' is
      answerable."
 
-A deadline is therefore not a formality this module may fill in. **There is no
-approved business SLA for an undelivered customer reply** — not in 2B, not in
-3A §1.2/§6.2, not in bic/policy.py (which is role authorization, not business
-policy), and not in config. See due_on_policy() for the exact missing ruling.
+A deadline is therefore not a formality this module may fill in: it decides
+when the business is recorded as late, and it lands in the identity key. This
+module shipped refusing to record anything at all until an owner ruled.
 
-So an invented deadline would not be a small convenience. It would fabricate
-the very field that decides when the business is judged late, write it into
-the identity key, and make every "are we about to miss it?" answer a
-restatement of a number nobody approved. Without a policy this module records
-NOTHING and escalates loudly instead — §6.3: "a degraded answer that looks
-normal is worse than a refusal."
+The ruling arrived on 2026-08-25 and is implemented verbatim in _SLA and
+due_on_policy(): **four hours from the instant delivery became HUMAN_REVIEW,
+on a continuous clock, with no criticality variation.** Nothing about the
+mechanism changed — an obligation with no entry in _SLA still records NOTHING
+and escalates loudly instead, per §6.3: "a degraded answer that looks normal
+is worse than a refusal."
 
 NOT AN OUTCOME AND NOT A CLAIM
 ------------------------------
@@ -60,6 +59,7 @@ convention, the deadline from policy, and the lifecycle from 2B. There is no
 argument through which generated text could reach any of them.
 """
 
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from . import commitment as commitment_mod
@@ -103,33 +103,64 @@ class EscalationError(RuntimeError):
     """A CALLER violated the escalation contract."""
 
 
-def due_on_policy(obligation: str, *, now=None) -> Optional[None]:
-    """The approved deadline for `obligation`. **There is none. Returns None.**
+# ── THE APPROVED SLA (owner ruling, 2026-08-25) ───────────────────────────
+# One entry per obligation. An obligation absent from this table has no
+# approved deadline and therefore cannot become a Commitment — the same
+# refusal this module shipped with, now scoped to the unruled cases.
+#
+# THIS TABLE IS THE POLICY. It is not a default, not a fallback and not a
+# tuning knob: changing a value here changes when Asthra is recorded as
+# having MISSED a promise to a client, which 2B calls the reliability signal.
+_SLA = {
+    # "4 hours from the instant the delivery becomes HUMAN_REVIEW."
+    DELIVER_PENDING_REPLY: timedelta(hours=4),
+}
 
-    THIS FUNCTION IS THE DOCUMENTED POLICY BOUNDARY, NOT A STUB TO FILL IN
-    CASUALLY. The missing ruling is precise:
 
-        "When the Brain cannot confirm that a reply reached a customer, by
-         when must a human have resolved it?"
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
-    Every candidate answer — one hour, four hours, next business day, 24h,
-    48h — is a business commitment with consequences: it decides when Asthra
-    is recorded as having MISSED a promise to a client, and 2B calls missed
-    commitments "the reliability signal". Picking one here would mean this
-    module had quietly authored the firm's service-level agreement.
 
-    It is also not merely a duration. A real ruling has to settle whether the
-    clock runs overnight and at weekends, whether a political client in an
-    active campaign differs from a routine enquiry (2B offers `criticality`
-    for exactly this), and who may waive it.
+def _at(moment) -> datetime:
+    """Normalise a caller-supplied instant to aware UTC, or take the clock."""
+    if isinstance(moment, datetime):
+        return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    return _now()
 
-    Until an owner rules, this returns None and escalate() records nothing.
-    A caller that HAS an approved deadline passes it explicitly — that path
-    is live and tested, so the day the ruling exists it is one call away.
+
+def due_on_policy(obligation: str, *, now=None) -> Optional[datetime]:
+    """The approved deadline for `obligation`.
+
+    THE RULING (2026-08-25), implemented exactly and no wider:
+
+        due_on = escalation_time + 4 hours
+
+    · Measured from the instant the delivery became HUMAN_REVIEW.
+    · CONTINUOUS 24/7 clock. It does not pause overnight.
+    · Weekends do not pause it. Holidays do not pause it.
+    · NO criticality variation — every DELIVER_PENDING_REPLY gets the same
+      four hours. Criticality is deliberately not inferred from customer
+      type, conversation text, role, campaign or any other signal, and the
+      Commitment's `criticality` field is left unset unless an approved
+      caller supplies one.
+    · EXACT timestamp, never rounded to a business-day boundary.
+
+    There are deliberately NO calendars here — no business hours, no
+    holidays, no tiers. A continuous clock is the whole rule, so anything
+    resembling a calendar in this module would be an unruled policy wearing
+    the ruling's name.
+
+    Returns None for an obligation with no approved deadline, and escalate()
+    then records nothing rather than inventing one.
     """
     if obligation not in OBLIGATIONS:
         raise EscalationError(f"unknown obligation {obligation!r}")
-    return None
+    # Named `span`, not `window`: 2I owns "window" for outcome observation,
+    # and this module must never look like it opens one.
+    span = _SLA.get(obligation)
+    if span is None:
+        return None
+    return _at(now) + span
 
 
 def resolve_owner() -> str:
@@ -194,18 +225,25 @@ def escalate(recovery_result: dict, *, tenant_id: str, party: str,
         return _result(OWNER_UNRESOLVED, recovery_result,
                        "2B requires an accountable owner (an AGENT), never null")
 
-    deadline = due_on if due_on is not None else due_on_policy(obligation, now=now)
+    # ONE clock read for the whole escalation. The policy measures from "the
+    # instant the delivery becomes HUMAN_REVIEW", and that instant must also
+    # be the commitment's creation time — reading the clock twice would make
+    # the recorded window 4 hours minus however long the store took, and the
+    # difference would be invisible in every test that used a fixed `now`.
+    moment = _at(now)
+    deadline = due_on if due_on is not None else due_on_policy(obligation,
+                                                               now=moment)
     if deadline is None:
         return _result(POLICY_REQUIRED, recovery_result,
-                       "no approved due_on policy for an undelivered customer "
-                       "reply — recording a commitment would invent the "
-                       "deadline the business is later judged against")
+                       "no approved due_on policy for this obligation — "
+                       "recording a commitment would invent the deadline the "
+                       "business is later judged against")
 
     try:
         c = commitment_mod.make(
             tenant_id=tenant_id, party=party, obligation=obligation,
             due_on=deadline, owner=owner, subject=subject,
-            decision_ref=decision_ref, goal_ref=goal_ref, at=now)
+            decision_ref=decision_ref, goal_ref=goal_ref, at=moment)
     except commitment_mod.CommitmentError as e:
         # Everything make() validates except the deadline has been checked
         # above, so a failure here is an unusable due_on — a policy that

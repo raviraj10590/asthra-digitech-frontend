@@ -78,39 +78,99 @@ def kwargs(**over):
 # ══════════════════════════════════════════════════════════════════════
 
 class DueOnPolicy(unittest.TestCase):
+    """The approved ruling (2026-08-25): due_on = escalation + 4 hours,
+    continuous clock, no criticality variation, exact timestamp."""
 
-    def test_there_is_no_approved_deadline_policy(self):
-        """If this ever returns a duration, someone decided the firm's SLA.
-        That is a business ruling and it does not belong in code."""
-        self.assertIsNone(esc.due_on_policy(esc.DELIVER_PENDING_REPLY))
+    def test_the_deadline_is_exactly_four_hours(self):
+        due = esc.due_on_policy(esc.DELIVER_PENDING_REPLY, now=NOW)
+        self.assertEqual(due - NOW, timedelta(hours=4))
 
-    def test_missing_policy_records_nothing(self):
-        r = esc.escalate(human_review(), **kwargs())
+    def test_the_window_is_declared_once_and_is_four_hours(self):
+        self.assertEqual(esc._SLA[esc.DELIVER_PENDING_REPLY],
+                         timedelta(hours=4))
+
+    def test_it_is_measured_from_the_supplied_instant(self):
+        for moment in (NOW, NOW + timedelta(days=3), NOW - timedelta(days=90)):
+            with self.subTest(moment=moment):
+                self.assertEqual(
+                    esc.due_on_policy(esc.DELIVER_PENDING_REPLY, now=moment),
+                    moment + timedelta(hours=4))
+
+    def test_it_is_deterministic(self):
+        a = esc.due_on_policy(esc.DELIVER_PENDING_REPLY, now=NOW)
+        b = esc.due_on_policy(esc.DELIVER_PENDING_REPLY, now=NOW)
+        self.assertEqual(a, b)
+
+    def test_the_result_is_timezone_aware_utc(self):
+        due = esc.due_on_policy(esc.DELIVER_PENDING_REPLY, now=NOW)
+        self.assertIsNotNone(due.tzinfo)
+        self.assertEqual(due.utcoffset(), timedelta(0))
+
+    def test_a_naive_instant_is_read_as_utc_not_local_time(self):
+        naive = datetime(2026, 8, 25, 9, 0)
+        self.assertEqual(esc.due_on_policy(esc.DELIVER_PENDING_REPLY, now=naive),
+                         NOW + timedelta(hours=4))
+
+    def test_the_timestamp_is_exact_and_never_rounded(self):
+        odd = datetime(2026, 8, 25, 9, 17, 43, 123456, tzinfo=timezone.utc)
+        due = esc.due_on_policy(esc.DELIVER_PENDING_REPLY, now=odd)
+        self.assertEqual(due, odd + timedelta(hours=4))
+        self.assertEqual(due.microsecond, 123456)
+        self.assertEqual((due.minute, due.second), (17, 43))
+
+    def test_an_unruled_obligation_still_records_nothing(self):
+        """The refusal mechanism survives the ruling — it is now scoped to
+        obligations the owner has not ruled on, rather than removed."""
+        with mock.patch.dict(esc._SLA, {}, clear=True):
+            self.assertIsNone(esc.due_on_policy(esc.DELIVER_PENDING_REPLY,
+                                                now=NOW))
+            r = esc.escalate(human_review(), **kwargs())
         self.assertEqual(r["escalation"], esc.POLICY_REQUIRED)
         self.assertFalse(r["recorded"])
-        self.assertIsNone(r["commitment_id"])
 
-    def test_missing_policy_still_needs_a_human(self):
+    def test_an_unruled_obligation_still_needs_a_human(self):
         """Not recording must never look like nothing happened (§6.2 T4)."""
-        r = esc.escalate(human_review(), **kwargs())
+        with mock.patch.dict(esc._SLA, {}, clear=True):
+            r = esc.escalate(human_review(), **kwargs())
         self.assertTrue(r["needs_human"])
         self.assertEqual(r["recovery"], rec.HUMAN_REVIEW)
 
-    def test_no_duration_constant_is_hidden_in_the_module(self):
-        """Guards the exact failure this slice exists to prevent: a quiet
-        `timedelta(hours=4)` appearing later. Asserted on the AST, so a
-        constant inside a docstring cannot satisfy or trip it."""
-        tree = ast.parse(pathlib.Path(MODULE).read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                name = getattr(node.func, "id", None) or getattr(
-                    node.func, "attr", None)
-                self.assertNotIn(name, ("timedelta", "now", "utcnow"),
-                                 "escalation must not compute a deadline")
+    def test_an_unknown_obligation_is_refused_not_defaulted(self):
+        with self.assertRaises(esc.EscalationError):
+            esc.due_on_policy("SOMETHING_NOBODY_RULED_ON")
+
+    # ── the ruling says NO calendars. These guard that it stays true ──
+
+    def test_no_business_hour_or_holiday_calendar_exists(self):
+        code = code_only(MODULE).lower()
+        for banned in ("holiday", "business_hour", "businesshour", "weekend",
+                       "workday", "business_day", "calendar"):
+            self.assertNotIn(banned, code)
+
+    def test_no_criticality_tiers_exist(self):
+        """The ruling: no criticality variation, and criticality is never
+        inferred. The SLA table is keyed by obligation alone."""
+        for window in esc._SLA.values():
+            self.assertIsInstance(window, timedelta)
+        self.assertNotIn("criticality", code_only(MODULE).lower())
+
+    def test_criticality_is_left_unset_on_the_commitment(self):
+        with mock.patch.object(cm, "save", lambda c: c):
+            esc.escalate(human_review(), **kwargs())
+        built = []
+        with mock.patch.object(cm, "save", lambda c: built.append(c) or c):
+            esc.escalate(human_review(), **kwargs())
+        self.assertIsNone(built[0]["criticality"])
+
+    def test_the_policy_reads_no_customer_signal(self):
+        """It takes an obligation and an instant. There is no argument
+        through which customer type, text, role or campaign could reach it."""
+        sig = __import__("inspect").signature(esc.due_on_policy)
+        self.assertEqual(list(sig.parameters), ["obligation", "now"])
+
+    # ── an explicitly supplied deadline still overrides ──
 
     def test_an_explicitly_supplied_deadline_is_honoured(self):
-        """The policy seam is live, not theoretical — the day a ruling
-        exists it is one argument away."""
         with mock.patch.object(cm, "save", lambda c: c):
             r = esc.escalate(human_review(), **kwargs(due_on=LATER))
         self.assertEqual(r["escalation"], esc.RECORDED)
@@ -122,6 +182,89 @@ class DueOnPolicy(unittest.TestCase):
     def test_an_unparseable_deadline_is_not_a_valid_policy(self):
         r = esc.escalate(human_review(), **kwargs(due_on="whenever"))
         self.assertEqual(r["escalation"], esc.POLICY_REQUIRED)
+
+
+class ClockRunsContinuously(unittest.TestCase):
+    """Overnight, weekend and holiday boundaries. The ruling pauses for
+    none of them, so each of these must land exactly 4 hours later —
+    these tests exist to FAIL the day someone adds a calendar."""
+
+    def assert_plain_four_hours(self, moment):
+        self.assertEqual(esc.due_on_policy(esc.DELIVER_PENDING_REPLY,
+                                           now=moment),
+                         moment + timedelta(hours=4))
+
+    def test_overnight_does_not_pause(self):
+        # 23:30 Mon → 03:30 Tue, straight through the night.
+        late = datetime(2026, 8, 24, 23, 30, tzinfo=timezone.utc)
+        self.assert_plain_four_hours(late)
+        self.assertEqual(esc.due_on_policy(esc.DELIVER_PENDING_REPLY,
+                                           now=late).day, 25)
+
+    def test_end_of_business_day_does_not_defer_to_morning(self):
+        self.assert_plain_four_hours(
+            datetime(2026, 8, 24, 17, 30, tzinfo=timezone.utc))
+
+    def test_saturday_does_not_pause(self):
+        sat = datetime(2026, 8, 29, 14, 0, tzinfo=timezone.utc)
+        self.assertEqual(sat.weekday(), 5)
+        self.assert_plain_four_hours(sat)
+
+    def test_friday_night_does_not_skip_the_weekend(self):
+        fri = datetime(2026, 8, 28, 22, 0, tzinfo=timezone.utc)
+        self.assertEqual(fri.weekday(), 4)
+        due = esc.due_on_policy(esc.DELIVER_PENDING_REPLY, now=fri)
+        self.assertEqual(due, fri + timedelta(hours=4))
+        self.assertEqual(due.weekday(), 5, "lands on Saturday, not Monday")
+
+    def test_sunday_does_not_pause(self):
+        sun = datetime(2026, 8, 30, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(sun.weekday(), 6)
+        self.assert_plain_four_hours(sun)
+
+    def test_a_public_holiday_does_not_pause(self):
+        # Indian Independence Day — a real holiday for this business.
+        self.assert_plain_four_hours(
+            datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc))
+
+    def test_new_year_midnight_does_not_pause(self):
+        eve = datetime(2026, 12, 31, 23, 0, tzinfo=timezone.utc)
+        due = esc.due_on_policy(esc.DELIVER_PENDING_REPLY, now=eve)
+        self.assertEqual(due, datetime(2027, 1, 1, 3, 0, tzinfo=timezone.utc))
+
+
+class OverdueBoundary(unittest.TestCase):
+    """`is_overdue` is 2B's, not this module's — but the digest reports off
+    it, so the 4-hour edge is pinned here."""
+
+    def setUp(self):
+        with mock.patch.object(cm, "save", lambda c: c):
+            self.result = esc.escalate(human_review(), **kwargs())
+        self.c = {"lifecycle": cm.MADE,
+                  "due_on": esc.due_on_policy(esc.DELIVER_PENDING_REPLY,
+                                              now=NOW).isoformat()}
+
+    def test_just_before_four_hours_is_not_overdue(self):
+        self.assertFalse(cm.is_overdue(
+            self.c, now=NOW + timedelta(hours=4) - timedelta(seconds=1)))
+
+    def test_exactly_four_hours_is_not_yet_overdue(self):
+        """Strictly past the deadline. At the instant it falls due the
+        business is on time, not late."""
+        self.assertFalse(cm.is_overdue(self.c, now=NOW + timedelta(hours=4)))
+
+    def test_just_after_four_hours_is_overdue(self):
+        self.assertTrue(cm.is_overdue(
+            self.c, now=NOW + timedelta(hours=4) + timedelta(seconds=1)))
+
+    def test_it_is_not_overdue_an_hour_in(self):
+        self.assertFalse(cm.is_overdue(self.c, now=NOW + timedelta(hours=1)))
+
+    def test_a_closed_commitment_is_never_overdue(self):
+        for state in cm.TERMINALS:
+            with self.subTest(state=state):
+                self.assertFalse(cm.is_overdue(
+                    dict(self.c, lifecycle=state), now=NOW + timedelta(days=9)))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -294,8 +437,14 @@ class Idempotency(unittest.TestCase):
         self.assertEqual(len(self.store.rows), 1)
         self.assertEqual(len(self.store.transitions), 0,
                          "creation is not a transition")
-        src = pathlib.Path(MODULE).read_text()
-        self.assertNotIn("TABLE", src, "escalation names no table of its own")
+        # Asserted on the AST, not the raw text: the module legitimately
+        # discusses the SLA "table" in prose, and a comment must not be able
+        # to trip or satisfy a structural rule.
+        tree = ast.parse(pathlib.Path(MODULE).read_text())
+        names = [t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                 for t in n.targets if isinstance(t, ast.Name)]
+        self.assertEqual([n for n in names if n.endswith("TABLE")], [],
+                         "escalation names no table of its own")
 
 
 class StoreFailures(unittest.TestCase):
@@ -434,14 +583,12 @@ from tests.test_brain_decision_loop import (Base, Delivery,        # noqa: E402
                                             Rejected, clarify_packet,
                                             proceed_packet, refuse_packet)
 
-# Fixed and far future: a wall-clock offset here would make these tests
-# drift-sensitive, which is a defect this suite has already been bitten by.
-POLICY_DUE = datetime(2027, 1, 1, tzinfo=timezone.utc)
-
-
 class PipelineBase(Base):
 
-    def drive(self, channel_seq, packet=None, with_policy=False):
+    def drive(self, channel_seq, packet=None, at=None):
+        """`at` pins the escalation instant. The SLA is live, so the deadline
+        is derived from it exactly as production would — this only removes
+        clock jitter, it does not substitute a different policy."""
         self.store = FakeStore()
         self.alerts = []
         seq = list(channel_seq)
@@ -461,10 +608,8 @@ class PipelineBase(Base):
                             lambda m, *a, **k: self.alerts.append(m)))
         s(mock.patch.object(cm, "insert", self.store.insert))
         s(mock.patch.object(cm, "select", self.store.select))
-        if with_policy:
-            # The day an owner rules on the SLA, this is what changes.
-            s(mock.patch.object(esc, "due_on_policy",
-                                lambda obligation, now=None: POLICY_DUE))
+        if at is not None:
+            s(mock.patch.object(esc, "_now", lambda: at))
         s(self.with_packet(packet or proceed_packet()))
 
         buf = io.StringIO()
@@ -485,38 +630,62 @@ class PipelineBase(Base):
 
 class AmbiguousDeliveryCreatesTheObligation(PipelineBase):
 
-    def test_ambiguous_delivery_without_policy_creates_nothing(self):
+    def test_ambiguous_delivery_creates_exactly_one_commitment(self):
+        """The live path, with no policy patched in: the approved SLA now
+        applies of its own accord."""
         r = self.drive([TimeoutError("gw")])
         self.assertEqual(r["recovery"]["recovery"], rec.HUMAN_REVIEW)
-        self.assertEqual(r["escalation"]["escalation"], esc.POLICY_REQUIRED)
-        self.assertEqual(len(r["rows"]), 0)
-
-    def test_ambiguous_delivery_with_policy_creates_exactly_one(self):
-        r = self.drive([TimeoutError("gw")], with_policy=True)
         self.assertEqual(r["escalation"]["escalation"], esc.RECORDED)
         self.assertEqual(len(r["rows"]), 1)
 
+    def test_the_live_deadline_is_four_hours_after_the_failure(self):
+        before = datetime.now(timezone.utc)
+        r = self.drive([TimeoutError("gw")])
+        after = datetime.now(timezone.utc)
+        due = datetime.fromisoformat(r["rows"][0]["due_on"])
+        # Bracketed by the real clock rather than compared to a fixed
+        # instant, so this stays honest without becoming drift-sensitive.
+        self.assertGreaterEqual(due, before + timedelta(hours=4))
+        self.assertLessEqual(due, after + timedelta(hours=4))
+
+    def test_the_commitment_is_not_created_already_overdue(self):
+        r = self.drive([TimeoutError("gw")])
+        self.assertFalse(cm.is_overdue(r["rows"][0]))
+
+    def test_an_unruled_obligation_creates_nothing_through_the_pipeline(self):
+        with mock.patch.dict(esc._SLA, {}, clear=True):
+            r = self.drive([TimeoutError("gw")])
+        self.assertEqual(r["escalation"]["escalation"], esc.POLICY_REQUIRED)
+        self.assertEqual(len(r["rows"]), 0)
+
     def test_the_created_commitment_carries_the_real_decision_ref(self):
-        r = self.drive([TimeoutError("gw")], with_policy=True)
+        r = self.drive([TimeoutError("gw")])
         row = r["rows"][0]
         self.assertTrue(row["decision_ref"], "must name the deciding turn")
         self.assertEqual(row["obligation"], esc.DELIVER_PENDING_REPLY)
         self.assertEqual(row["lifecycle"], cm.MADE)
 
     def test_the_party_is_the_opaque_knowledge_id_not_the_phone(self):
-        r = self.drive([TimeoutError("gw")], with_policy=True)
+        r = self.drive([TimeoutError("gw")])
         self.assertEqual(r["rows"][0]["party"], "subj-fixed")
         self.assertNotIn("919555555555", repr(r["rows"][0]))
 
-    def test_a_repeated_webhook_creates_exactly_one_commitment(self):
-        """The same customer, the same deadline — the migration's unique
-        index collapses them, with no dedupe table anywhere."""
-        first = self.drive([TimeoutError("gw")], with_policy=True)
-        store = self.store
+    def _rerun(self, store, at):
+        """Drive the pipeline again against the SAME store.
+
+        A FRESH DECISION TURN IS MANDATORY. _bic_decide_and_record closes the
+        turn after writing the record, so a second run without this hits the
+        record-before-respond gate, returns early, and never reaches the
+        escalation at all — which made these assertions pass while proving
+        nothing.
+        """
+        w.bic_decision.close_turn()
+        w.bic_decision.open_turn()
+        w.bic_decision.mark_route("client")
+        w.bic_decision.mark_identity("CLIENT")
         with mock.patch.object(cm, "insert", store.insert), \
              mock.patch.object(cm, "select", store.select), \
-             mock.patch.object(esc, "due_on_policy",
-                               lambda obligation, now=None: POLICY_DUE), \
+             mock.patch.object(esc, "_now", lambda: at), \
              mock.patch.object(w, "send_text",
                                lambda *a, **k: (_ for _ in ()).throw(
                                    TimeoutError("gw"))), \
@@ -524,43 +693,69 @@ class AmbiguousDeliveryCreatesTheObligation(PipelineBase):
              self.with_packet(proceed_packet()), \
              redirect_stdout(io.StringIO()):
             self.run_pipeline(long_history=True)
+
+    def test_a_repeated_recovery_at_the_same_instant_creates_one(self):
+        """Same customer, same escalation instant, therefore same due_on —
+        migration 18's unique index collapses them, with no dedupe table."""
+        first = self.drive([TimeoutError("gw")], at=NOW)
+        self._rerun(self.store, NOW)
         self.assertEqual(len(first["rows"]), 1)
-        self.assertEqual(len(store.rows), 1)
+        self.assertEqual(len(self.store.rows), 1)
+
+    def test_many_repeats_at_the_same_instant_still_create_one(self):
+        self.drive([TimeoutError("gw")], at=NOW)
+        for _ in range(4):
+            self._rerun(self.store, NOW)
+        self.assertEqual(len(self.store.rows), 1)
+
+    def test_two_distinct_failures_are_two_distinct_obligations(self):
+        """A CONSEQUENCE OF THE RULING, PINNED DELIBERATELY.
+
+        The policy sets an exact timestamp (item 9) and 2B keys identity on
+        due_on (item 10), so two failures an hour apart are two promises with
+        two deadlines — not one. That is the correct reading: the customer is
+        owed a reply to each, and collapsing them would silently drop one.
+
+        A genuine DUPLICATE delivery never reaches here — stage ① claims the
+        wamid and returns before the Brain path runs."""
+        self.drive([TimeoutError("gw")], at=NOW)
+        self._rerun(self.store, NOW + timedelta(hours=1))
+        self.assertEqual(len(self.store.rows), 2)
+        due = sorted(r["due_on"] for r in self.store.rows)
+        self.assertNotEqual(due[0], due[1])
 
 
 class NoObligationOnEveryOtherTurn(PipelineBase):
 
     def test_successful_delivery_creates_nothing(self):
-        r = self.drive([Delivery()], with_policy=True)
+        r = self.drive([Delivery()])
         self.assertEqual(len(r["rows"]), 0)
         self.assertIsNone(r["escalation"])
 
     def test_safe_retry_that_succeeds_creates_nothing(self):
-        r = self.drive([Resp(False, 429), Delivery()], with_policy=True)
+        r = self.drive([Resp(False, 429), Delivery()])
         self.assertEqual(len(self.attempts), 2)
         self.assertEqual(len(r["rows"]), 0)
 
     def test_terminal_channel_refusal_creates_nothing(self):
-        r = self.drive([Rejected()], with_policy=True)
+        r = self.drive([Rejected()])
         self.assertEqual(r["recovery"]["recovery"], rec.TERMINAL_FAILURE)
         self.assertEqual(len(r["rows"]), 0)
 
     def test_refuse_creates_nothing_even_when_delivery_is_ambiguous(self):
         """We never promised anything, so we owe nothing. Recording here
         would put a debt in the ledger the business does not hold."""
-        r = self.drive([TimeoutError("gw")], packet=refuse_packet(),
-                       with_policy=True)
+        r = self.drive([TimeoutError("gw")], packet=refuse_packet())
         self.assertEqual(r["recovery"]["recovery"], rec.HUMAN_REVIEW)
         self.assertEqual(len(r["rows"]), 0)
 
     def test_clarify_creates_nothing_even_when_delivery_is_ambiguous(self):
-        r = self.drive([TimeoutError("gw")], packet=clarify_packet(),
-                       with_policy=True)
+        r = self.drive([TimeoutError("gw")], packet=clarify_packet())
         self.assertEqual(r["recovery"]["recovery"], rec.HUMAN_REVIEW)
         self.assertEqual(len(r["rows"]), 0)
 
     def test_exhausted_retry_budget_still_escalates_to_a_commitment(self):
-        r = self.drive([Resp(False, 429), Resp(False, 429)], with_policy=True)
+        r = self.drive([Resp(False, 429), Resp(False, 429)])
         self.assertEqual(r["recovery"]["recovery"], rec.HUMAN_REVIEW)
         self.assertEqual(len(r["rows"]), 1)
 
@@ -568,14 +763,14 @@ class NoObligationOnEveryOtherTurn(PipelineBase):
 class GoalAndOwnerInteraction(PipelineBase):
 
     def test_the_goal_is_never_completed_by_creating_a_commitment(self):
-        r = self.drive([TimeoutError("gw")], with_policy=True)
+        r = self.drive([TimeoutError("gw")])
         self.assertEqual(r["escalation"]["escalation"], esc.RECORDED)
         self.assertNotEqual(r["goal"]["lifecycle"], gl.COMPLETED)
 
     def test_the_goal_is_blocked_not_abandoned(self):
         """BLOCKED is a goal that still exists and is waiting (3B §1.3), and
         UNAVAILABLE is an existing blocker — no new state was invented."""
-        r = self.drive([TimeoutError("gw")], with_policy=True)
+        r = self.drive([TimeoutError("gw")])
         self.assertEqual(r["goal"]["lifecycle"], gl.BLOCKED)
         self.assertEqual(r["goal"]["blocker"], gl.BLOCKED_UNAVAILABLE)
         self.assertIn(r["goal"]["blocker"], gl.BLOCKERS)
@@ -586,21 +781,23 @@ class GoalAndOwnerInteraction(PipelineBase):
         self.assertEqual(r["goal"]["lifecycle"], gl.COMPLETED)
 
     def test_the_owner_is_notified_exactly_once(self):
-        r = self.drive([TimeoutError("gw")], with_policy=True)
+        r = self.drive([TimeoutError("gw")])
         self.assertEqual(len(r["alerts"]), 1)
 
     def test_the_alert_says_it_was_recorded(self):
-        r = self.drive([TimeoutError("gw")], with_policy=True)
+        r = self.drive([TimeoutError("gw")])
         self.assertIn("open commitment", r["alerts"][0])
 
     def test_the_alert_says_loudly_when_nothing_was_recorded(self):
         """§6.3 degrade loudly — the owner must not read a silent failure as
-        a handled one."""
-        r = self.drive([TimeoutError("gw")])
+        a handled one. Reached now only for an obligation nobody has ruled
+        on, which is the case the refusal was narrowed to."""
+        with mock.patch.dict(esc._SLA, {}, clear=True):
+            r = self.drive([TimeoutError("gw")])
         self.assertIn("NOT recorded", r["alerts"][0])
 
     def test_the_alert_leaks_no_internal_identifiers(self):
-        r = self.drive([TimeoutError("gw")], with_policy=True)
+        r = self.drive([TimeoutError("gw")])
         alert = r["alerts"][0]
         self.assertNotIn(r["rows"][0]["commitment_id"], alert)
         self.assertNotIn(r["rows"][0]["decision_ref"], alert)
@@ -610,7 +807,7 @@ class GoalAndOwnerInteraction(PipelineBase):
     def test_a_store_failure_never_breaks_the_turn(self):
         """An undelivered reply must not also become a 500."""
         with mock.patch.object(cm, "save", side_effect=DbError("down")):
-            r = self.drive([TimeoutError("gw")], with_policy=True)
+            r = self.drive([TimeoutError("gw")])
         self.assertEqual(r["escalation"]["escalation"], esc.PERSISTENCE_FAILED)
         self.assertEqual(len(r["alerts"]), 1)
 
@@ -624,7 +821,7 @@ class NotAnOutcomeThroughThePipeline(PipelineBase):
         calls = []
         with mock.patch.object(w.bic_outcome_producers, "expect_customer_reply",
                                lambda *a, **k: calls.append(a)):
-            r = self.drive([TimeoutError("gw")], with_policy=True)
+            r = self.drive([TimeoutError("gw")])
         self.assertEqual(len(r["rows"]), 1)
         self.assertEqual(calls, [], "a commitment is not an outcome")
 
@@ -632,5 +829,85 @@ class NotAnOutcomeThroughThePipeline(PipelineBase):
         tables = []
         with mock.patch.object(w.bic_db, "insert",
                                lambda table, row, **k: tables.append(table)):
-            self.drive([TimeoutError("gw")], with_policy=True)
+            self.drive([TimeoutError("gw")])
         self.assertNotIn("bic_claims", tables)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DIGEST REPORTING FOLLOWS THE SAME POLICY
+# ══════════════════════════════════════════════════════════════════════
+# api/digest.py reports through commitment.overdue(). These pin that the
+# report's notion of "late" is the SLA's notion of "late" — one policy, not
+# two that drift apart.
+
+class DigestOverdueFollowsTheSla(unittest.TestCase):
+
+    def setUp(self):
+        self.store = FakeStore()
+        for target, fn in (("insert", self.store.insert),
+                           ("select", self.store.select)):
+            p = mock.patch.object(cm, target, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        r = esc.escalate(human_review(), **kwargs())
+        self.assertEqual(r["escalation"], esc.RECORDED)
+
+    def due(self, **delta):
+        return cm.overdue(TENANT, now=NOW + timedelta(**delta))
+
+    def test_nothing_is_reported_immediately(self):
+        self.assertEqual(self.due(seconds=1), [])
+
+    def test_nothing_is_reported_just_before_four_hours(self):
+        self.assertEqual(self.due(hours=3, minutes=59, seconds=59), [])
+
+    def test_nothing_is_reported_at_exactly_four_hours(self):
+        self.assertEqual(self.due(hours=4), [])
+
+    def test_it_is_reported_just_after_four_hours(self):
+        self.assertEqual(len(self.due(hours=4, seconds=1)), 1)
+
+    def test_it_stays_reported_the_next_day(self):
+        self.assertEqual(len(self.due(days=1)), 1)
+
+    def test_an_overnight_failure_is_reported_four_hours_later_not_at_9am(self):
+        """The clock does not pause, so a 23:30 failure is late at 03:30 —
+        the digest reports it, it does not wait for business hours."""
+        store = FakeStore()
+        with mock.patch.object(cm, "insert", store.insert), \
+             mock.patch.object(cm, "select", store.select):
+            night = datetime(2026, 8, 24, 23, 30, tzinfo=timezone.utc)
+            esc.escalate(human_review(), **kwargs(now=night, party="p-night"))
+            at_0331 = datetime(2026, 8, 25, 3, 31, tzinfo=timezone.utc)
+            self.assertEqual(len(cm.overdue(TENANT, now=at_0331)), 1)
+
+    def test_a_weekend_failure_is_reported_four_hours_later_not_on_monday(self):
+        store = FakeStore()
+        with mock.patch.object(cm, "insert", store.insert), \
+             mock.patch.object(cm, "select", store.select):
+            sat = datetime(2026, 8, 29, 14, 0, tzinfo=timezone.utc)
+            esc.escalate(human_review(), **kwargs(now=sat, party="p-sat"))
+            still_sat = datetime(2026, 8, 29, 18, 1, tzinfo=timezone.utc)
+            rows = cm.overdue(TENANT, now=still_sat)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(still_sat.weekday(), 5)
+
+    def test_the_digest_never_transitions_anything_to_missed(self):
+        """"missed" is a business judgement with a reason and an actor. A
+        clock tick is neither, so the report is strictly read-only."""
+        self.due(days=3)
+        self.assertEqual(len(self.store.transitions), 0)
+        self.assertEqual(self.store.rows[0]["lifecycle"], cm.MADE)
+
+    def test_the_digest_block_is_read_only_in_source(self):
+        """CODE lines only — the block's comments discuss `missed` at length,
+        and prose must not be able to trip a structural rule."""
+        src = pathlib.Path(os.path.join(os.path.dirname(__file__), "..",
+                                        "api", "digest.py")).read_text()
+        block = src[src.index("what have we promised"):]
+        code = "\n".join(l for l in block.splitlines()
+                         if not l.strip().startswith("#"))
+        for banned in ("record_transition", "miss(", "MISSED", "insert(",
+                       "update(", "rpc("):
+            self.assertNotIn(banned, code)
+        self.assertIn("overdue(", code, "the block must still do the read")
