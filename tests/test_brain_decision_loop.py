@@ -25,6 +25,7 @@ from bic import context as cx                                     # noqa: E402
 from bic import decision as bic_decision                          # noqa: E402
 from bic import goal_lifecycle as gl                              # noqa: E402
 from bic import observe as ob                                     # noqa: E402
+from bic import recovery as rec                                   # noqa: E402
 from bic import policy                                            # noqa: E402
 from bic.db import DbError                                        # noqa: E402
 
@@ -69,6 +70,12 @@ class Delivery:
     ok = True
     status_code = 200
     text = "{}"
+
+
+class Resp:
+    """An arbitrary channel status."""
+    def __init__(self, ok, status_code):
+        self.ok, self.status_code, self.text = ok, status_code, "{}"
 
 
 class Rejected:
@@ -123,6 +130,9 @@ class Base(unittest.TestCase):
                             lambda tenant, channel, sender, **k: "subj-fixed"))
         p(mock.patch.object(w.bic_db, "insert",
                             lambda table, row, **k: self.inserted.append((table, row))))
+        self.owner_alerts = []
+        p(mock.patch.object(w, "notify_owner",
+                            lambda *a, **k: self.owner_alerts.append(a)))
         self.producers = mock.Mock()
         p(mock.patch.object(w, "bic_outcome_producers", self.producers))
 
@@ -226,7 +236,8 @@ class RecordBeforeRespond(Base):
             w.bic_db, "insert",
             lambda table, row, **k: order.append("insert")))
         self.stack.enter_context(mock.patch.object(
-            w, "send_text", lambda to, t, **k: order.append("send")))
+            w, "send_text",
+            lambda to, t, **k: (order.append("send"), Delivery())[1]))
         with self.with_packet(proceed_packet()):
             self.run_pipeline()
         self.assertEqual(order, ["insert", "send"])
@@ -298,7 +309,8 @@ class AdmittedGoalNeverFallsBackToRawLlm(Base):
         self.stack.enter_context(mock.patch.object(
             w.bic_db, "insert", lambda t, r, **k: order.append("insert")))
         self.stack.enter_context(mock.patch.object(
-            w, "send_text", lambda to, t, **k: order.append("send")))
+            w, "send_text",
+            lambda to, t, **k: (order.append("send"), Delivery())[1]))
         self.run_pipeline()
         self.assertEqual(order, ["insert", "send"])
 
@@ -397,15 +409,20 @@ class RegisterExpectation(Base):
         kwargs = self.producers.expect_customer_reply.call_args.kwargs
         self.assertEqual(kwargs["goal_ref"], "social_media_enquiry")
 
-    def test_expectation_registered_before_send(self):
+    def test_expectation_follows_a_confirmed_delivery(self):
+        """CORRECTED CONTRACT. Registering before the send opened an
+        observation window for a message that might never go out; 2I would
+        later close it as NO_RESPONSE — "we asked; nothing came back" — when
+        we never asked. The window now opens only once delivery is observed."""
         order = []
         self.producers.expect_customer_reply.side_effect = \
             lambda *a, **k: order.append("expect")
         self.stack.enter_context(mock.patch.object(
-            w, "send_text", lambda to, t, **k: order.append("send")))
+            w, "send_text",
+            lambda to, t, **k: (order.append("send"), Delivery())[1]))
         with self.with_packet(proceed_packet()):
             self.run_pipeline()
-        self.assertEqual(order, ["expect", "send"])
+        self.assertEqual(order, ["send", "expect"])
 
     def test_no_expectation_when_the_action_did_not_go_out(self):
         with self.with_packet(refuse_packet()):
@@ -708,7 +725,8 @@ class GoalLifecycleIntegration(Base):
         self.stack.enter_context(mock.patch.object(
             w.bic_db, "insert", lambda t, r, **k: order.append("insert")))
         self.stack.enter_context(mock.patch.object(
-            w, "send_text", lambda to, t, **k: order.append("send")))
+            w, "send_text",
+            lambda to, t, **k: (order.append("send"), Delivery())[1]))
         with self.with_packet(proceed_packet()):
             self.run_pipeline()
         self.assertEqual(order, ["insert", "send"])
@@ -804,6 +822,183 @@ class ExecutionObservation(Base):
         self.assertNotIn("wamid", blob)
 
     def test_record_before_respond_survives_the_observation_stage(self):
+        order = []
+        self.stack.enter_context(mock.patch.object(
+            w.bic_db, "insert", lambda t, r, **k: order.append("insert")))
+        self.stack.enter_context(mock.patch.object(
+            w, "send_text",
+            lambda to, t, **k: (order.append("send"), Delivery())[1]))
+        with self.with_packet(proceed_packet()):
+            self.run_pipeline()
+        self.assertEqual(order, ["insert", "send"])
+
+
+# ── Stage 15 recovery through the real pipeline ─────────────────────────
+
+class ExecutionRecovery(Base):
+    """Drives the real pipeline and reads the EXECUTION_RECOVERY trace."""
+
+    def drive(self, channel_seq, packet=None):
+        """`channel_seq` is one result per send attempt."""
+        import io
+        import json as _json
+        from contextlib import redirect_stdout
+        self.attempts = []
+        seq = list(channel_seq)
+
+        def _send(to, t, **k):
+            self.attempts.append((to, t))
+            item = seq[len(self.attempts) - 1] if len(seq) >= len(self.attempts) else seq[-1]
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+        self.stack.enter_context(mock.patch.object(w, "send_text", _send))
+        self.downstream = self._wire_downstream()
+        self.stack.enter_context(self.with_packet(packet or proceed_packet()))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.run_pipeline(long_history=True)
+        lines = buf.getvalue().splitlines()
+
+        def grab(prefix, last=True):
+            hit = [l for l in lines if l.startswith(prefix)]
+            if not hit:
+                return None
+            return _json.loads((hit[-1] if last else hit[0])[len(prefix):])
+
+        return {"recovery": grab("EXECUTION_RECOVERY "),
+                "observed": grab("EXECUTION_OBSERVED "),
+                "goal": grab("GOAL_STATE "),
+                "attempts": len(self.attempts)}
+
+    # 1-2 · terminal channel refusals never complete
+    def test_http_400_is_terminal_and_does_not_complete(self):
+        r = self.drive([Rejected()])
+        self.assertEqual(r["recovery"]["recovery"], rec.TERMINAL_FAILURE)
+        self.assertNotEqual(r["goal"]["lifecycle"], gl.COMPLETED)
+        self.assertEqual(r["attempts"], 1, "terminal failures are not retried")
+
+    def test_http_401_is_terminal_and_does_not_complete(self):
+        r = self.drive([Resp(False, 401)])
+        self.assertEqual(r["recovery"]["recovery"], rec.TERMINAL_FAILURE)
+        self.assertNotEqual(r["goal"]["lifecycle"], gl.COMPLETED)
+
+    # 3 · rate limit retries, bounded
+    def test_http_429_retries_once_then_succeeds(self):
+        r = self.drive([Resp(False, 429), Delivery()])
+        self.assertEqual(r["attempts"], 2)
+        self.assertEqual(r["goal"]["lifecycle"], gl.COMPLETED)
+
+    def test_retry_is_bounded_and_then_escalates(self):
+        r = self.drive([Resp(False, 429), Resp(False, 429), Resp(False, 429)])
+        self.assertEqual(r["attempts"], rec.MAX_ATTEMPTS)
+        self.assertEqual(r["recovery"]["recovery"], rec.HUMAN_REVIEW)
+        self.assertNotEqual(r["goal"]["lifecycle"], gl.COMPLETED)
+
+    # 4-6 · ambiguous delivery never blind-retries
+    def test_timeout_does_not_blind_retry(self):
+        """I13: the request may have landed. Retrying is what double-sends."""
+        r = self.drive([TimeoutError("gw")])
+        self.assertEqual(r["attempts"], 1)
+        self.assertEqual(r["recovery"]["recovery"], rec.HUMAN_REVIEW)
+
+    def test_connection_failure_does_not_blind_retry(self):
+        r = self.drive([ConnectionError("reset")])
+        self.assertEqual(r["attempts"], 1)
+        self.assertEqual(r["recovery"]["recovery"], rec.HUMAN_REVIEW)
+
+    def test_unknown_delivery_never_claims_success(self):
+        r = self.drive([None])
+        self.assertEqual(r["observed"]["state"], ob.UNKNOWN)
+        self.assertNotEqual(r["goal"]["lifecycle"], gl.COMPLETED)
+
+    # 7 · no duplicate sends
+    def test_a_successful_send_is_never_repeated(self):
+        r = self.drive([Delivery()])
+        self.assertEqual(r["attempts"], 1)
+
+    # 8-9 · a retry re-sends, it does not re-decide
+    def test_retry_does_not_rerun_decide_or_interpret(self):
+        calls = {"decide": 0, "interpret": 0, "consult": 0}
+        real_decide = w.bic_decide.decide
+
+        def counted_decide(*a, **k):
+            calls["decide"] += 1
+            return real_decide(*a, **k)
+        real_admit = w.bic_decide.admit_goal
+
+        def counted_admit(*a, **k):
+            calls["interpret"] += 1
+            return real_admit(*a, **k)
+        self.stack.enter_context(mock.patch.object(
+            w.bic_decide, "decide", counted_decide))
+        self.stack.enter_context(mock.patch.object(
+            w.bic_decide, "admit_goal", counted_admit))
+        self.stack.enter_context(mock.patch.object(
+            w, "generate_reply",
+            lambda *a, **k: (calls.__setitem__("consult", calls["consult"] + 1),
+                             "LLM PROPOSAL TEXT")[1]))
+        r = self.drive([Resp(False, 429), Delivery()])
+        self.assertEqual(r["attempts"], 2)
+        self.assertEqual(calls, {"decide": 1, "interpret": 1, "consult": 1})
+
+    def test_retry_sends_byte_identical_text(self):
+        self.drive([Resp(False, 429), Delivery()])
+        self.assertEqual(self.attempts[0], self.attempts[1])
+
+    # 10 · one window per turn, and only when delivered
+    def test_retry_creates_exactly_one_expectation(self):
+        self.drive([Resp(False, 429), Delivery()])
+        self.assertEqual(self.producers.expect_customer_reply.call_count, 1)
+
+    def test_an_undelivered_reply_registers_no_expectation(self):
+        """2I would later close that window as NO_RESPONSE — 'we asked;
+        nothing came back' — when we never asked."""
+        self.drive([Rejected()])
+        self.assertFalse(self.producers.expect_customer_reply.called)
+
+    # 11-12 · refusal / clarification still execute nothing
+    def test_refusal_still_has_zero_downstream_actions(self):
+        self.drive([Delivery()], packet=refuse_packet())
+        self.assertEqual(self.downstream,
+                         {"extract": 0, "lead": 0, "owner": 0,
+                          "workflow": 0, "memory": 0})
+
+    def test_clarify_still_has_zero_business_side_effects(self):
+        r = self.drive([Delivery()], packet=clarify_packet())
+        self.assertEqual(r["goal"]["lifecycle"], gl.BLOCKED)
+
+    # 13-14 · escalation is deterministic and never a model
+    def test_human_escalation_uses_the_existing_owner_path(self):
+        """§6.2 T4 — 'acknowledge, queue, notify a human. Never silence.'
+        Counted through _wire_downstream's notify_owner stub, which is
+        installed after Base's; lead extraction is 0 on an undelivered turn,
+        so any owner alert here can only be the escalation."""
+        self.drive([TimeoutError("gw")])
+        self.assertEqual(self.downstream["extract"], 0)
+        self.assertGreaterEqual(self.downstream["owner"], 1,
+                                "an undelivered reply must escalate")
+
+    def test_terminal_failure_does_not_escalate_to_a_human(self):
+        """A malformed request is our bug, not an ambiguous delivery."""
+        self.drive([Rejected()])
+        self.assertEqual(self.downstream["owner"], 0)
+
+    def test_no_second_customer_message_is_attempted_on_failure(self):
+        r = self.drive([TimeoutError("gw")])
+        self.assertEqual(r["attempts"], 1)
+
+    # 17-20 · traces stay bounded
+    def test_recovery_trace_carries_no_pii(self):
+        import re as _re
+        r = self.drive([Rejected()])
+        blob = repr(r["recovery"]) + repr(r["observed"])
+        self.assertNotIn(CLIENT, blob)
+        self.assertIsNone(_re.search(r"\b91\d{10}\b", blob))
+        self.assertNotIn("wamid", blob)
+
+    def test_record_before_respond_survives_recovery(self):
         order = []
         self.stack.enter_context(mock.patch.object(
             w.bic_db, "insert", lambda t, r, **k: order.append("insert")))

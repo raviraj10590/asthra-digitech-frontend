@@ -55,6 +55,7 @@ try:
                      explain as bic_explain,
                      goal_lifecycle as bic_goal_lifecycle,
                      observe as bic_observe,
+                     recovery as bic_recovery,
                      goals as bic_goals,
                      identity as bic_identity, knowledge as bic_knowledge,
                      outcome_producers as bic_outcome_producers,
@@ -3125,20 +3126,51 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             reply = decide_result["text"]
             print(f"🧠 [{decide_result['outcome']}] {reply[:80]}")
 
-            # ⑪ EXECUTE — the only action this slice takes.
-            try:
-                _channel_result = send_text(sender, reply + after_hours_note())
-            except Exception as _send_exc:
-                # An exception IS the observation. Swallowed only so ⑫ can
-                # record it; the turn's own failure handling is unchanged.
-                _channel_result = _send_exc
+            # ⑪ EXECUTE → ⑫ OBSERVE → ⑮ RECOVER, bounded by
+            # bic_recovery.MAX_ATTEMPTS. The DECIDE result is NOT recomputed
+            # between attempts: the same authorised reply is re-sent, so a
+            # retry can never change what the customer is told.
+            _text = reply + after_hours_note()
+            _attempt = 0
+            while True:
+                _attempt += 1
+                try:
+                    _channel_result = send_text(sender, _text)
+                except Exception as _send_exc:
+                    # An exception IS the observation. Swallowed only so ⑫
+                    # can record it; the turn's failure handling is unchanged.
+                    _channel_result = _send_exc
+
+                # ⑫ OBSERVE — what ACTUALLY happened, not what we asked for.
+                _obs = bic_observe.execution(_channel_result)
+                print("EXECUTION_OBSERVED " + json.dumps(
+                    bic_observe.describe(_obs), default=str))
+
+                # ⑮ RECOVER. I13: a send is NOT idempotent, so this retries
+                # only when the channel ANSWERED and refused to accept the
+                # message — proving nothing was delivered. Silence from the
+                # channel is ambiguous and escalates instead.
+                _rec = bic_recovery.classify(_obs, attempt=_attempt)
+                print("EXECUTION_RECOVERY " + json.dumps(
+                    bic_recovery.describe(_rec), default=str))
+                if not _rec["may_retry"]:
+                    break
+
             save_messages([(sender, "user", user_text),
                            (sender, "assistant", reply)])
 
-            # ⑫ OBSERVE — what ACTUALLY happened, not what we asked for.
-            _obs = bic_observe.execution(_channel_result)
-            print("EXECUTION_OBSERVED " + json.dumps(
-                bic_observe.describe(_obs), default=str))
+            # ⑭ REGISTER EXPECTATION (2I) — now that a reply actually
+            # reached the customer, so silence becomes a real signal rather
+            # than an artefact of our own failed send. Exactly once: it sits
+            # outside the retry loop, so N attempts still open ONE window.
+            _pending = decide_result.get("_pending_expectation")
+            if _pending and bic_observe.delivered(_obs):
+                try:
+                    bic_outcome_producers.expect_customer_reply(
+                        sender, _pending["decision_ref"],
+                        goal_ref=_pending["goal_ref"])
+                except Exception as _e:
+                    print(f"brain expectation registration failed (ignored): {_e}")
 
             # ④ Completion, fed by the OBSERVATION rather than an assumption.
             # This previously passed a hardcoded True, so a rejected send
@@ -3155,6 +3187,22 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                     bic_goal_lifecycle.describe(_goal), default=str))
 
             if not _obs["delivered"]:
+                # ⑮ never silently loses the work (§6.2 T4: "acknowledge,
+                # queue, notify a human — never silence"). The owner alert is
+                # the EXISTING escalation path, not a new notification system.
+                # No second customer message is attempted: the channel is the
+                # thing that just failed, and a blind resend is the one move
+                # that could double-send.
+                if _rec["needs_human"]:
+                    try:
+                        notify_owner(
+                            f"⚠️ Reply NOT delivered to wa.me/{sender}\n"
+                            f"Channel: {_obs['failure_class'] or 'UNKNOWN'} "
+                            f"after {_rec['attempt']} attempt(s)\n"
+                            f"👉 Delivery is uncertain — check before resending "
+                            f"so the customer is not messaged twice.")
+                    except Exception as _e:
+                        print(f"owner escalation failed (ignored): {_e}")
                 # Nothing reached the customer. Do not run the post-reply
                 # business block off an undelivered conversation.
                 return
@@ -3640,12 +3688,15 @@ def _bic_decide_and_record(sender: str, user_text: str, ctx: dict,
     # production yet. Making this fatal would silence every social-media
     # customer until that migration ships — introducing an outage to record
     # an expectation about a reply we would then never send.
-    if decision_ref and outcome["outcome"] == bic_decide.PROCEED:
-        try:
-            bic_outcome_producers.expect_customer_reply(
-                sender, decision_ref, goal_ref=goal_def["goal_id"])
-        except Exception as e:
-            print(f"brain expectation registration failed (ignored): {e}")
+    # DEFERRED UNTIL DELIVERY IS OBSERVED. Registering here — before the
+    # send — opened an observation window for a message that might never go
+    # out, and 2I would later close it as NO_RESPONSE: "we asked; nothing
+    # came back" (2I §2.2). We would not have asked. That is a fabricated
+    # observation in the one store built to keep the learning signal honest,
+    # so the caller registers it only once ⑫ reports the reply delivered.
+    outcome["_pending_expectation"] = (
+        {"decision_ref": decision_ref, "goal_ref": goal_def["goal_id"]}
+        if decision_ref and outcome["outcome"] == bic_decide.PROCEED else None)
 
     # Carried out for the caller to finish AFTER the response is actually
     # delivered — the completion condition is RESPONSE_DELIVERED, and at this

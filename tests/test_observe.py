@@ -50,6 +50,14 @@ class Resp:
 
 class ExecutionResult(unittest.TestCase):
 
+    def test_channel_answer_is_recorded_as_delivery_certainty(self):
+        """A status code proves the channel processed the request; an
+        exception or an unreadable result proves nothing either way."""
+        self.assertTrue(ob.execution(Resp(True, 200))["channel_responded"])
+        self.assertTrue(ob.execution(Resp(False, 429))["channel_responded"])
+        self.assertFalse(ob.execution(TimeoutError("x"))["channel_responded"])
+        self.assertFalse(ob.execution(None)["channel_responded"])
+
     def test_success(self):
         o = ob.execution(Resp(True, 200))
         self.assertEqual(o["state"], ob.SUCCEEDED)
@@ -124,7 +132,8 @@ class Traceability(unittest.TestCase):
 
     def test_describe_is_bounded(self):
         d = ob.describe(ob.execution(Resp(False, 400)))
-        self.assertEqual(set(d), {"action", "state", "attempted", "degraded",
+        self.assertEqual(set(d), {"action", "state", "attempted",
+                                  "channel_responded", "degraded",
                                   "failure_class"})
 
 

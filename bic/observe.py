@@ -95,12 +95,19 @@ def execution(result, *, action: str = RESPONSE_DELIVERY, at=None) -> dict:
         raise ObserveError(f"unknown action {action!r}")
 
     when = _iso(at or _now())
-    base = {"action": action, "observed_at": when, "attempted": True}
+    # DID THE CHANNEL ANSWER US? This is the delivery-certainty signal, and
+    # it is what makes I13 enforceable downstream. A status code means the
+    # channel processed the request and told us the verdict, so a rejection
+    # PROVES nothing was delivered. An exception or an unreadable result
+    # means we never heard back: the request may or may not have landed, and
+    # that ambiguity is precisely what may not be auto-retried.
+    base = {"action": action, "observed_at": when, "attempted": True,
+            "channel_responded": False}
 
     if isinstance(result, BaseException):
         # Type only — an exception's text can echo an identifier or a body.
         return {**base, "state": FAILED, "delivered": False, "degraded": False,
-                "failure_class": _exception_class(result)}
+                "failure_class": _exception_class(result)}   # never answered
 
     status = getattr(result, "status_code", None)
     ok = getattr(result, "ok", None)
@@ -110,12 +117,13 @@ def execution(result, *, action: str = RESPONSE_DELIVERY, at=None) -> dict:
         return {**base, "state": UNKNOWN, "delivered": False, "degraded": True,
                 "failure_class": None}
 
+    answered = {**base, "channel_responded": True}
     delivered = bool(ok) if ok is not None else (200 <= int(status) < 300)
     if delivered:
-        return {**base, "state": SUCCEEDED, "delivered": True,
-                "degraded": False, "failure_class": None}
-    return {**base, "state": FAILED, "delivered": False, "degraded": False,
-            "failure_class": _classify(status)}
+        return {**answered, "state": SUCCEEDED, "delivered": True,
+                "degraded": False, "failure_class": None, "status": status}
+    return {**answered, "state": FAILED, "delivered": False, "degraded": False,
+            "failure_class": _classify(status), "status": status}
 
 
 def _exception_class(exc: BaseException) -> str:
@@ -138,8 +146,8 @@ def not_attempted(*, action: str = RESPONSE_DELIVERY, at=None) -> dict:
     if action not in ACTIONS:
         raise ObserveError(f"unknown action {action!r}")
     return {"action": action, "observed_at": _iso(at or _now()),
-            "attempted": False, "state": UNKNOWN, "delivered": False,
-            "degraded": False, "failure_class": None}
+            "attempted": False, "channel_responded": False, "state": UNKNOWN,
+            "delivered": False, "degraded": False, "failure_class": None}
 
 
 def delivered(observation: Optional[dict]) -> bool:
@@ -154,5 +162,6 @@ def describe(observation: dict) -> dict:
     return {"action": observation.get("action"),
             "state": observation.get("state"),
             "attempted": observation.get("attempted"),
+            "channel_responded": observation.get("channel_responded"),
             "degraded": observation.get("degraded"),
             "failure_class": observation.get("failure_class")}

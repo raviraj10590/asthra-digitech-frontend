@@ -323,9 +323,26 @@ class EligibleActionScope(unittest.TestCase):
         import webhook as w
         cls.src = __import__("inspect").getsource(w.run_client_pipeline)
 
-    def test_expect_customer_reply_has_exactly_one_call_site(self):
-        self.assertEqual(self.src.count("expect_customer_reply("), 1,
-                         "exactly one eligible action was specified")
+    def test_expect_customer_reply_is_registered_once_per_path(self):
+        """Still ONE eligible action (the AI reply), now reachable by two
+        mutually exclusive paths: the Brain branch registers it after ⑫
+        confirms delivery, the legacy branch in its own `else`. A turn takes
+        exactly one of them, so a turn opens at most one window — proven
+        behaviourally in test_brain_decision_loop's ExecutionRecovery."""
+        self.assertEqual(self.src.count("expect_customer_reply("), 2)
+        brain = self.src.index("_bic_decide_and_record(")
+        legacy = self.src.index("# Legacy path — unchanged.")
+        first = self.src.index("expect_customer_reply(")
+        second = self.src.index("expect_customer_reply(", first + 1)
+        self.assertLess(brain, first, "the brain registration follows DECIDE")
+        self.assertLess(legacy, second, "the second lives in the legacy path")
+
+    def test_the_brain_registration_follows_delivery_not_precedes_it(self):
+        """Registering before the send opened a window for a message that
+        might never go out; 2I would close it as NO_RESPONSE when we never
+        asked."""
+        self.assertLess(self.src.index("EXECUTION_OBSERVED"),
+                        self.src.index("expect_customer_reply("))
 
     def test_observe_customer_reply_is_called_once_unconditionally(self):
         self.assertEqual(self.src.count("observe_customer_reply("), 1)
