@@ -998,8 +998,19 @@ class MigrationRpcFunction(Migration):
         self.assertIn("for update", self.code)
         self.assertIn("tenant_id = p_tenant_id", self.code)
 
+    def _fn_body(self):
+        """The function BODY only — between `as $$` and `$$;`.
+
+        Slicing "everything after the function name" swept in the trailing
+        GRANT/REVOKE statements, so `revoke update, delete on ...` read as a
+        DELETE inside the function. The assertion is about the body; the
+        slice now matches."""
+        c = self.code
+        c = c[c.index("create or replace function bic_commitment_transition"):]
+        return c[c.index("as $$"): c.index("$$;") + 3]
+
     def test_it_performs_exactly_one_update_and_one_insert(self):
-        body = self.code[self.code.index("bic_commitment_transition("):]
+        body = self._fn_body()
         self.assertEqual(body.count("update bic_commitments"), 1)
         self.assertEqual(body.count("insert into bic_commitment_transitions"), 1)
 
@@ -1014,11 +1025,38 @@ class MigrationRpcFunction(Migration):
         self.assertIn("cannot supersede itself", self.raw)
 
     def test_it_never_touches_another_bic_table(self):
-        body = self.code[self.code.index("bic_commitment_transition("):]
+        body = self._fn_body()
         for table in ("bic_claims", "bic_outcome_records", "bic_parties",
                       "bic_decision_records"):
             self.assertNotIn(table, body)
 
     def test_it_contains_no_delete(self):
-        body = self.code[self.code.index("bic_commitment_transition("):]
-        self.assertNotIn("delete", body.lower())
+        self.assertNotIn("delete", self._fn_body().lower())
+
+    def test_it_is_security_definer_with_a_pinned_search_path(self):
+        """Real-Postgres validation showed a direct UPDATE could move the
+        lifecycle with no history. The function now runs as its owner so
+        UPDATE can be revoked from every application role — and a DEFINER
+        function without a pinned search_path is hijackable."""
+        self.assertIn("security definer", self.code)
+        self.assertRegex(self.code, r"set search_path = public, pg_temp")
+
+    def test_update_is_revoked_so_the_rpc_is_the_only_door(self):
+        self.assertIn(
+            "revoke update on bic_commitments from public, anon, authenticated, service_role",
+            self.code)
+        self.assertIn("revoke update, delete on bic_commitment_transitions",
+                      self.code)
+
+    def test_the_backend_is_granted_execute_explicitly(self):
+        """Granted here rather than inherited from a default ACL that lives
+        outside version control."""
+        self.assertRegex(self.code,
+                         r"grant execute on function bic_commitment_transition")
+        self.assertIn("to service_role", self.code)
+
+    def test_select_and_insert_are_not_revoked(self):
+        """save() and the read helpers are single statements with no history
+        to bypass; revoking them would break the module for no gain."""
+        self.assertNotIn("revoke select", self.code)
+        self.assertNotIn("revoke insert on bic_commitments", self.code)

@@ -231,6 +231,18 @@ create or replace function bic_commitment_transition(
   p_successor     uuid default null
 ) returns jsonb
 language plpgsql
+-- SECURITY DEFINER so this function is the ONLY way a lifecycle moves.
+-- Real-Postgres validation showed the freeze trigger permits a direct
+-- `update ... set lifecycle = ...`, which would change state with no audit
+-- trail — the one failure the append-only history exists to prevent. UPDATE
+-- is therefore revoked from every application role below, and the function
+-- runs as its owner so it can still perform the write.
+--
+-- search_path is pinned: a SECURITY DEFINER function that inherits the
+-- caller's search_path can be hijacked by a same-named object in a schema
+-- the caller controls.
+security definer
+set search_path = public, pg_temp
 as $$
 declare
   v_row       bic_commitments%rowtype;
@@ -324,6 +336,24 @@ $$;
 -- never be transitionable by an anon key or by anything a model can reach.
 revoke all on function bic_commitment_transition(uuid, uuid, text, text, text, uuid)
   from public, anon, authenticated;
+
+-- The backend path, granted EXPLICITLY rather than inherited from a default
+-- ACL that lives outside version control. Narrow: one function, one role.
+grant execute on function bic_commitment_transition(uuid, uuid, text, text, text, uuid)
+  to service_role;
+
+-- ── The lifecycle has exactly one door ─────────────────────────────────────
+-- With UPDATE revoked, `update bic_commitments set lifecycle = ...` fails for
+-- every application role, so a state change cannot exist without the history
+-- row the function writes in the same transaction. The freeze trigger still
+-- guards the promise's own columns; this closes the remaining gap it could
+-- not — it could say WHICH columns may change, never WHO may change them.
+--
+-- SELECT and INSERT are deliberately untouched: save() and the read helpers
+-- are ordinary single-statement operations with no history to bypass.
+revoke update on bic_commitments from public, anon, authenticated, service_role;
+revoke update, delete on bic_commitment_transitions
+  from public, anon, authenticated, service_role;
 
 comment on function bic_commitment_transition(uuid, uuid, text, text, text, uuid) is
   'The ONLY way a commitment lifecycle moves. Updates the row and appends its
