@@ -484,3 +484,231 @@ class Migration(unittest.TestCase):
     def test_tenant_isolation_on_both_tables(self):
         self.assertEqual(len(re.findall(r"tenant_id\s+uuid not null",
                                         self.code)), 2)
+
+
+# ── Persistence (offline: a fake store, never a real database) ──────────
+
+from unittest import mock                                       # noqa: E402
+from bic.db import DbError                                      # noqa: E402
+
+
+class FakeStore:
+    """In-memory stand-in enforcing what the MIGRATION enforces: the unique
+    identity tuple with NULLS NOT DISTINCT, and append-only history."""
+
+    def __init__(self):
+        self.rows, self.transitions = [], []
+
+    def insert(self, table, row, timeout=None):
+        if table == cm.TABLE:
+            key = (row["tenant_id"], row["subject"], row["party"], row["due_on"])
+            # NULLS NOT DISTINCT: a missing subject is a VALUE, so two
+            # subject-less promises to one party on one date collide.
+            if any((r["tenant_id"], r["subject"], r["party"], r["due_on"]) == key
+                   for r in self.rows):
+                raise DbError('duplicate key value violates unique constraint '
+                              '"bic_commitments_identity_idx" (23505)')
+            self.rows.append(dict(row))
+        elif table == cm.TRANSITIONS_TABLE:
+            self.transitions.append(dict(row))
+        else:
+            raise AssertionError(f"unexpected table {table}")
+
+    def update(self, *a, **k):
+        raise AssertionError("commitment persistence must not UPDATE yet")
+
+    def select(self, table, params, timeout=None):
+        rows = self.rows if table == cm.TABLE else self.transitions
+        out = []
+        for r in rows:
+            keep = True
+            for key, val in params.items():
+                if key in ("order", "limit", "select"):
+                    continue
+                val = str(val)
+                if val.startswith("eq."):
+                    if str(r.get(key)) != val[3:]:
+                        keep = False
+                elif val == "is.null":
+                    if r.get(key) is not None:
+                        keep = False
+                elif val.startswith("in."):
+                    if str(r.get(key)) not in val[3:].strip("()").split(","):
+                        keep = False
+                elif val.startswith("lt."):
+                    if not (r.get(key) or "") < val[3:]:
+                        keep = False
+            if keep:
+                out.append(dict(r))
+        order = params.get("order")
+        if order:
+            field, _, direction = order.partition(".")
+            out.sort(key=lambda r: r.get(field) or "",
+                     reverse=(direction == "desc"))
+        return out
+
+
+class PersistenceBase(unittest.TestCase):
+
+    def setUp(self):
+        self.store = FakeStore()
+        self._p = [mock.patch.object(cm, "insert", self.store.insert),
+                   mock.patch.object(cm, "select", self.store.select)]
+        for p in self._p:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._p):
+            p.stop()
+
+
+class SaveAndGet(PersistenceBase):
+
+    def test_save_persists_one_row_and_no_history(self):
+        """Creation is not a transition — the history table needs a
+        from_state, and a commitment is born already `made`."""
+        cm.save(made())
+        self.assertEqual(len(self.store.rows), 1)
+        self.assertEqual(self.store.transitions, [])
+
+    def test_saved_row_carries_no_history_or_approver_column(self):
+        cm.save(made())
+        row = self.store.rows[0]
+        self.assertNotIn("history", row)
+        self.assertNotIn("approver", row)
+
+    def test_duplicate_identity_is_refused_deterministically(self):
+        cm.save(made())
+        with self.assertRaises(cm.CommitmentError):
+            cm.save(made())
+        self.assertEqual(len(self.store.rows), 1, "never silently overwritten")
+
+    def test_subject_less_promises_collide_nulls_not_distinct(self):
+        """OWNER RULING: two subject-less promises to the same party on the
+        same date are ONE commitment."""
+        cm.save(made(subject=None))
+        with self.assertRaises(cm.CommitmentError):
+            cm.save(made(subject=None))
+
+    def test_different_subjects_are_different_commitments(self):
+        cm.save(made(subject="aaaaaaaa-0000-4000-8000-00000000000a"))
+        cm.save(made(subject="bbbbbbbb-0000-4000-8000-00000000000b"))
+        self.assertEqual(len(self.store.rows), 2)
+
+    def test_only_a_made_commitment_is_saved_this_way(self):
+        with self.assertRaises(cm.CommitmentError):
+            cm.save(cm.start(made()))
+
+    def test_save_refuses_an_incomplete_record(self):
+        c = made()
+        c["owner"] = None
+        with self.assertRaises(cm.CommitmentError):
+            cm.save(c)
+
+    def test_get_is_tenant_scoped(self):
+        c = cm.save(made())
+        self.assertIsNotNone(cm.get(TENANT, c["commitment_id"]))
+
+    def test_a_foreign_tenant_gets_nothing_not_a_denial(self):
+        """Never confirm the row exists — that is a cross-tenant disclosure."""
+        c = cm.save(made())
+        self.assertIsNone(cm.get(OTHER_TENANT, c["commitment_id"]))
+
+    def test_find_by_identifying_assertions(self):
+        cm.save(made(subject=None))
+        self.assertIsNotNone(cm.find(TENANT, party=PARTY, due_on=DUE))
+
+    def test_find_is_tenant_scoped(self):
+        cm.save(made(subject=None))
+        self.assertIsNone(cm.find(OTHER_TENANT, party=PARTY, due_on=DUE))
+
+    def test_no_shortcut_lookup_exists(self):
+        code = code_only(MODULE).lower()
+        for shortcut in ("phone", "email", "wamid", "lead_id", "customer_id",
+                         "project_id"):
+            self.assertNotIn(shortcut, code)
+
+
+class Overdue(PersistenceBase):
+
+    def test_overdue_finds_active_past_due_commitments(self):
+        cm.save(made())
+        self.assertEqual(len(cm.overdue(TENANT, now=DUE + timedelta(days=1))), 1)
+
+    def test_not_yet_due_is_not_overdue(self):
+        cm.save(made())
+        self.assertEqual(cm.overdue(TENANT, now=DUE - timedelta(days=1)), [])
+
+    def test_overdue_is_tenant_scoped(self):
+        cm.save(made())
+        self.assertEqual(cm.overdue(OTHER_TENANT, now=DUE + timedelta(days=1)), [])
+
+    def test_overdue_never_transitions_anything(self):
+        """`missed` is a business judgement carrying a reason and an actor,
+        not something a query manufactures from a clock tick."""
+        cm.save(made())
+        cm.overdue(TENANT, now=DUE + timedelta(days=99))
+        self.assertEqual(self.store.rows[0]["lifecycle"], cm.MADE)
+        self.assertEqual(self.store.transitions, [])
+
+    def test_overdue_queries_only_the_active_states(self):
+        code = code_only(MODULE)
+        self.assertIn("MADE", code)
+        self.assertIn("IN_PROGRESS", code)
+
+
+class TransitionsAreNotPersistableYet(PersistenceBase):
+    """bic.db has no transaction across two writes, so a lifecycle move
+    could land as a state change with no audit trail — the one failure the
+    append-only history exists to prevent."""
+
+    def test_record_transition_refuses_rather_than_half_writing(self):
+        c = cm.save(made())
+        with self.assertRaises(cm.CommitmentError):
+            cm.record_transition(c, cm.IN_PROGRESS, reason="started")
+        self.assertEqual(self.store.transitions, [])
+        self.assertEqual(self.store.rows[0]["lifecycle"], cm.MADE)
+
+    def test_the_module_never_imports_update(self):
+        """db.update is documented as narrow by design; this slice takes no
+        second use of it."""
+        self.assertFalse(hasattr(cm, "update"))
+
+    def test_domain_transitions_still_work_in_memory(self):
+        """The contract is unaffected — only its persistence is deferred."""
+        c = cm.meet(cm.start(made()))
+        self.assertEqual(c["lifecycle"], cm.MET)
+
+
+class PersistenceBoundaries(PersistenceBase):
+
+    def test_persistence_writes_only_commitment_tables(self):
+        cm.save(made())
+        code = code_only(MODULE)
+        for banned in ("bic_claims", "bic_outcome_records", "bic_parties",
+                       "bic_decision_records"):
+            self.assertNotIn(banned, code)
+
+    def test_persisted_row_carries_no_pii(self):
+        cm.save(made())
+        blob = repr(self.store.rows[0])
+        self.assertIsNone(re.search(r"\b91\d{10}\b", blob))
+        self.assertIsNone(re.search(
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", blob))
+        for banned in ("wamid", "source_ref", "message"):
+            self.assertNotIn(banned, blob)
+
+    def test_persisted_columns_match_the_migration(self):
+        cm.save(made())
+        self.assertEqual(set(self.store.rows[0]), set(cm._PERSISTED))
+
+    def test_a_store_failure_surfaces_rather_than_being_swallowed(self):
+        with mock.patch.object(cm, "insert", side_effect=DbError("down")):
+            with self.assertRaises(DbError):
+                cm.save(made())
+
+    def test_errors_are_deterministic(self):
+        cm.save(made())
+        for _ in range(3):
+            with self.assertRaises(cm.CommitmentError):
+                cm.save(made())

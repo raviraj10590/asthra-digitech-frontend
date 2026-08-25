@@ -63,17 +63,21 @@ A missed Commitment is what WE failed to do. An Outcome (2I) is what the
 WORLD did. This module writes to neither, imports neither, and asserts no
 knowledge: it never touches bic_claims.
 
-PERSISTENCE IS DELIBERATELY ABSENT HERE
----------------------------------------
-2B requires this object to survive restarts, but four schema-level questions
-are not answered by 2B (identity of `subject`, storage of the `waived`
-approver, the successor link, and whether rows transition in place or append).
-Those are reported for a ruling rather than guessed at in a migration, so this
-module is the contract only — pure, in-memory, no table.
+PERSISTENCE
+-----------
+The four schema questions 2B left open were ruled on 2026-08-25 and are
+implemented in migration 18. Creation and reads are persisted below;
+lifecycle TRANSITIONS are not, because they cannot be made atomic with the
+current bic.db primitives — see record_transition().
+
+`update` is deliberately NOT imported: db.py documents it as narrow by
+design, and this module has no safe use for it yet.
 """
 
 from datetime import datetime, timezone
 from typing import Optional
+
+from .db import DbError, insert, select
 
 # ── §2B lifecycle states ───────────────────────────────────────────────────
 MADE = "made"
@@ -277,3 +281,160 @@ def describe(c: dict) -> dict:
             "due_on": c.get("due_on"),
             "decision_ref": c.get("decision_ref"),
             "superseded_by": c.get("superseded_by")}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PERSISTENCE (2B: commitments survive restarts)
+# ══════════════════════════════════════════════════════════════════════════
+# Everything above is pure. Everything below writes, and only through the
+# existing bic.db primitives — no repository framework, no ORM, no cache.
+#
+# ⚠️ TRANSITIONS ARE DELIBERATELY ABSENT. Moving a commitment's lifecycle is
+# TWO writes — update the current row, append the history row — and bic.db
+# offers `select`, `insert` and `update` as separate PostgREST calls with no
+# transaction between them. Either half can land alone:
+#
+#   history first, row fails  → an auditable, replayable inconsistency
+#   row first, history fails  → a state change with NO audit trail, which is
+#                               precisely what the append-only history exists
+#                               to make impossible
+#
+# There is no ordering that makes this safe, only orderings that choose which
+# corruption to prefer. So `record_transition` raises rather than shipping
+# half-atomic semantics; see its docstring for the fix.
+
+TABLE = "bic_commitments"
+TRANSITIONS_TABLE = "bic_commitment_transitions"
+
+# Same markers bic/webhook_events.py uses: a unique violation IS the answer,
+# not an error to interpret.
+_DUPLICATE_MARKERS = ("23505", "duplicate key", "already exists")
+
+_PERSISTED = ("commitment_id", "tenant_id", "subject", "party", "obligation",
+              "due_on", "owner", "lifecycle", "decision_ref", "goal_ref",
+              "penalty", "source", "criticality", "superseded_by",
+              "created_at")
+
+
+def _is_duplicate(err: Exception) -> bool:
+    text = str(err).lower()
+    return any(m in text for m in _DUPLICATE_MARKERS)
+
+
+def _row(c: dict) -> dict:
+    """Domain object → table row. `history` and `approver` are deliberately
+    NOT columns: history lives in its own append-only table, and the approver
+    is a property of the waiving ACT, recorded on the transition."""
+    return {k: c.get(k) for k in _PERSISTED}
+
+
+def save(c: dict) -> dict:
+    """Persist a newly made commitment. ONE insert, so atomic by definition.
+
+    Creation is not a transition — the migration's history table requires a
+    `from_state`, and a commitment comes into existence already `made`. So
+    there is no second write here and no atomicity problem.
+
+    A duplicate identity (tenant + subject + party + due_on, NULLS NOT
+    DISTINCT) raises CommitmentError rather than overwriting: two people
+    promising the same thing to the same party by the same date have made one
+    promise, and silently replacing the first would erase who committed to it.
+    """
+    if c.get("lifecycle") != MADE:
+        raise CommitmentError(
+            f"only a newly made commitment is saved this way; got "
+            f"{c.get('lifecycle')!r}. Later states arrive by transition.")
+    for required in ("tenant_id", "party", "obligation", "due_on", "owner"):
+        if not c.get(required):
+            raise CommitmentError(f"cannot persist without {required}")
+    try:
+        insert(TABLE, _row(c), timeout=5)
+    except DbError as e:
+        if _is_duplicate(e):
+            raise CommitmentError(
+                "a commitment with this identity already exists "
+                "(tenant + subject + party + due_on)") from e
+        raise
+    return c
+
+
+def get(tenant_id: str, commitment_id: str) -> Optional[dict]:
+    """Tenant-scoped lookup by opaque id. Returns None for a foreign tenant —
+    never a denial, which would confirm the row exists."""
+    if not tenant_id or not commitment_id:
+        raise CommitmentError("get needs a tenant and a commitment id")
+    rows = select(TABLE, {"tenant_id": f"eq.{tenant_id}",
+                          "commitment_id": f"eq.{commitment_id}"}, timeout=5)
+    return rows[0] if rows else None
+
+
+def find(tenant_id: str, *, party: str, due_on, subject: str = None) -> Optional[dict]:
+    """Lookup by the 2B identifying assertions. Opaque ids only — there is no
+    lookup by phone, email or any other shortcut."""
+    if not tenant_id or not party:
+        raise CommitmentError("find needs a tenant and a party")
+    due = _parse(due_on)
+    if due is None:
+        raise CommitmentError("find needs a parseable due_on")
+    params = {"tenant_id": f"eq.{tenant_id}", "party": f"eq.{party}",
+              "due_on": f"eq.{_iso(due)}"}
+    # NULLS NOT DISTINCT in the index means an absent subject is a VALUE, so
+    # the query must ask for IS NULL rather than skipping the column.
+    params["subject"] = f"eq.{subject}" if subject else "is.null"
+    rows = select(TABLE, params, timeout=5)
+    return rows[0] if rows else None
+
+
+def overdue(tenant_id: str, *, now=None) -> list:
+    """Active commitments past their deadline. READ-ONLY, deliberately.
+
+    This answers 2B's stated purpose — "what have we promised and are we
+    about to miss it?" — and stops there. It does NOT mark anything missed:
+    `missed` is a business judgement that carries a reason and an actor, and
+    a query that silently transitioned rows would manufacture that judgement
+    from a clock tick. Uses the migration's partial index
+    (tenant_id, due_on) WHERE lifecycle IN ('made','in_progress').
+    """
+    if not tenant_id:
+        raise CommitmentError("overdue needs a tenant")
+    when = _parse(now) or _now()
+    return select(TABLE, {
+        "tenant_id": f"eq.{tenant_id}",
+        "lifecycle": f"in.({MADE},{IN_PROGRESS})",
+        "due_on": f"lt.{_iso(when)}",
+        "order": "due_on.asc",
+    }, timeout=5)
+
+
+def history(tenant_id: str, commitment_id: str) -> list:
+    """Every recorded transition, oldest first. Append-only at the database;
+    nothing here can rewrite it."""
+    if not tenant_id or not commitment_id:
+        raise CommitmentError("history needs a tenant and a commitment id")
+    return select(TRANSITIONS_TABLE, {
+        "tenant_id": f"eq.{tenant_id}",
+        "commitment_id": f"eq.{commitment_id}",
+        "order": "occurred_at.asc",
+    }, timeout=5)
+
+
+def record_transition(*_a, **_k):
+    """NOT IMPLEMENTED — and failing loudly is the point.
+
+    A lifecycle transition is two writes (UPDATE the commitment, INSERT the
+    history row) and bic.db has no transaction: `select`, `insert` and
+    `update` are independent PostgREST calls. Writing them back to back would
+    make a state change with no audit trail reachable in production, which is
+    the one failure the append-only history exists to prevent.
+
+    THE FIX, using the mechanism this repository already has: a Postgres
+    function doing both in one statement, invoked over `/rest/v1/rpc/` —
+    exactly how api/digest.py already calls bic_rollup_tool_invocations and
+    bic_prune_replay_records. That needs a function added to migration 18 and
+    an `rpc()` primitive on bic.db, which is a schema and API decision rather
+    than something to slip in behind a persistence slice.
+    """
+    raise CommitmentError(
+        "commitment transitions are not persistable atomically with the "
+        "current bic.db primitives (no transaction across two writes). "
+        "See record_transition.__doc__ for the RPC fix.")
