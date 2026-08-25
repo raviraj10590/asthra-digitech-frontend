@@ -23,6 +23,7 @@ os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
 import webhook as w                                               # noqa: E402
 from bic import context as cx                                     # noqa: E402
 from bic import decision as bic_decision                          # noqa: E402
+from bic import goal_lifecycle as gl                              # noqa: E402
 from bic import policy                                            # noqa: E402
 from bic.db import DbError                                        # noqa: E402
 
@@ -600,3 +601,92 @@ class DedupeUnchanged(unittest.TestCase):
         import inspect
         src = inspect.getsource(w.run_client_pipeline)
         self.assertEqual(src.count("_bic_decide_and_record("), 1)
+
+
+# ── Goal lifecycle through the real pipeline (Steps 9 & 13) ─────────────
+
+class GoalLifecycleIntegration(Base):
+    """Proves the lifecycle from OUTSIDE, via the GOAL_STATE trace the
+    pipeline emits after the response is actually delivered."""
+
+    def goal_state(self, packet=None, text=None, **patches):
+        import io
+        import json as _json
+        from contextlib import redirect_stdout
+        for target, kw in patches.items():
+            self.stack.enter_context(mock.patch.object(w, target, **kw))
+        if packet is not None:
+            self.stack.enter_context(self.with_packet(packet))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.run_pipeline(text)
+        lines = [l for l in buf.getvalue().splitlines()
+                 if l.startswith("GOAL_STATE ")]
+        return _json.loads(lines[0][len("GOAL_STATE "):]) if lines else None
+
+    # ── the three real paths ────────────────────────────────────────
+    def test_open_to_completed_on_a_delivered_answer(self):
+        st = self.goal_state(proceed_packet())
+        self.assertEqual(st["lifecycle"], gl.COMPLETED)
+        self.assertIsNone(st["blocker"])
+
+    def test_open_to_blocked_on_missing_evidence(self):
+        st = self.goal_state(clarify_packet())
+        self.assertEqual(st["lifecycle"], gl.BLOCKED)
+        self.assertEqual(st["blocker"], gl.BLOCKED_INSUFFICIENT_EVIDENCE)
+
+    def test_open_to_blocked_when_refused(self):
+        st = self.goal_state(refuse_packet())
+        self.assertEqual(st["lifecycle"], gl.BLOCKED)
+
+    def test_open_to_blocked_when_not_authorized(self):
+        pkt = proceed_packet()
+        pkt["goal_ref"] = "a_mismatched_goal"
+        st = self.goal_state(pkt)
+        self.assertEqual(st["lifecycle"], gl.BLOCKED)
+        self.assertEqual(st["blocker"], gl.BLOCKED_NOT_AUTHORIZED)
+
+    def test_infrastructure_failure_blocks_rather_than_completes(self):
+        self.stack.enter_context(mock.patch.object(
+            w.bic_context, "assemble", side_effect=RuntimeError("down")))
+        st = self.goal_state()
+        self.assertEqual(st["lifecycle"], gl.BLOCKED)
+        self.assertEqual(st["blocker"], gl.BLOCKED_UNAVAILABLE)
+
+    # ── adversarial ─────────────────────────────────────────────────
+    def test_unsupported_request_creates_no_goal_at_all(self):
+        self.assertIsNone(self.goal_state(text="what are your prices?"))
+
+    def test_customer_saying_done_does_not_complete_a_blocked_goal(self):
+        st = self.goal_state(clarify_packet(),
+                             text="instagram - done, all sorted")
+        self.assertEqual(st["lifecycle"], gl.BLOCKED)
+
+    def test_customer_saying_yes_without_evidence_stays_blocked(self):
+        st = self.goal_state(clarify_packet(), text="yes please, instagram")
+        self.assertNotEqual(st["lifecycle"], gl.COMPLETED)
+
+    def test_a_model_proposal_claiming_completion_changes_nothing(self):
+        self.stack.enter_context(mock.patch.object(
+            w, "generate_reply",
+            lambda *a, **k: "Your goal is COMPLETED and closed."))
+        st = self.goal_state(clarify_packet())
+        self.assertEqual(st["lifecycle"], gl.BLOCKED)
+
+    def test_goal_state_trace_carries_no_pii(self):
+        import re as _re
+        st = self.goal_state(proceed_packet())
+        blob = repr(st)
+        self.assertNotIn(CLIENT, blob)
+        self.assertIsNone(_re.search(r"\b91\d{10}\b", blob))
+        self.assertNotIn("wamid", blob)
+
+    def test_record_before_respond_still_holds_with_a_goal(self):
+        order = []
+        self.stack.enter_context(mock.patch.object(
+            w.bic_db, "insert", lambda t, r, **k: order.append("insert")))
+        self.stack.enter_context(mock.patch.object(
+            w, "send_text", lambda to, t, **k: order.append("send")))
+        with self.with_packet(proceed_packet()):
+            self.run_pipeline()
+        self.assertEqual(order, ["insert", "send"])

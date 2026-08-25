@@ -53,6 +53,7 @@ try:
                      db as bic_db, decision as bic_decision,
                      context as bic_context, decide as bic_decide,
                      explain as bic_explain,
+                     goal_lifecycle as bic_goal_lifecycle,
                      goals as bic_goals,
                      identity as bic_identity, knowledge as bic_knowledge,
                      outcome_producers as bic_outcome_producers,
@@ -3117,6 +3118,20 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             send_text(sender, reply + after_hours_note())
             save_messages([(sender, "user", user_text),
                            (sender, "assistant", reply)])
+
+            # ④ Completion, evaluated ONLY here: the declared condition is
+            # RESPONSE_DELIVERED and the response has just been delivered.
+            # A goal BLOCKED by sufficiency or authorization stays blocked —
+            # complete() refuses to take the caller's word for it.
+            _goal = decide_result.get("goal_instance")
+            if _goal is not None:
+                try:
+                    _goal = bic_goal_lifecycle.complete(
+                        _goal, {"response_delivered": True})
+                except bic_goal_lifecycle.GoalError:
+                    pass    # not completable — its state already says why
+                print("GOAL_STATE " + json.dumps(
+                    bic_goal_lifecycle.describe(_goal), default=str))
         else:
             # Legacy path — unchanged. Reached when the Brain path isn't
             # available or hit an infrastructure error unrelated to the
@@ -3503,10 +3518,16 @@ def _bic_decide_and_record(sender: str, user_text: str, ctx: dict,
     # which the IDD rates worse than a refusal. So a failure after admission
     # degrades LOUDLY, to a deterministic refusal, and still passes through
     # the same record gate below.
+    goal_instance = None
     try:
         principal = bic_identity.resolve(sender, channel="whatsapp")
         subject = bic_party.resolve_or_create(bic_config.DEFAULT_TENANT_ID,
                                               bic_party.WHATSAPP, sender)
+        # ④ The admitted goal INSTANCE (IDD-3B §1.1). Admission raises if the
+        # definition declares no completion condition, so a goal that could
+        # never end cannot enter the loop.
+        goal_instance = bic_goal_lifecycle.admit(
+            goal_def, tenant_id=bic_config.DEFAULT_TENANT_ID, subject=subject)
         packet = bic_decide.assemble_context(
             bic_config.DEFAULT_TENANT_ID, user_text, principal, goal_def,
             subject, describe=bic_knowledge.describe)
@@ -3520,15 +3541,36 @@ def _bic_decide_and_record(sender: str, user_text: str, ctx: dict,
 
         auth = bic_decide.authorize(principal, packet, goal_def,
                                     bic_config.DEFAULT_TENANT_ID)
-        if outcome["outcome"] == bic_decide.PROCEED and not auth["allowed"]:
+        denied = (outcome["outcome"] == bic_decide.PROCEED
+                  and not auth["allowed"])
+        if denied:
             outcome = bic_decide.refusal_result(
                 f"authorization denied: {auth['reason']}")
+
+        # ADMITTED → ACTIVE or BLOCKED. ACTIVE means "decided and authorized,
+        # about to act" — NOT completed. PROCEED is permission to take the
+        # next step; only the completion condition ends a goal.
+        if outcome["outcome"] == bic_decide.PROCEED:
+            goal_instance = bic_goal_lifecycle.activate(goal_instance)
+        else:
+            goal_instance = bic_goal_lifecycle.block(
+                goal_instance,
+                bic_goal_lifecycle.BLOCKED_NOT_AUTHORIZED if denied
+                else bic_goal_lifecycle.BLOCKED_INSUFFICIENT_EVIDENCE)
     except Exception as e:
         # Type only — a store error body can echo an identifier.
         print(f"brain path failed after goal admission — refusing rather than "
              f"answering unadjudicated: {type(e).__name__}")
         outcome = bic_decide.refusal_result(
             f"brain path error: {type(e).__name__}")
+        # The goal exists but could not be pursued. BLOCKED, not a terminal:
+        # nothing about this turn says the intention is finished or dead.
+        if goal_instance is not None:
+            try:
+                goal_instance = bic_goal_lifecycle.block(
+                    goal_instance, bic_goal_lifecycle.BLOCKED_UNAVAILABLE)
+            except bic_goal_lifecycle.GoalError:
+                pass
 
     # ⑬ RECORD, strictly — before ⑮ RESPOND. bic_decision.flush() is
     # deliberately best-effort everywhere else in this file (correct for
@@ -3579,6 +3621,10 @@ def _bic_decide_and_record(sender: str, user_text: str, ctx: dict,
         except Exception as e:
             print(f"brain expectation registration failed (ignored): {e}")
 
+    # Carried out for the caller to finish AFTER the response is actually
+    # delivered — the completion condition is RESPONSE_DELIVERED, and at this
+    # point nothing has been sent yet.
+    outcome["goal_instance"] = goal_instance
     return outcome
 
 

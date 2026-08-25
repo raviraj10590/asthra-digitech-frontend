@@ -45,12 +45,33 @@ FIRST_SEEN = "core.party.first_seen_at@1"
 # reports the slot as unfillable, WITH THAT REASON. A goal that names a
 # predicate nobody can record is exactly the kind of gap this layer exists to
 # make visible rather than to paper over.
+def _with_lifecycle(goal_def: dict, *, completion: str, goal_type: str) -> dict:
+    """Attach the 3B lifecycle declaration to a 2H goal definition.
+
+    Added HERE rather than inside context.goal() on purpose: the completion
+    condition is goal DATA, and this file is where goal data lives. 2H's
+    builder stays a pure sufficiency concern and ignores these keys, so the
+    two contracts do not grow into each other.
+
+    §1.4: a goal with no completion condition may not be admitted. Declaring
+    it beside the goal — not in the engine — is what keeps that gate a
+    property of the goal rather than a special case in code.
+    """
+    return {**goal_def, "completion": completion, "goal_type": goal_type}
+
+
 GOALS = {
-    "social_media_enquiry": goal(
+    # EPHEMERAL (§1.2): one turn, working memory, no persistence — the IDD's
+    # own example of this type is "answer a question". Completion is
+    # RESPONSE_DELIVERED: the enquiry was actually answered. Deliberately NOT
+    # "became a customer" — that is a business outcome with no observable
+    # source today, and asserting it from a reply would be inventing a result.
+    "social_media_enquiry": _with_lifecycle(goal(
         "social_media_enquiry", 1,
         [slot("service_interest", INTEREST, OBTAINABLE_BY_ASKING),
          slot("first_contact", FIRST_SEEN, OBTAINABLE_BY_RETRIEVAL)],
         "Answer a social-media marketing enquiry"),
+        completion="RESPONSE_DELIVERED", goal_type="EPHEMERAL"),
 
     "real_estate_enquiry": goal(
         "real_estate_enquiry", 2,
