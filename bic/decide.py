@@ -5,11 +5,10 @@ orchestrator. It is the smallest function that makes one thing true for one
 real decision point: **the LLM's proposal is not the final decision.**
 
 Stages this module owns, in IDD-3A's own numbering:
-  ③/④ INTERPRET/GOAL — admit_goal(): deterministic keyword admission for the
-                   ONE registered goal whose predicates actually exist
-                   (social_media_enquiry). No model, no classifier, no
-                   guessing; anything unmatched is UNSUPPORTED and the caller
-                   keeps its existing behaviour.
+  ④ GOAL        — admit_goal(): looks up the candidate that stage ③
+                   (bic/interpret.py) proposed. bic/goals.py stays the
+                   source of goal data; only CLEAR interpretations admit,
+                   and anything else keeps the caller's existing behaviour.
   ⑤ CONTEXT     — assemble_context(): a thin pass-through to the existing
                    bic.context engine. Not duplicated, not modified.
   ⑥ SUFFICIENCY — read from the packet bic.context already computed.
@@ -26,11 +25,11 @@ Stage ⑦ PLAN is intentionally absent (IDD-3B §0.1: most turns are
 single-action and skip planning; this is exactly that case).
 """
 
-import re
 from typing import Optional
 
 from . import context as ctx_mod
 from . import goals
+from . import interpret as interpret_mod
 
 GOAL_ID = "social_media_enquiry"
 
@@ -65,54 +64,31 @@ def recognize_goal(goal_id: str = GOAL_ID) -> Optional[dict]:
     return goals.lookup(goal_id)
 
 
-# ── ③/④ INTERPRET → GOAL admission ─────────────────────────────────────────
-# Deterministic markers for the ONE supported goal, taken from the service
-# vocabulary the bot ALREADY uses for this row (its own menu description:
-# "Instagram, FB, YouTube ನಿರ್ವಹಣೆ" / "Social Media ನಿರ್ವಹಣೆ"). Inventing a
-# fresh vocabulary here would create a second, drifting definition of what
-# counts as this service.
-#
-# WHY A CLOSED KEYWORD SET AND NOT A CLASSIFIER (IDD-3B §0.1, 2H goals.py):
-# a model deciding WHICH goal applies would let a customer's phrasing select
-# the goal — and the goal decides which facts are required and how good they
-# must be. Admission must not be negotiable by whoever wrote the message.
-#
-# SAFE BY TIER, NOT ONLY BY MATCH. social_media_enquiry is risk tier 1, the
-# LOWEST. A false positive therefore admits the least demanding goal that
-# exists; it can never escalate a turn into a higher-risk action. Admitting
-# any tier >= 2 goal from text would be a different decision and is out of
-# scope for this slice (transformer/real-estate stay unreachable — their
-# predicates are not registered).
-_SOCIAL_MARKERS = (
-    "social media", "socialmedia", "instagram", "insta", "facebook",
-    "youtube", "linkedin", "ಸೋಶಿಯಲ್", "ಇನ್ಸ್ಟಾಗ್ರಾಂ", "ಫೇಸ್‌ಬುಕ್",
-)
-
-# MATCHED ON WORD BOUNDARIES, NOT AS BARE SUBSTRINGS. A plain `in` test made
-# "insta" match "install", "instant" and "instantly" — admitting the goal for
-# messages that are not enquiries at all, which is precisely the "activates
-# only where the goal is reliably identified" rule being broken by accident.
-# `(?<!\w)…(?!\w)` rather than `\b` because the Kannada markers are \w runs
-# too, and \b around them behaves differently than it does around ASCII.
-_MARKER_RE = re.compile(
-    "|".join(rf"(?<!\w){re.escape(m)}(?!\w)" for m in _SOCIAL_MARKERS))
-
+# ── ④ GOAL admission ───────────────────────────────────────────────────────
 UNSUPPORTED = "UNSUPPORTED"
 
 
 def admit_goal(text: str) -> Optional[dict]:
-    """③/④ — the admission gate for this slice. Returns the registered goal
-    definition, or None meaning UNSUPPORTED.
+    """④ — the admission gate. Stage ③ INTERPRET proposes a goal candidate;
+    this looks it up in the registry, which stays the source of goal data.
 
-    None is NOT a failure and NOT a refusal: it means this first Brain slice
-    does not cover the request, and the caller must fall back to its existing
-    safe behaviour (IDD-3A ④ "not every intent becomes a goal"). Refusing
-    every unmatched message would replace the whole bot in one step, which
-    this slice explicitly must not do.
+    Returns the registered goal definition, or None. None is NOT a failure
+    and NOT a refusal: it means this first Brain slice does not cover the
+    request (UNSUPPORTED or AMBIGUOUS), and the caller must fall back to its
+    existing safe behaviour (IDD-3A ④ "not every intent becomes a goal").
+    Refusing every unmatched message would replace the whole bot in one step,
+    which this slice explicitly must not do.
+
+    SAFE BY TIER. social_media_enquiry is risk tier 1, the LOWEST — so even a
+    false-positive admission takes the least demanding goal that exists and
+    can never escalate a turn. Admitting any tier >= 2 goal from text would
+    be a different decision, out of scope here (transformer/real-estate stay
+    unreachable — their predicates are not registered).
     """
-    if not _MARKER_RE.search((text or "").lower()):
+    candidate = interpret_mod.goal_candidate_of(text)
+    if candidate is None:
         return None
-    return goals.lookup(GOAL_ID)
+    return goals.lookup(candidate)
 
 
 def assemble_context(tenant_id: str, request_text: str, principal, goal_def: dict,
