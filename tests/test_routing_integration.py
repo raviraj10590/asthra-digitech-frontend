@@ -162,7 +162,11 @@ class TestHandlerRegistration(unittest.TestCase):
         path (`service_interest`, STAFF, read-only), → 15 with `knowledge_why`
         (#why, OWNER-only, read-only, the first consumer of the 2G EXPLAIN
         capability), → 16 with `knowledge_suffice` (#suffice, OWNER-only,
-        read-only, the first consumer of the 2H Context + Sufficiency layer).
+        read-only, the first consumer of the 2H Context + Sufficiency layer),
+        → 18 with the 2B commitment pair: `commitments_list` (#commitments,
+        OWNER-only, read-only) and `commitment_resolve` (#commitment <ref>
+        start|met|waive, OWNER-only and the first tool here that MOVES a
+        business obligation — through the atomic RPC, never a bare UPDATE).
         This list IS the tool surface. `#status` is absent by
         design — composed from two invocations at the dispatch site, not a
         tool that invokes tools (compose_status); `knowledge_why` composes the
@@ -171,6 +175,7 @@ class TestHandlerRegistration(unittest.TestCase):
         self.assertEqual(
             sorted(tools._HANDLERS),
             ["add_role", "aitest", "chat_pause", "chat_resume",
+             "commitment_resolve", "commitments_list",
              "crm_capture_self", "crm_list_clients", "crm_sync_lead",
              "knowledge_suffice", "knowledge_why", "leads_today",
              "memory_clear", "memory_show", "remove_role", "roles_list",

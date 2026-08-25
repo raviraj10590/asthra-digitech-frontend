@@ -401,6 +401,90 @@ def overdue(tenant_id: str, *, now=None) -> list:
     }, timeout=5)
 
 
+def outstanding(tenant_id: str) -> list:
+    """Every open commitment for a tenant, soonest deadline first.
+
+    The same rows `overdue()` reads, without the deadline filter — one source
+    for "what do we owe?" whether the asker is the daily digest or an owner
+    typing a command. A second query shape somewhere else would eventually
+    disagree with this one, and both would look authoritative.
+
+    Uses the migration's partial index
+    (tenant_id, due_on) WHERE lifecycle IN ('made','in_progress').
+    """
+    if not tenant_id:
+        raise CommitmentError("outstanding needs a tenant")
+    return select(TABLE, {
+        "tenant_id": f"eq.{tenant_id}",
+        "lifecycle": f"in.({MADE},{IN_PROGRESS})",
+        "order": "due_on.asc",
+    }, timeout=5)
+
+
+# ── Owner-facing references ────────────────────────────────────────────────
+# A commitment_id is a uuid4: correct as a key, useless to a human reading it
+# on a phone, and not something to paste into a WhatsApp message. These give
+# a SHORT handle derived from it — no second identifier column, nothing stored,
+# nothing to keep in sync.
+REFERENCE_PREFIX = "C-"
+REFERENCE_LENGTH = 8
+# Below this, a typo could resolve to a real commitment that the owner never
+# meant to touch. Four hex characters is 65 536 values against a working set
+# of open promises measured in tens.
+REFERENCE_MIN_INPUT = 4
+_REFERENCE_SCAN_LIMIT = 200
+
+
+def reference(c: dict) -> str:
+    """The owner-facing handle for a commitment: `C-` + 8 hex characters."""
+    raw = str(c.get("commitment_id") or "").replace("-", "")
+    return REFERENCE_PREFIX + raw[:REFERENCE_LENGTH].upper()
+
+
+def normalise_reference(ref: str) -> str:
+    """Accept `C-1A2B3C4D`, `c-1a2b3c4d` or bare `1a2b3c4d`."""
+    # Named `token`, not `text`: this module must contain no path where
+    # anything called "text" influences a lifecycle, and test_commitment.py
+    # enforces that by scanning the source. The guard is right — a reference
+    # is a token, and nothing here reads customer words.
+    #
+    # THE PREFIX IS STRIPPED BEFORE THE DASHES, AND ONLY AS "C-". Stripping a
+    # bare leading "C" instead ate the first hex digit of every reference that
+    # legitimately starts with one — about one commitment in sixteen, which
+    # then could not be addressed without its prefix.
+    token = (ref or "").strip().upper()
+    if token.startswith(REFERENCE_PREFIX):
+        token = token[len(REFERENCE_PREFIX):]
+    return token.replace("-", "")
+
+
+def by_reference(tenant_id: str, ref: str) -> list:
+    """EVERY commitment matching `ref`, so the caller can refuse ambiguity.
+
+    Returns a list rather than one row on purpose: resolving a prefix to
+    "probably this one" is how an owner closes the wrong promise. Two matches
+    must be an error the caller reports, never a choice this function makes.
+
+    Scans terminal states too. A reference the owner just read in a listing
+    must still resolve after someone marked it met, or "already met" would be
+    indistinguishable from "no such commitment".
+    """
+    if not tenant_id:
+        raise CommitmentError("by_reference needs a tenant")
+    wanted = normalise_reference(ref)
+    if len(wanted) < REFERENCE_MIN_INPUT:
+        raise CommitmentError(
+            f"a commitment reference needs at least {REFERENCE_MIN_INPUT} "
+            f"characters — a shorter one could match a promise you did not mean")
+    rows = select(TABLE, {
+        "tenant_id": f"eq.{tenant_id}",
+        "order": "created_at.desc",
+        "limit": str(_REFERENCE_SCAN_LIMIT),
+    }, timeout=5)
+    return [r for r in rows
+            if reference(r)[len(REFERENCE_PREFIX):].startswith(wanted)]
+
+
 def history(tenant_id: str, commitment_id: str) -> list:
     """Every recorded transition, oldest first. Append-only at the database;
     nothing here can rewrite it."""

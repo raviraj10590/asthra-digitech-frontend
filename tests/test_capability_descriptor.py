@@ -76,11 +76,13 @@ class ExistingToolsUnaffected(unittest.TestCase):
     def test_all_fifteen_handlers_still_registered(self):
         import webhook  # noqa: F401  — registers the handlers at import
         # 14 → 15 with `knowledge_why` (#why), → 16 with `knowledge_suffice`
-        # (#suffice, OWNER-only, read-only, the first 2H consumer), plus the
-        # `status` composite which is never a handler. Bumping this number is
-        # meant to be a conscious act: the count is what makes an accidental
-        # new tool surface visible.
-        self.assertEqual(len(tools._HANDLERS), 16)
+        # (#suffice, OWNER-only, read-only, the first 2H consumer), → 18 with
+        # the 2B commitment pair: `commitments_list` (#commitments, read-only)
+        # and `commitment_resolve` (#commitment <ref> …, the first OWNER tool
+        # that MOVES a business obligation). Plus the `status` composite which
+        # is never a handler. Bumping this number is meant to be a conscious
+        # act: the count is what makes an accidental new tool surface visible.
+        self.assertEqual(len(tools._HANDLERS), 18)
 
     def test_legacy_act_tool_validates_without_2G_fields(self):
         """A Phase-1 row carries no freshness/degradation and must stay valid."""

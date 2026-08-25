@@ -190,15 +190,19 @@ class handler(BaseHTTPRequestHandler):
             try:
                 due = bic_commitment.overdue(bic_config.DEFAULT_TENANT_ID)
                 if due:
-                    # Counts and obligation names only: a commitment id is an
-                    # internal UUID and the party is an opaque knowledge id —
-                    # neither is usable by the person reading this on a phone.
+                    # Short references, not raw UUIDs — the SAME handles
+                    # `#commitment <ref> ...` accepts, so the digest names
+                    # exactly what the owner can act on. Never a phone, never
+                    # a party id.
+                    refs = ", ".join(bic_commitment.reference(c)
+                                     for c in due[:10])
                     kinds = sorted({str(c.get("obligation")) for c in due})
                     send_to_owner(
                         f"⏰ {len(due)} overdue commitment(s): "
                         f"{', '.join(kinds)}\n"
-                        f"👉 Review and close them — nothing is marked missed "
-                        f"automatically.")
+                        f"{refs}{' …' if len(due) > 10 else ''}\n"
+                        f"👉 Close with #commitment <ref> met — nothing is "
+                        f"marked missed automatically.")
                 print(f"bic overdue commitments: {len(due)}")
             except Exception as e:
                 print(f"bic overdue commitment check failed (ignored): "
