@@ -24,6 +24,7 @@ import webhook as w                                               # noqa: E402
 from bic import context as cx                                     # noqa: E402
 from bic import decision as bic_decision                          # noqa: E402
 from bic import goal_lifecycle as gl                              # noqa: E402
+from bic import observe as ob                                     # noqa: E402
 from bic import policy                                            # noqa: E402
 from bic.db import DbError                                        # noqa: E402
 
@@ -63,6 +64,21 @@ def refuse_packet():
     }
 
 
+class Delivery:
+    """A successful channel result, shaped like the WhatsApp API response."""
+    ok = True
+    status_code = 200
+    text = "{}"
+
+
+class Rejected:
+    """A channel REJECTION — the shape Meta returns for a bad send. The API
+    call completes, so nothing raises; only the status says it failed."""
+    ok = False
+    status_code = 400
+    text = '{"error":{"message":"Unsupported post request"}}'
+
+
 class Base(unittest.TestCase):
     """Drives run_client_pipeline for real, with everything around it
     stubbed for determinism and to stay offline."""
@@ -84,8 +100,13 @@ class Base(unittest.TestCase):
 
         p = self.stack.enter_context
         p(mock.patch.object(w, "BIC_AVAILABLE", True))
+        # A channel result, because that is what the real send_text returns.
+        # Returning None here would model a send that told us NOTHING, which
+        # stage 12 correctly reads as UNKNOWN rather than success — the mock
+        # would be quietly asserting a delivery it never observed.
         p(mock.patch.object(w, "send_text",
-                            lambda to, t, **k: self.sent.append((to, t))))
+                            lambda to, t, **k: (self.sent.append((to, t)),
+                                                Delivery())[1]))
         p(mock.patch.object(w, "save_messages",
                             lambda items: self.saved.append(list(items))))
         p(mock.patch.object(w, "save_message", lambda *a, **k: None))
@@ -127,6 +148,30 @@ class Base(unittest.TestCase):
             ctx["history"] = list(self.LONG_HISTORY)
         w.run_client_pipeline(CLIENT, text if text is not None else self.ADMITTING_TEXT,
                               ctx, message_id="wamid.T1")
+
+    def _wire_downstream(self):
+        """Capture the post-reply business block. NOTE: an earlier version of
+        this fixture left extract_lead_info returning {} from Base, so the
+        `if lead:` body never ran and the assertions below passed
+        vacuously — the block was in fact firing on every Brain turn."""
+        ev = {"extract": 0, "lead": 0, "owner": 0, "workflow": 0, "memory": 0}
+        s = self.stack.enter_context
+
+        def bump(key):
+            def _f(*a, **k):
+                ev[key] += 1
+            return _f
+
+        s(mock.patch.object(w, "extract_lead_info",
+                            lambda h: (ev.__setitem__("extract", ev["extract"] + 1),
+                                       {"name": "X", "service_needed": "social"})[1]))
+        s(mock.patch.object(w, "upsert_lead", bump("lead")))
+        s(mock.patch.object(w, "maybe_alert_lead", bump("owner")))
+        s(mock.patch.object(w, "run_workflows", bump("workflow")))
+        s(mock.patch.object(w, "update_memory", bump("memory")))
+        s(mock.patch.object(w, "notify_owner", bump("owner")))
+        return ev
+
 
 
 # ── 1, 7, 13 · the Brain path runs and produces a normal response ─────────
@@ -393,29 +438,6 @@ class ExecutionSurface(Base):
         with self.with_packet(proceed_packet()):
             self.run_pipeline()
         self.assertEqual(len(self.sent), 1)
-
-    def _wire_downstream(self):
-        """Capture the post-reply business block. NOTE: an earlier version of
-        this fixture left extract_lead_info returning {} from Base, so the
-        `if lead:` body never ran and the assertions below passed
-        vacuously — the block was in fact firing on every Brain turn."""
-        ev = {"extract": 0, "lead": 0, "owner": 0, "workflow": 0, "memory": 0}
-        s = self.stack.enter_context
-
-        def bump(key):
-            def _f(*a, **k):
-                ev[key] += 1
-            return _f
-
-        s(mock.patch.object(w, "extract_lead_info",
-                            lambda h: (ev.__setitem__("extract", ev["extract"] + 1),
-                                       {"name": "X", "service_needed": "social"})[1]))
-        s(mock.patch.object(w, "upsert_lead", bump("lead")))
-        s(mock.patch.object(w, "maybe_alert_lead", bump("owner")))
-        s(mock.patch.object(w, "run_workflows", bump("workflow")))
-        s(mock.patch.object(w, "update_memory", bump("memory")))
-        s(mock.patch.object(w, "notify_owner", bump("owner")))
-        return ev
 
     def test_a_refused_turn_executes_nothing_downstream(self):
         """AUDIT REGRESSION. A REFUSE still ran a SECOND model over the
@@ -687,6 +709,107 @@ class GoalLifecycleIntegration(Base):
             w.bic_db, "insert", lambda t, r, **k: order.append("insert")))
         self.stack.enter_context(mock.patch.object(
             w, "send_text", lambda to, t, **k: order.append("send")))
+        with self.with_packet(proceed_packet()):
+            self.run_pipeline()
+        self.assertEqual(order, ["insert", "send"])
+
+
+# ── Stage 12 OBSERVE through the real pipeline ──────────────────────────
+
+class ExecutionObservation(Base):
+    """Observes stage 12 from OUTSIDE, via the EXECUTION_OBSERVED trace the
+    pipeline emits after it actually executes."""
+
+    def observe_run(self, packet=None, channel=None, text=None):
+        import io
+        import json as _json
+        from contextlib import redirect_stdout
+        self.downstream = self._wire_downstream()
+        if channel is not None:
+            self.stack.enter_context(mock.patch.object(
+                w, "send_text",
+                lambda to, t, **k: (self.sent.append((to, t)), channel)[1]
+                if not isinstance(channel, BaseException) else
+                (_ for _ in ()).throw(channel)))
+        if packet is not None:
+            self.stack.enter_context(self.with_packet(packet))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.run_pipeline(text, long_history=True)
+        lines = buf.getvalue().splitlines()
+
+        def grab(prefix):
+            hit = [l for l in lines if l.startswith(prefix)]
+            return _json.loads(hit[0][len(prefix):]) if hit else None
+
+        return (grab("EXECUTION_OBSERVED "), grab("GOAL_STATE "))
+
+    # ── success / failure ───────────────────────────────────────────
+    def test_successful_delivery_is_observed(self):
+        obs, goal = self.observe_run(proceed_packet())
+        self.assertEqual(obs["state"], ob.SUCCEEDED)
+        self.assertEqual(goal["lifecycle"], gl.COMPLETED)
+
+    def test_channel_rejection_is_observed_and_blocks_completion(self):
+        """AUDIT REGRESSION: a hardcoded delivery meant HTTP 400 still
+        reported the enquiry answered and the goal COMPLETED."""
+        obs, goal = self.observe_run(proceed_packet(), channel=Rejected())
+        self.assertEqual(obs["state"], ob.FAILED)
+        self.assertEqual(obs["failure_class"], "VALUE")
+        self.assertNotEqual(goal["lifecycle"], gl.COMPLETED)
+
+    def test_send_exception_is_observed_rather_than_lost(self):
+        obs, goal = self.observe_run(proceed_packet(),
+                                     channel=TimeoutError("gateway"))
+        self.assertEqual(obs["state"], ob.FAILED)
+        self.assertEqual(obs["failure_class"], "TIMEOUT")
+        self.assertNotEqual(goal["lifecycle"], gl.COMPLETED)
+
+    # ── adversarial: an undelivered turn drives nothing ─────────────
+    def test_failed_delivery_runs_no_downstream_business_action(self):
+        self.observe_run(proceed_packet(), channel=Rejected())
+        self.assertEqual(self.downstream,
+                         {"extract": 0, "lead": 0, "owner": 0,
+                          "workflow": 0, "memory": 0})
+
+    def test_successful_delivery_keeps_downstream_behaviour(self):
+        self.observe_run(proceed_packet())
+        self.assertEqual(self.downstream["extract"], 1)
+
+    def test_refusal_runs_no_downstream_business_action(self):
+        self.observe_run(refuse_packet())
+        self.assertEqual(self.downstream,
+                         {"extract": 0, "lead": 0, "owner": 0,
+                          "workflow": 0, "memory": 0})
+
+    def test_clarify_does_not_complete_the_goal_even_when_delivered(self):
+        obs, goal = self.observe_run(clarify_packet())
+        self.assertEqual(obs["state"], ob.SUCCEEDED)
+        self.assertEqual(goal["lifecycle"], gl.BLOCKED)
+
+    def test_authorization_denial_does_not_complete_the_goal(self):
+        pkt = proceed_packet()
+        pkt["goal_ref"] = "a_mismatched_goal"
+        obs, goal = self.observe_run(pkt)
+        self.assertEqual(goal["lifecycle"], gl.BLOCKED)
+        self.assertEqual(goal["blocker"], gl.BLOCKED_NOT_AUTHORIZED)
+
+    # ── traces stay bounded ─────────────────────────────────────────
+    def test_observation_trace_carries_no_pii(self):
+        import re as _re
+        obs, _ = self.observe_run(proceed_packet())
+        blob = repr(obs)
+        self.assertNotIn(CLIENT, blob)
+        self.assertIsNone(_re.search(r"\b91\d{10}\b", blob))
+        self.assertNotIn("wamid", blob)
+
+    def test_record_before_respond_survives_the_observation_stage(self):
+        order = []
+        self.stack.enter_context(mock.patch.object(
+            w.bic_db, "insert", lambda t, r, **k: order.append("insert")))
+        self.stack.enter_context(mock.patch.object(
+            w, "send_text",
+            lambda to, t, **k: (order.append("send"), Delivery())[1]))
         with self.with_packet(proceed_packet()):
             self.run_pipeline()
         self.assertEqual(order, ["insert", "send"])

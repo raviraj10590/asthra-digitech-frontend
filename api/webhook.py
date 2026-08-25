@@ -54,6 +54,7 @@ try:
                      context as bic_context, decide as bic_decide,
                      explain as bic_explain,
                      goal_lifecycle as bic_goal_lifecycle,
+                     observe as bic_observe,
                      goals as bic_goals,
                      identity as bic_identity, knowledge as bic_knowledge,
                      outcome_producers as bic_outcome_producers,
@@ -1282,7 +1283,14 @@ def sync_lead_to_crm(phone: str, data: dict):
         print(f"sync_lead_to_crm error: {e}")
 
 def send_text(to: str, message: str):
-    _wa_post({
+    """Returns the channel result so stage ⑫ can OBSERVE it.
+
+    ADDITIVE: every existing caller ignores the return value and is
+    unaffected. It exists because _wa_post does not raise on a non-2xx —
+    a Meta rejection was printed and then discarded, so "we called send"
+    was indistinguishable from "the customer received it".
+    """
+    _result = _wa_post({
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
@@ -1293,6 +1301,7 @@ def send_text(to: str, message: str):
     # staff numbers are excluded too).
     if get_role(to)[0] == "CLIENT":
         log_reply_to_crm(to, message)
+    return _result
 
 def notify_owner(message: str):
     """Instant WhatsApp alert to every active OWNER/STAFF number (bootstrap
@@ -3115,23 +3124,40 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         if decide_result is not None:
             reply = decide_result["text"]
             print(f"🧠 [{decide_result['outcome']}] {reply[:80]}")
-            send_text(sender, reply + after_hours_note())
+
+            # ⑪ EXECUTE — the only action this slice takes.
+            try:
+                _channel_result = send_text(sender, reply + after_hours_note())
+            except Exception as _send_exc:
+                # An exception IS the observation. Swallowed only so ⑫ can
+                # record it; the turn's own failure handling is unchanged.
+                _channel_result = _send_exc
             save_messages([(sender, "user", user_text),
                            (sender, "assistant", reply)])
 
-            # ④ Completion, evaluated ONLY here: the declared condition is
-            # RESPONSE_DELIVERED and the response has just been delivered.
-            # A goal BLOCKED by sufficiency or authorization stays blocked —
-            # complete() refuses to take the caller's word for it.
+            # ⑫ OBSERVE — what ACTUALLY happened, not what we asked for.
+            _obs = bic_observe.execution(_channel_result)
+            print("EXECUTION_OBSERVED " + json.dumps(
+                bic_observe.describe(_obs), default=str))
+
+            # ④ Completion, fed by the OBSERVATION rather than an assumption.
+            # This previously passed a hardcoded True, so a rejected send
+            # still reported the enquiry answered and the goal COMPLETED.
             _goal = decide_result.get("goal_instance")
             if _goal is not None:
                 try:
                     _goal = bic_goal_lifecycle.complete(
-                        _goal, {"response_delivered": True})
+                        _goal,
+                        {"response_delivered": bic_observe.delivered(_obs)})
                 except bic_goal_lifecycle.GoalError:
                     pass    # not completable — its state already says why
                 print("GOAL_STATE " + json.dumps(
                     bic_goal_lifecycle.describe(_goal), default=str))
+
+            if not _obs["delivered"]:
+                # Nothing reached the customer. Do not run the post-reply
+                # business block off an undelivered conversation.
+                return
         else:
             # Legacy path — unchanged. Reached when the Brain path isn't
             # available or hit an infrastructure error unrelated to the
