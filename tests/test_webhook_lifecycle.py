@@ -439,7 +439,12 @@ class HistoricalRows(Base):
         root = os.path.join(os.path.dirname(__file__), "..")
         offenders = []
         for path in glob.glob(os.path.join(root, "supabase", "migrations", "*.sql")):
-            sql = open(path).read()
+            raw = open(path).read()
+            # Comments stripped first. A later migration may legitimately
+            # MENTION this table in prose — migration 17 explains that
+            # execution telemetry is not an outcome — and matching that
+            # reports a mutation which does not exist.
+            sql = "\n".join(line.split("--", 1)[0] for line in raw.splitlines())
             if "bic_webhook_events" not in sql:
                 continue
             name = os.path.basename(path)

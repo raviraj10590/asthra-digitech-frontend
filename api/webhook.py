@@ -48,6 +48,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from bic import (brain as bic_brain, claims as bic_claims,
+                     commitment as bic_commitment,
                      config as bic_config, contract as bic_contract,
                      db as bic_db, decision as bic_decision,
                      context as bic_context, explain as bic_explain,
@@ -1948,6 +1949,159 @@ def tool_suffice(sender: str, goal_id: str = "", timeout: float = 5, **_) -> str
     return render_sufficiency(packet, context)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 2B COMMITMENT — the OWNER consumer that CLOSES a promise
+# ══════════════════════════════════════════════════════════════════════════════
+# Stage ⑮ creates commitments; without this they stay `made` forever.
+#
+# THE ACTOR IS A ROLE, NOT A PERSON — AND THAT IS THE COLUMN'S RULE.
+# bic_commitment_transitions.actor is documented in migration 18 as "Bounded,
+# non-PII: an AGENT reference", so the owner's phone number may not go there.
+# There is no owner→AGENT mapping in this system (owners are phone numbers in
+# bot_roles), and inventing one would be the second owner system §2 forbids.
+# So the business record says an authenticated OWNER approved it, and WHICH
+# owner is recovered from bic_tool_invocations, which audits this tool at
+# audit_level 'full'. Accountability is not lost; it lives in the audit trail
+# rather than in the promise.
+COMMITMENT_OWNER_ACTOR = "agent:owner"
+
+# Only the transitions 2B's diagram permits, and deliberately not `missed`:
+# a miss is a business judgement about the past, and offering it as a command
+# next to `met` invites closing an awkward promise by declaring it missed.
+COMMITMENT_ACTIONS = {"start": "in_progress", "met": "met", "waive": "waived"}
+
+
+def _commitment_due_text(row: dict) -> str:
+    """Deadline in IST — the business reads these on a phone in Bengaluru."""
+    try:
+        due = datetime.fromisoformat(str(row.get("due_on")).replace("Z", "+00:00"))
+        return due.astimezone(IST).strftime("%d %b %H:%M")
+    except Exception:
+        return "unknown"
+
+
+def _commitment_party_ref(row: dict) -> str:
+    """The counterparty as an OPAQUE handle.
+
+    Deliberately NOT a phone number. `party` is a 2B knowledge_id, and this
+    listing shows every outstanding promise at once — resolving each back to a
+    contact detail would assemble a customer list in a WhatsApp message. The
+    escalation alert already gave the owner a wa.me link for the specific
+    failure at the moment it happened, which is where reaching the customer
+    belongs.
+    """
+    raw = str(row.get("party") or "").replace("-", "")
+    return "P-" + raw[:8].upper() if raw else "P-UNKNOWN"
+
+
+def tool_commitments_list(sender: str, timeout: float = 5, **_) -> str:
+    """`#commitments` — OWNER-only. What do we still owe, and what is late?
+
+    Reads bic/commitment.outstanding(): the SAME source the daily digest
+    reports from. Two query shapes for one question would eventually disagree,
+    and both would look authoritative.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return "⚠️ UNAVAILABLE — commitment store not configured."
+    try:
+        rows = bic_commitment.outstanding(bic_config.DEFAULT_TENANT_ID)
+    except Exception as e:
+        # Type only, never the store's error body.
+        return f"⚠️ UNAVAILABLE — couldn't read commitments ({type(e).__name__})."
+
+    if not rows:
+        return "✅ No outstanding commitments."
+
+    now = datetime.now(timezone.utc)
+    lines = [f"📌 {len(rows)} outstanding commitment(s):", ""]
+    for r in rows:
+        late = bic_commitment.is_overdue(r, now=now)
+        lines.append(
+            f"{bic_commitment.reference(r)} · {r.get('obligation')}\n"
+            f"   {r.get('lifecycle')} · due {_commitment_due_text(r)} IST"
+            f"{' · ⏰ OVERDUE' if late else ''}\n"
+            f"   owner {r.get('owner')} · party {_commitment_party_ref(r)}")
+    lines.append("")
+    lines.append("Close one:  #commitment <ref> start | met | waive <reason>")
+    return "\n".join(lines)
+
+
+def tool_commitment_resolve(sender: str, ref: str = "", action: str = "",
+                            reason: str = "", timeout: float = 5, **_) -> str:
+    """`#commitment <ref> start|met|waive <reason>` — OWNER-only.
+
+    Moves ONE commitment through the existing atomic RPC. There is no second
+    Commitment API here and no direct UPDATE: this function resolves a
+    reference, checks what 2B permits, and calls record_transition().
+
+    IDEMPOTENT BY REFUSING, NOT BY REPEATING. A commitment already in a
+    terminal state is reported as such and the RPC is NEVER called, so a
+    repeated `#commitment C-… met` cannot append a second history row.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return "⚠️ UNAVAILABLE — commitment store not configured."
+
+    to_state = COMMITMENT_ACTIONS.get((action or "").strip().lower())
+    if not to_state:
+        return ("❓ Unknown action. Use: #commitment <ref> start | met | "
+                "waive <reason>")
+
+    tenant = bic_config.DEFAULT_TENANT_ID
+    try:
+        matches = bic_commitment.by_reference(tenant, ref)
+    except bic_commitment.CommitmentError as e:
+        return f"⚠️ {e}"
+    except Exception as e:
+        return f"⚠️ UNAVAILABLE — couldn't read commitments ({type(e).__name__})."
+
+    if not matches:
+        return f"❓ No commitment matches {(ref or '').strip()[:16]}."
+    if len(matches) > 1:
+        # Never guess. Closing the wrong promise is not recoverable — `met`
+        # and `waived` are terminal in 2B.
+        refs = ", ".join(bic_commitment.reference(m) for m in matches[:5])
+        return f"❓ {len(matches)} commitments match that reference: {refs}. Use more characters."
+
+    row = matches[0]
+    handle = bic_commitment.reference(row)
+    current = row.get("lifecycle")
+
+    # ── Idempotency: terminal is terminal, and the RPC is not called ──
+    if current in bic_commitment.TERMINALS:
+        return (f"ℹ️ {handle} is already {current} — 2B's lifecycle has no "
+                f"arrow out of it. Nothing changed.")
+
+    if to_state == "waived" and not (reason or "").strip():
+        # 2B: waived "(requires approver)", and an unexplained waiver teaches
+        # nothing about why the business forgave itself.
+        return f"❓ Waiving {handle} requires a reason: #commitment {handle} waive <reason>"
+
+    actor = COMMITMENT_OWNER_ACTOR if to_state == "waived" else None
+    note = (reason or "").strip() or f"resolved by owner: {action.strip().lower()}"
+    try:
+        moved = bic_commitment.record_transition(
+            row, to_state, reason=note[:200], actor=actor)
+    except bic_commitment.CommitmentError as e:
+        # An illegal transition is the DOMAIN answering, not an outage.
+        return f"⛔ {handle}: {e}"
+    except Exception as e:
+        return f"⚠️ Transition not applied ({type(e).__name__}) — {handle} unchanged."
+
+    new_state = (moved or {}).get("lifecycle", to_state)
+    extra = ""
+    if new_state == "met":
+        # §10 — closing a commitment does NOT complete the Goal, and here it
+        # cannot: the goal instance was EPHEMERAL (3B §1.2, one turn, working
+        # memory) and stopped existing when that turn ended. Even if it were
+        # persisted, goal_lifecycle.is_complete requires ACTIVE + delivered,
+        # and stage ⑮ left it BLOCKED. Said out loud rather than silently
+        # implied, because "the promise is met" and "the customer's goal is
+        # achieved" are different claims and only one of them was just made.
+        extra = ("\n(The originating goal is not marked complete — that needs "
+                 "the reply actually delivered.)")
+    return f"✅ {handle} → {new_state}.{extra}"
+
+
 _VERDICT_ICON = {"PROCEED": "✅", "CLARIFY": "❓", "RETRIEVE": "🔄",
                  "ESCALATE": "⬆️", "REFUSE": "⛔"}
 
@@ -2282,6 +2436,8 @@ OWNER_COMMANDS_HELP = (
     "#interest — your declared service interest (knowledge claims)\n"
     "#why — why we believe what we believe (evidence + provenance)\n"
     "#suffice <goal> — is there enough to proceed? (context + sufficiency)\n"
+    "#commitments — what we still owe, and what is overdue\n"
+    "#commitment <ref> start|met|waive <reason> — resolve one commitment\n"
     "#status — quick business snapshot\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
@@ -2354,6 +2510,22 @@ def try_owner_command(sender: str, role: str, text: str):
         target = stripped[len("#suffice"):].strip()
         return run_tool(sender, "knowledge_suffice",
                         _fallback=tool_suffice, goal_id=target)
+    if low == "#commitments":
+        return run_tool(sender, "commitments_list",
+                        _fallback=tool_commitments_list)
+    # #commitment <ref> <action> [reason]. The reference and the action are
+    # NAMED, never inferred: this closes a business obligation, and `met` and
+    # `waived` are terminal in 2B.
+    m = re.match(r'^#commitment\s+(\S+)\s+(\w+)\s*(.*)$', stripped,
+                 re.IGNORECASE | re.DOTALL)
+    if m:
+        return run_tool(sender, "commitment_resolve",
+                        _fallback=tool_commitment_resolve,
+                        ref=m.group(1), action=m.group(2),
+                        reason=m.group(3).strip())
+    if low.startswith("#commitment"):
+        return ("❓ Usage: #commitment <ref> start | met | waive <reason>\n"
+                "Send #commitments to see the open ones.")
     if low == "#status":
         return compose_status(sender)
     if low == "#roles":
@@ -3501,6 +3673,17 @@ if BIC_AVAILABLE:
     def _tool_h_knowledge_suffice(principal, timeout=10, goal_id="", **_):
         return tool_suffice(principal.sender_id, goal_id=goal_id,
                             timeout=timeout)
+
+    @bic_tools.register("commitments_list")
+    def _tool_h_commitments_list(principal, timeout=10, **_):
+        return tool_commitments_list(principal.sender_id, timeout=timeout)
+
+    @bic_tools.register("commitment_resolve")
+    def _tool_h_commitment_resolve(principal, timeout=10, ref="", action="",
+                                   reason="", **_):
+        return tool_commitment_resolve(principal.sender_id, ref=ref,
+                                       action=action, reason=reason,
+                                       timeout=timeout)
 
     @bic_tools.register("roles_list")
     def _tool_h_roles_list(principal, timeout=10, **_):

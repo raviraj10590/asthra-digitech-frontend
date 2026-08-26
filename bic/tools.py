@@ -49,6 +49,15 @@ _ARG_ALLOWLIST = {
     "remove_role": ["target"],
     "chat_pause":  ["target"],
     "chat_resume": ["target"],
+
+    # 2B commitment resolution. `ref` and `action` ARE the audit: which promise
+    # was closed, and how. `reason` is deliberately EXCLUDED — it is owner-typed
+    # free text that may name a person or repeat what a customer said, and the
+    # security event is fully reconstructable without it. The reason is not
+    # lost: it is stored on the transition row itself, inside the business
+    # record, where 2B requires it.
+    "commitment_resolve": ["ref", "action"],
+    "commitments_list":   [],
 }
 
 

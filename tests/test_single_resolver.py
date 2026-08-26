@@ -43,8 +43,20 @@ def brain_role(sender):
 
 class TestOneResolver(unittest.TestCase):
     def setUp(self):
+        self._saved_fetcher = identity._fetch_row
         identity.clear_cache()
         self.calls = []
+
+    def tearDown(self):
+        # IDENTITY IS MODULE-LEVEL STATE. configure() installs a fetcher for
+        # the whole process, so a test that installs one and walks away
+        # re-roles every later test's phone numbers. This module left a
+        # fetcher returning STAFF for ANY number, which routed the webhook
+        # lifecycle suite down the OWNER branch and failed five of its tests
+        # ~130 tests later. Same save/restore discipline as
+        # test_1c_closure_validation.py.
+        identity.configure(self._saved_fetcher)
+        identity.clear_cache()
 
     def _fetch(self, rows):
         def f(phone):
@@ -160,8 +172,20 @@ class TestLatencyInstrumentation(unittest.TestCase):
     """Performance Rules: measure before optimising. Measurement only."""
 
     def setUp(self):
+        self._saved_fetcher = identity._fetch_row
         identity.clear_cache()
         identity.reset_stats()
+
+    def tearDown(self):
+        # IDENTITY IS MODULE-LEVEL STATE. configure() installs a fetcher for
+        # the whole process, so a test that installs one and walks away
+        # re-roles every later test's phone numbers. This module left a
+        # fetcher returning STAFF for ANY number, which routed the webhook
+        # lifecycle suite down the OWNER branch and failed five of its tests
+        # ~130 tests later. Same save/restore discipline as
+        # test_1c_closure_validation.py.
+        identity.configure(self._saved_fetcher)
+        identity.clear_cache()
 
     def test_counters_classify_correctly(self):
         identity.configure(lambda p: {"role": "STAFF", "label": "x"} if p == STAFF else None)

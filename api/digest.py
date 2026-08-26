@@ -11,6 +11,18 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+import sys
+
+# Guarded exactly like webhook.py's BIC import: a bundling failure must degrade
+# to a log line, never break the digest that already works.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from bic import commitment as bic_commitment, config as bic_config
+    BIC_AVAILABLE = True
+except Exception as _bic_err:  # pragma: no cover - environment dependent
+    BIC_AVAILABLE = False
+    print(f"BIC: package import FAILED ({_bic_err}) — commitment report skipped")
+
 VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN",    "asthra_secret_2024")
 WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN",  "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
@@ -147,6 +159,39 @@ class handler(BaseHTTPRequestHandler):
             print(f"bic replay retention: {r.status_code} {r.text[:80]}")
         except Exception as e:
             print(f"bic replay retention failed (ignored): {e}")
+
+        # IDD-2B: "what have we promised and are we about to miss it?" — the
+        # question Commitment exists to answer. READ-ONLY, deliberately.
+        #
+        # NOTHING IS MARKED MISSED HERE. "`missed` is recorded, never
+        # deleted... missed commitments are the reliability signal", and a
+        # cron that transitioned rows would manufacture that judgement from a
+        # clock tick, with no reason and no actor. A real miss goes through
+        # the transition RPC with both. This only reports.
+        #
+        # Rides the existing daily cron — no third scheduler, per the note at
+        # the top of this file.
+        if BIC_AVAILABLE:
+            try:
+                due = bic_commitment.overdue(bic_config.DEFAULT_TENANT_ID)
+                if due:
+                    # Short references, not raw UUIDs — the SAME handles
+                    # `#commitment <ref> ...` accepts, so the digest names
+                    # exactly what the owner can act on. Never a phone, never
+                    # a party id.
+                    refs = ", ".join(bic_commitment.reference(c)
+                                     for c in due[:10])
+                    kinds = sorted({str(c.get("obligation")) for c in due})
+                    send_to_owner(
+                        f"⏰ {len(due)} overdue commitment(s): "
+                        f"{', '.join(kinds)}\n"
+                        f"{refs}{' …' if len(due) > 10 else ''}\n"
+                        f"👉 Close with #commitment <ref> met — nothing is "
+                        f"marked missed automatically.")
+                print(f"bic overdue commitments: {len(due)}")
+            except Exception as e:
+                print(f"bic overdue commitment check failed (ignored): "
+                      f"{type(e).__name__}")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

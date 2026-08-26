@@ -77,10 +77,11 @@ class ExistingToolsUnaffected(unittest.TestCase):
         import webhook  # noqa: F401  — registers the handlers at import
         # 14 → 15 with `knowledge_why` (#why), → 16 with `knowledge_suffice`
         # (#suffice, OWNER-only, read-only, the first 2H consumer), plus the
-        # `status` composite which is never a handler. Bumping this number is
+        # → 18 with the 2B commitment pair (#commitments, #commitment <ref> …),
+        # plus the `status` composite which is never a handler. Bumping this is
         # meant to be a conscious act: the count is what makes an accidental
         # new tool surface visible.
-        self.assertEqual(len(tools._HANDLERS), 16)
+        self.assertEqual(len(tools._HANDLERS), 18)
 
     def test_legacy_act_tool_validates_without_2G_fields(self):
         """A Phase-1 row carries no freshness/degradation and must stay valid."""
