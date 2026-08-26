@@ -109,12 +109,41 @@ class KnowledgeId(Base):
         self.assertRegex(kid, r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-")
 
     def test_is_not_derived_from_the_identifier(self):
-        """The whole point of meaningless identity: nothing about the phone
-        can be recovered from, or predicts, the id."""
-        kid = p.resolve_or_create(T, p.WHATSAPP, PHONE_A)
-        self.assertNotIn(PHONE_A, kid)
-        for tail in (PHONE_A[-4:], PHONE_A[:4]):
-            self.assertNotIn(tail, kid.replace("-", ""))
+        """The whole point of meaningless identity: the id is not a FUNCTION
+        of the phone.
+
+        PROVED BY REGENERATION, NOT BY SUBSTRING ABSENCE. A derived id —
+        uuid5(phone), say — is identical every time it is computed; a random
+        one is not. So resolving the same phone against a FRESH store must
+        yield a different id, and that is a deterministic property.
+
+        The previous version asserted that a 4-character slice of the phone
+        did not occur anywhere in the 32-hex-character id. That is a
+        PROBABILISTIC claim, not a correctness one: a random uuid4 contains
+        any given 4-digit run at roughly 29 x 16^-4, and with two slices
+        checked that is about one run in 1130. It duly failed on run 76 of a
+        100-run stability hunt, with kid 4897000159f842b6b62e0e7e6510d8a3
+        containing PHONE_A[-4:] == "0001". An accidental substring is not
+        derivation, and a test that fails 0.09% of the time teaches the team
+        to re-run the suite instead of reading it.
+
+        The full phone is still asserted absent: at twelve characters that
+        collision is ~1e-13, and a genuinely derived id would embed it.
+        """
+        first = p.resolve_or_create(T, p.WHATSAPP, PHONE_A)
+        self.assertNotIn(PHONE_A, first)
+
+        # A second, independent store. Same tenant, same phone, no shared rows.
+        fresh = FakePartyDb()
+        with mock.patch.object(p, "select", fresh.select), \
+             mock.patch.object(p, "insert", fresh.insert), \
+             mock.patch.object(p, "update", fresh.update):
+            second = p.resolve_or_create(T, p.WHATSAPP, PHONE_A)
+        self.assertNotIn(PHONE_A, second)
+        self.assertNotEqual(
+            first, second,
+            "same phone + fresh store produced the same id, so the id IS a "
+            "function of the phone")
 
     def test_two_parties_from_the_same_phone_in_different_tenants_differ(self):
         """A derived id (uuid5 of the phone) would collide here. A random one
