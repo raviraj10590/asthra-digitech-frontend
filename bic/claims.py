@@ -276,6 +276,46 @@ def derive_state(claim: dict, as_of, retracted_ids, newest_valid_from) -> str:
     return ST_ACTIVE
 
 
+def distinct_subjects_in_window(tenant_id: str, predicate_ref: str,
+                                window_start, window_end) -> List[str]:
+    """Distinct subjects holding a live claim for `predicate_ref` whose
+    WORLD time falls in [window_start, window_end).
+
+    Filters on `valid_from`, not `observed_at`, deliberately. The question a
+    business metric asks is "when did this happen", not "when did we write it
+    down" — and those differ whenever capture lags reality. Using system time
+    would move an enquiry into the month we happened to record it.
+
+    Half-open on purpose: an event at exactly window_end belongs to the NEXT
+    window, so consecutive windows partition time with no double-count and no
+    gap. Both boundaries are exercised by tests.
+
+    Retracted claims are excluded — a retracted fact is not evidence, and a
+    count that included them would report enquiries the store has disowned.
+
+    The only cross-subject read in this module. It lives here rather than in a
+    producer so that every path to bic_claims keeps going through the store
+    that understands retraction and versioning.
+    """
+    if not tenant_id:
+        raise ClaimError("distinct_subjects_in_window needs a tenant")
+    ns, concept, _version = registry.parse_ref(predicate_ref)
+    rows = select(TABLE, {
+        "tenant_id": f"eq.{tenant_id}",
+        "predicate_ns": f"eq.{ns}",
+        "predicate_concept": f"eq.{concept}",
+        "valid_from": f"gte.{_iso(window_start)}",
+        "select": "claim_id,subject,valid_from",
+        "order": "valid_from.asc",
+    }, timeout=5)
+    end = _iso(window_end)
+    rows = [r for r in rows if str(r.get("valid_from") or "") < end]
+    if not rows:
+        return []
+    dead = _retracted_ids(tenant_id, [r["claim_id"] for r in rows])
+    return sorted({r["subject"] for r in rows if r["claim_id"] not in dead})
+
+
 def _retracted_ids(tenant_id: str, claim_ids: List[str]) -> set:
     if not claim_ids:
         return set()
