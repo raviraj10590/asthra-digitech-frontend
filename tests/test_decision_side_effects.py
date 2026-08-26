@@ -239,9 +239,18 @@ class OutcomeExpectationScope(SideEffects):
         for text in ("menu", "services", "hi"):
             with self.subTest(text=text):
                 ev = {"n": 0}
+                # send_welcome_menu and record_first_seen are NOT stubbed by
+                # Base — the procedural branches are the only ones that call
+                # them, and without these stubs this test made a real outbound
+                # WhatsApp request. pytest-socket caught it; that is what the
+                # offline gate is for.
                 with mock.patch.object(w.bic_outcome_producers,
                                        "expect_customer_reply",
                                        lambda *a, **k: ev.__setitem__("n", 1)), \
+                     mock.patch.object(w, "send_welcome_menu",
+                                       lambda *a, **k: None), \
+                     mock.patch.object(w, "record_first_seen",
+                                       lambda *a, **k: None), \
                      redirect_stdout(io.StringIO()):
                     self.run_pipeline(text=text, long_history=True)
                 self.assertEqual(ev["n"], 0)
