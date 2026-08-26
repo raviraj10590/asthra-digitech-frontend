@@ -3458,6 +3458,12 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                 decide_result["outcome"] == bic_decide.REFUSE:
             return
 
+        # Which downstream actions this turn is allowed to take. A legacy
+        # turn (decide_result is None) is unchanged: it has no verdict, so it
+        # keeps exactly the behaviour it had before the Brain existed.
+        _clarifying = (decide_result is not None
+                       and decide_result["outcome"] == bic_decide.CLARIFY)
+
         # Lead extraction: EVERY turn while the chat is short (early
         # drop-offs are exactly the leads we must not lose), then every
         # 2nd turn once the conversation is established.
@@ -3472,10 +3478,22 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                 # score/summary/timeline travel via alert + CRM note.
                 upsert_lead(sender, {k: v for k, v in lead.items()
                                      if k in ("name", "company", "service_needed", "budget", "city")})
-                maybe_alert_lead(sender, lead, ctx["lead_alerted"])
-                # Business workflows the analyst detected (meeting, callback,
-                # quote, follow-up, unhappy, …). Deduped, best-effort, post-reply.
-                run_workflows(sender, lead, ctx)
+                # CLARIFY IS TERMINAL, SO IT MAY RECORD BUT MAY NOT EXECUTE.
+                # IDD-3A §2.2 lists `ASSESSING → CLARIFY-terminal`, and only
+                # `ASSESSING → PLANNING` on PROCEED — so a clarifying turn
+                # never reaches EXECUTING. Upserting the lead and rolling
+                # memory only WRITE DOWN what the customer themselves said, so
+                # a drop-off after our question is still captured. These two
+                # are different: alerting the owner presents an enquiry we
+                # just declared evidence-INSUFFICIENT (2H §4.2) as a qualified
+                # lead, and run_workflows fires meeting/callback/quote actions
+                # off it. That is the REFUSE rationale above, applied at the
+                # point where it actually bites.
+                if not _clarifying:
+                    maybe_alert_lead(sender, lead, ctx["lead_alerted"])
+                    # Business workflows the analyst detected (meeting, callback,
+                    # quote, follow-up, unhappy, …). Deduped, best-effort, post-reply.
+                    run_workflows(sender, lead, ctx)
                 # Hierarchical memory: merge fresh facts + roll summary.
                 # Post-reply, env-gated, best-effort — never blocks the customer.
                 update_memory(sender, lead, lead.get("summary", ""), history, memory)
