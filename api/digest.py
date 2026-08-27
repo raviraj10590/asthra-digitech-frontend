@@ -19,7 +19,8 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from bic import (commitment as bic_commitment, config as bic_config,
-                     outcome_producers as bic_outcome_producers)
+                     outcome_producers as bic_outcome_producers,
+                     pipeline_evidence as bic_pipeline_evidence)
     BIC_AVAILABLE = True
 except Exception as _bic_err:  # pragma: no cover - environment dependent
     BIC_AVAILABLE = False
@@ -206,6 +207,44 @@ class handler(BaseHTTPRequestHandler):
                 print(f"bic overdue commitments: {len(due)}")
             except Exception as e:
                 print(f"bic overdue commitment check failed (ignored): "
+                      f"{type(e).__name__}")
+
+        # IDD-2A/2C: refresh the business pipeline evidence.
+        #
+        # biz.pipeline.new_enquiries_per_month@1 is volatility `fast` — a 24h
+        # staleness bound — so a value nobody recomputes goes STALE within a
+        # day and 2H correctly stops accepting it. This cron runs at 09:00 IST
+        # daily, which is inside every calendar month it measures, so the
+        # producer's "current month only" rule always holds.
+        #
+        # RIDES THE EXISTING SCHEDULER. Vercel Hobby caps at 2 crons and both
+        # are in use, so this is a fourth best-effort block on the daily job
+        # rather than a third cron — the same move the rollup, retention and
+        # sweep blocks above already made.
+        #
+        # RECOMPUTATION IS SAFE. record() writes valid_from = the measurement
+        # instant, so today's reading supersedes yesterday's instead of
+        # competing with it. Running twice in one day is therefore harmless.
+        #
+        # A FAILURE MUST NOT FABRICATE A ZERO. record() returns None when the
+        # store refuses; nothing here converts that into a recorded value. The
+        # previous measurement simply stands and ages into STALE, which is the
+        # honest outcome — a false zero would read as "no enquiries this
+        # month" and is exactly the failure this predicate was built to avoid.
+        if BIC_AVAILABLE:
+            try:
+                claim = bic_pipeline_evidence.record(
+                    bic_config.DEFAULT_TENANT_ID)
+                if claim is None:
+                    print("bic pipeline evidence: NOT recorded (store refused) "
+                          "— previous measurement stands and will age to STALE")
+                else:
+                    # Value and window only. No party ids, no subject list.
+                    print(f"bic pipeline evidence: "
+                          f"new_enquiries_per_month={claim['value']} "
+                          f"valid_until={claim['valid_until']}")
+            except Exception as e:
+                print(f"bic pipeline evidence failed (ignored): "
                       f"{type(e).__name__}")
 
         self.send_response(200)

@@ -105,6 +105,10 @@ def month_window(at=None) -> tuple:
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
+def _iso(v: datetime) -> str:
+    return v.isoformat()
+
+
 def _coerce(value) -> Optional[datetime]:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -195,6 +199,30 @@ def record(tenant_id: str = None, *, at=None, observed_at=None) -> Optional[dict
                 f"[{start.isoformat()}, {end.isoformat()})")
 
         subject = business_subject(tenant)
+
+        # IDEMPOTENT AT THE SAME INSTANT. Supersession is keyed on valid_from,
+        # so two runs that share a measurement instant produce two claims that
+        # neither supersedes the other — two live claims on a `single`
+        # predicate, which claims.current() reports as contested. Different
+        # instants are already safe; this closes the identical-instant case
+        # (a cron retry, or a manual ?key= call landing in the same tick).
+        #
+        # Re-reading before writing costs one query on a once-daily job and is
+        # the difference between "ran twice" and "permanently unusable".
+        try:
+            live = claims.current(tenant, subject, PREDICATE, as_of=measured_at)
+            for existing in live.get("claims") or []:
+                if str(existing.get("valid_from")) == _iso(measured_at):
+                    # Same instant, same source data, same answer. Returning
+                    # the existing claim is the honest no-op — writing a second
+                    # identical row would only manufacture the conflict.
+                    return existing
+        except (DbError, claims.ClaimError):
+            # A failed pre-check must not block the measurement; the worst case
+            # is the duplicate this guard exists to avoid, which is still
+            # better than recording nothing.
+            pass
+
         return claims.assert_claim(
             tenant, subject, PREDICATE, measured["value"],
             source=SOURCE,

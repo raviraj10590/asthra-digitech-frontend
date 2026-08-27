@@ -312,9 +312,24 @@ class Recording(Base):
                       observed_at=datetime(2026, 9, 10, tzinfo=timezone.utc))
 
     def test_a_store_failure_returns_none_rather_than_raising(self):
+        """A LATER instant, deliberately: setUp already recorded at self.AUG,
+        and the same-instant guard would return that existing claim before
+        assert_claim is ever reached — which would make this pass without
+        exercising the failure path at all."""
         from bic.db import DbError
+        later = self.AUG + timedelta(days=1)
         with mock.patch.object(c, "assert_claim", side_effect=DbError("down")):
-            self.assertIsNone(pe.record(T, at=self.AUG, observed_at=self.AUG))
+            self.assertIsNone(pe.record(T, at=later, observed_at=later))
+
+    def test_a_same_instant_rerun_is_an_idempotent_no_op(self):
+        """Two runs sharing a measurement instant must not leave two live
+        claims — supersession is keyed on valid_from, so neither would win."""
+        again = pe.record(T, at=self.AUG, observed_at=self.AUG)
+        self.assertEqual(again["claim_id"], self.row["claim_id"])
+        cur = c.current(T, pe.business_subject(T), pe.PREDICATE,
+                        as_of=self.AUG + timedelta(hours=1))
+        self.assertEqual(len(cur["claims"]), 1)
+        self.assertFalse(cur["conflict"])
 
 
 # ── boundaries ─────────────────────────────────────────────────────────
