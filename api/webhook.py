@@ -63,7 +63,8 @@ try:
                      outcome_producers as bic_outcome_producers,
                      owner_context as bic_owner_context, party as bic_party,
                      policy as bic_policy, replay as bic_replay,
-                     tools as bic_tools, webhook_events as bic_events)
+                     tools as bic_tools, webhook_events as bic_events,
+                     message_ref as bic_message_ref)
     from adapters import whatsapp as wa_adapter
     BIC_AVAILABLE = True
     print("BIC: package import OK")
@@ -1577,7 +1578,7 @@ def record_service_interest(sender: str, service: str, message_id=None) -> None:
             source="whatsapp", provenance_tier=5,
             asserted_by="whatsapp:menu_selection",
             confidence=0.50,
-            source_ref=f"wa_msg:{message_id}" if message_id else None,
+            source_ref=bic_message_ref.reference(message_id),
         )
     except Exception as e:
         # TYPE ONLY, never str(e). DbError embeds the response body, and a
@@ -3042,7 +3043,7 @@ def record_first_seen(sender: str, first_seen, message_id=None) -> None:
             source="whatsapp", provenance_tier=1,
             asserted_by="whatsapp:first_contact",
             confidence=0.90,
-            source_ref=f"wa_msg:{message_id}" if message_id else None,
+            source_ref=bic_message_ref.reference(message_id),
             # WORLD time. observed_at is left to default to system time.
             valid_from=first_seen,
         )
@@ -3090,7 +3091,7 @@ def record_engagement_segment(sender: str, segment: str, message_id=None) -> Non
             source="whatsapp", provenance_tier=5,
             asserted_by="whatsapp:vip_detection",
             confidence=0.50,
-            source_ref=f"wa_msg:{message_id}" if message_id else None,
+            source_ref=bic_message_ref.reference(message_id),
         )
     except Exception as e:
         # TYPE ONLY. A DbError carries the response body, and a unique-violation
@@ -4386,7 +4387,15 @@ class handler(BaseHTTPRequestHandler):
             # still catches a genuine re-send that Meta gives a NEW wamid,
             # which this claim cannot see. The two guards answer different
             # questions and neither subsumes the other.
-            if BIC_AVAILABLE and bic_events.claim(wamid) == bic_events.DUPLICATE:
+            # The Brain-local reference for THIS delivery, minted once here so
+            # every claim written below shares it. Generated before the claim
+            # so it can be stored with the row, and generated unconditionally
+            # so provenance still works when claim() fails open and no row
+            # exists — an uncorrelatable reference is honest; a wamid in the
+            # evidence table is not.
+            brain_ref = bic_message_ref.new_id() if BIC_AVAILABLE else None
+            if BIC_AVAILABLE and bic_events.claim(
+                    wamid, brain_message_id=brain_ref) == bic_events.DUPLICATE:
                 print(f"↩️ duplicate delivery (wamid claimed) — skipped")
                 turn["duplicate"] = True
                 # The winning worker owns this delivery's lifecycle. Touching
@@ -4418,10 +4427,10 @@ class handler(BaseHTTPRequestHandler):
                     handle_button_reply(sender, btn["id"], btn["title"])
                 elif iact.get("type") == "list_reply":
                     row = iact["list_reply"]
-                    # msg["id"] is Meta's opaque message id — the claim's
-                    # source_ref. Not the phone, not the text.
+                    # brain_ref — NOT msg["id"]. Meta's wamid base64-embeds
+                    # the sender's number, so it must not reach a claim.
                     handle_list_reply(sender, row["id"], row.get("title", ""),
-                                      message_id=msg.get("id"))
+                                      message_id=brain_ref)
                 self._ok(); return
 
             # ── Voice / Audio message ─────────────────────────────────────
@@ -4529,17 +4538,17 @@ class handler(BaseHTTPRequestHandler):
                 if role in INTERNAL_ROLES:
                     if _bic_enabled():
                         # New path: Adapter → BrainRequest → Brain → flow → Adapter.
-                        _bic_owner_turn(sender, user_text, ctx, msg.get("id"))
+                        _bic_owner_turn(sender, user_text, ctx, brain_ref)
                     else:
                         # Legacy path — unchanged, byte for byte.
                         reply = handle_owner_text(sender, role, label, user_text, ctx)
                         send_text(sender, reply)
                         save_messages([(sender, "user", user_text), (sender, "assistant", reply)])
                 elif _bic_enabled():
-                    _bic_client_turn(sender, user_text, ctx, msg.get("id"))
+                    _bic_client_turn(sender, user_text, ctx, brain_ref)
                 else:
                     run_client_pipeline(sender, user_text, ctx,
-                                        message_id=msg.get("id"))
+                                        message_id=brain_ref)
                 _finalize_delivery(lifecycle)
             except Exception as _e:
                 # Terminal FAILED with the bounded class only — never the

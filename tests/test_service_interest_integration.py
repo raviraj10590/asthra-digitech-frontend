@@ -44,7 +44,11 @@ from bic.db import DbError                               # noqa: E402
 from tests.test_claims import ClaimsDb                   # noqa: E402
 
 SENDER = "919999000222"
-MSG_ID = "wamid.HBgMOTE5OTk5MDAwMjIyFQIAEhgg"
+# Meta's wamid, kept ONLY to prove it is refused: it base64-embeds
+# the sender's number, so it must never reach a claim.
+META_WAMID = "wamid.HBgMOTE5OTk5MDAwMjIyFQIAEhgg"
+# The Brain-local message reference the producers actually receive.
+MSG_ID = "7e6d5c4b-3a29-4187-9b6a-5c4d3e2f1a0b"
 # PII-free fixtures for the derivation proofs: vary only WHO sent the message.
 OTHER_SENDER = "918888000111"
 SAFE_MSG_ID = "wamid.TEST-NO-EMBEDDED-MSISDN"
@@ -160,7 +164,7 @@ class VerticalPath(Harness):
         self.assertEqual(claim["provenance_tier"], 5)
         self.assertEqual(claim["confidence"], 0.50)
         self.assertEqual(claim["asserted_by"], "whatsapp:menu_selection")
-        self.assertEqual(claim["source_ref"], f"wa_msg:{MSG_ID}")
+        self.assertEqual(claim["source_ref"], f"msg:{MSG_ID}")
 
     def test_second_tap_reuses_the_same_party(self):
         self._tap()
@@ -238,20 +242,25 @@ class NoPii(Harness):
         self.assertNotIn(SENDER, str(self.parties))
         self.assertNotIn(SENDER, str(self.db.claims))
 
-    def test_source_ref_is_the_message_id_only(self):
-        """KNOWN GAP: the wamid is NOT opaque.
+    def test_source_ref_is_a_brain_local_reference(self):
+        """The gap this test used to PIN is now closed.
 
-        Real Meta wamids base64-embed the sender MSISDN — this file's own
-        fixture decodes to bytes containing "919999000222" — so the number
-        survives into bic_claims in reversible form. The assertion below
-        checks PLAINTEXT absence and that source_ref carries the message id
-        and nothing wider; it does not claim the id is anonymous. Whether to
-        hash or strip the wamid is a 2C/2D decision, not a test decision.
+        It previously recorded that source_ref held Meta's wamid, which
+        base64-embeds the sender MSISDN. source_ref is now `msg:<uuid4>` —
+        a Brain-local reference that carries nothing.
         """
         self._tap()
         ref = self.db.claims[0]["source_ref"]
-        self.assertTrue(ref.startswith("wa_msg:"))
+        self.assertEqual(ref, f"msg:{MSG_ID}")
+        self.assertTrue(ref.startswith("msg:"))
         self.assertNotIn(SENDER, ref)
+        self.assertNotIn("wamid", ref)
+
+    def test_a_wamid_is_refused_rather_than_stored(self):
+        """Passing Meta's id must produce NO source_ref, never a stored wamid."""
+        self.tearDown(); self.setUp()
+        self._tap(message_id=META_WAMID)
+        self.assertIsNone(self.db.claims[0]["source_ref"])
 
     def test_failure_log_never_leaks_the_identifier(self):
         """DbError embeds the response body, and a unique-violation on the

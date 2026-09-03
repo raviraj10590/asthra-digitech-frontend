@@ -38,11 +38,16 @@ os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
 
 import webhook as w                                      # noqa: E402
 from bic import claims as c, party as p, registry as r    # noqa: E402
+from bic import message_ref as mr                        # noqa: E402
 from bic.db import DbError                               # noqa: E402
 from tests.test_claims import ClaimsDb                   # noqa: E402
 
 SENDER = "919999000444"
-MSG_ID = "wamid.HBgMOTE5OTk5MDAwNDQ0FQIAEhgg"
+# Meta's wamid, kept ONLY to prove it is refused: it base64-embeds
+# the sender's number, so it must never reach a claim.
+META_WAMID = "wamid.HBgMOTE5OTk5MDAwNDQ0FQIAEhgg"
+# The Brain-local message reference the producers actually receive.
+MSG_ID = "9f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
 FIRST_SEEN = datetime(2026, 8, 18, 10, 30, tzinfo=timezone.utc)
 # A second sender and a message id that embed NO phone number, so the
 # derivation tests below vary exactly one thing: who sent the message.
@@ -198,9 +203,9 @@ class Provenance(Harness):
         self._capture()
         self.assertEqual(self.db.claims[0]["asserted_by"], "whatsapp:first_contact")
 
-    def test_source_ref_is_the_meta_message_id_only(self):
+    def test_source_ref_is_a_brain_local_reference(self):
         self._capture()
-        self.assertEqual(self.db.claims[0]["source_ref"], f"wa_msg:{MSG_ID}")
+        self.assertEqual(self.db.claims[0]["source_ref"], f"msg:{MSG_ID}")
 
 
 # ── 10-11, 17-18 · exactly once ────────────────────────────────────────────
@@ -337,25 +342,79 @@ class PrivacyAndRegistry(Harness):
             {k: v for k, v in theirs.items() if k not in VARIES_BY_DESIGN})
         self.assertNotEqual(mine["subject"], theirs["subject"])
 
-    def test_source_ref_carries_the_meta_message_id(self):
-        """KNOWN GAP, pinned deliberately rather than left implicit.
+    def test_source_ref_is_a_brain_local_reference_only(self):
+        """source_ref is `msg:<uuid4>` — provenance, not a provider id.
 
-        source_ref stores Meta's wamid for provenance. Real wamids
-        base64-embed the sender's MSISDN, so the number DOES survive into
-        bic_claims in reversible form — `wamid.HBgMOTE5OTk5MDAwNDQ0FQIAEhgg`
-        decodes to bytes containing "919999000444". test_no_pii_in_the_claim
-        does not catch this because it only looks for plaintext.
-
-        This test does not assert that the gap is acceptable. It records
-        that the claim's provenance is the message id and nothing more, so
-        that if anyone ever widens source_ref the change is visible here.
-        Whether to hash or strip the wamid is a 2C/2D decision, not a test
-        decision.
+        IDD-2C calls source_ref a "pointer back to the origin record". The
+        origin record is OURS: a row in bic_webhook_events. This asserts the
+        pointer is our id and nothing else.
         """
         self._capture()
-        claim = self.db.claims[0]
-        self.assertEqual(claim["source_ref"], f"wa_msg:{MSG_ID}")
-        self.assertNotIn(SENDER, claim["source_ref"])
+        ref = self.db.claims[0]["source_ref"]
+        self.assertEqual(ref, f"msg:{MSG_ID}")
+        self.assertNotIn(SENDER, ref)
+        self.assertNotIn("wamid", ref)
+
+    def test_a_wamid_can_never_be_stored_as_a_source_ref(self):
+        """Requirement 3: the raw wamid must not reach bic_claims.
+
+        Structural, not conventional: reference() refuses anything that is
+        not a bare uuid, so a caller that passes Meta's id gets a claim with
+        NO provenance pointer rather than one carrying a phone number.
+        """
+        self.tearDown(); self.setUp()
+        self._capture(message_id=META_WAMID)
+        self.assertIsNone(self.db.claims[0]["source_ref"])
+
+    def test_no_base64_encoded_phone_anywhere_in_the_claim(self):
+        """Requirement 2 — the encoding that defeated the old plaintext tests.
+
+        META_WAMID decodes to bytes containing the sender's number. Checking
+        for the number in plaintext never caught that, so this checks the
+        encoded forms directly.
+        """
+        import base64
+        self._capture()
+        blob = str(self.db.claims[0])
+        for enc in (base64.b64encode(SENDER.encode()).decode(),
+                    base64.b64encode(SENDER.encode()).decode().rstrip("="),
+                    base64.b64encode(b"\x0c" + SENDER.encode()).decode()[:16],
+                    META_WAMID, META_WAMID.split(".", 1)[1]):
+            self.assertNotIn(enc, blob, f"encoded sender leaked: {enc[:12]}…")
+
+    def test_one_message_yields_one_stable_reference(self):
+        """Requirement 4: every claim from a delivery shares its reference.
+
+        Provenance is per-MESSAGE, so a second claim written for the same
+        inbound message must point at the same origin record — otherwise
+        "what did this message tell us?" is unanswerable.
+        """
+        self._capture()
+        first = self.db.claims[0]["source_ref"]
+        self.assertEqual(first, mr.reference(MSG_ID))
+        self.assertEqual(mr.reference(MSG_ID), mr.reference(MSG_ID))
+
+    def test_the_reference_is_not_derivable_from_the_sender(self):
+        """Requirement 5, proved by regeneration.
+
+        A reference derived from the phone would repeat. new_id() must not,
+        and must not contain the number in any form.
+        """
+        ids = {mr.new_id() for _ in range(200)}
+        self.assertEqual(len(ids), 200)
+        for i in ids:
+            self.assertNotIn(SENDER, i)
+            self.assertTrue(mr.is_valid(i))
+        # A derived id would also be STABLE for a fixed sender; these are not.
+        self.assertNotEqual(mr.new_id(), mr.new_id())
+
+    def test_provenance_scheme_still_parses_for_replay(self):
+        """Requirement 7: the 2G reader shows a scheme, never the value."""
+        from bic import knowledge as k
+        self._capture()
+        ref = self.db.claims[0]["source_ref"]
+        self.assertEqual(k._source_kind(ref), "msg")
+        self.assertEqual(k._source_kind(f"wa_msg:{META_WAMID}"), "wa_msg")
 
     def test_phone_lives_only_in_the_identifier_table(self):
         self._capture()

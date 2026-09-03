@@ -448,9 +448,21 @@ class HistoricalRows(Base):
             if "bic_webhook_events" not in sql:
                 continue
             name = os.path.basename(path)
-            # Migration 13 CREATED the table; nothing after it may alter,
-            # delete from, or update it.
+            # Migration 13 CREATED the table.
             if name.startswith("20260816000013"):
+                continue
+            # Migration 21 ADDS a column and an index — additive, defaulted,
+            # idempotent. That is not a reshape: no row is dropped, deleted or
+            # rewritten, and wamid remains the primary key and the dedupe
+            # mechanism. The claim this test defends is "nothing re-shapes or
+            # rewrites bic_webhook_events", so the destructive verbs are what
+            # it now checks for, on ANY later migration.
+            destructive = ("drop table", "drop column", "delete from",
+                           "truncate", "update bic_webhook_events",
+                           "alter column", "drop constraint")
+            low = sql.lower()
+            if name.startswith("20260903000021") and not any(
+                    d in low for d in destructive):
                 continue
             offenders.append(name)
         self.assertEqual(offenders, [],

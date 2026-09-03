@@ -59,7 +59,8 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def claim(wamid: str, tenant_id: Optional[str] = None) -> str:
+def claim(wamid: str, tenant_id: Optional[str] = None,
+          brain_message_id: Optional[str] = None) -> str:
     """Claim this delivery. Returns ACCEPTED (ours to process) or DUPLICATE.
 
     The INSERT is the claim. There is no prior read, so two simultaneous
@@ -76,11 +77,17 @@ def claim(wamid: str, tenant_id: Optional[str] = None) -> str:
     if not config.is_configured():
         return ACCEPTED
     try:
-        insert(TABLE, {
+        row = {
             "wamid": wamid,
             "tenant_id": tenant_id or config.DEFAULT_TENANT_ID,
             "state": ACCEPTED,
-        }, timeout=5)
+        }
+        # The Brain-local reference this delivery's claims will point at.
+        # Omitted when the caller has none: the column defaults to
+        # gen_random_uuid(), so a row always has one either way.
+        if brain_message_id:
+            row["brain_message_id"] = brain_message_id
+        insert(TABLE, row, timeout=5)
         return ACCEPTED
     except DbError as e:
         if _is_duplicate(e):

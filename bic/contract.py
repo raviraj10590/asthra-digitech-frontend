@@ -37,7 +37,9 @@ class BrainRequest:
     attachments: List[Attachment] = field(default_factory=list)
     locale: Optional[str] = None
     thread_id: Optional[str] = None    # conversation key (phone, session, …)
-    message_id: Optional[str] = None   # for dedupe + audit (source_ref)
+    # Brain-local message reference (uuid4), NOT Meta's wamid: a wamid
+    # base64-embeds the sender's number and must not reach a claim.
+    message_id: Optional[str] = None   # provenance → claims.source_ref
     raw: Dict[str, Any] = field(default_factory=dict)   # original payload, debug only
 
     @property

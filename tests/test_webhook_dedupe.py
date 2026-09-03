@@ -231,7 +231,7 @@ class WebhookIntegration(unittest.TestCase):
         protects interactive menu taps and media acknowledgements."""
         import inspect, webhook as w
         src = inspect.getsource(w.handler.do_POST)
-        claim_at = src.index("bic_events.claim(wamid)")
+        claim_at = src.index("bic_events.claim(")
         for later in ('if msg_type == "interactive"', "send_typing(",
                       "_decision_open(", "run_client_pipeline("):
             self.assertLess(claim_at, src.index(later), f"claim must precede {later}")
@@ -239,7 +239,7 @@ class WebhookIntegration(unittest.TestCase):
     def test_duplicate_returns_before_any_side_effect(self):
         import inspect, webhook as w
         src = inspect.getsource(w.handler.do_POST)
-        block = src[src.index("bic_events.claim(wamid)"):]
+        block = src[src.index("bic_events.claim("):]
         early_exit = block.index("self._ok(); return")
         for side_effect in ("send_typing(", "_decision_open(",
                             "run_client_pipeline(", "generate_reply("):

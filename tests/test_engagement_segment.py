@@ -38,7 +38,11 @@ from bic.db import DbError                               # noqa: E402
 from tests.test_claims import ClaimsDb                   # noqa: E402
 
 SENDER = "919999000333"
-MSG_ID = "wamid.HBgMOTE5OTk5MDAwMzMzFQIAEhgg"
+# Meta's wamid, kept ONLY to prove it is refused: it base64-embeds
+# the sender's number, so it must never reach a claim.
+META_WAMID = "wamid.HBgMOTE5OTk5MDAwMzMzFQIAEhgg"
+# The Brain-local message reference the producers actually receive.
+MSG_ID = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
 VIP_TEXT = "I am an MLA and need campaign help"          # matches BOTH
 VIP_ONLY = "our corporator wants a website"
 ELECTION_ONLY = "we need help with the election campaign"
@@ -231,9 +235,9 @@ class ProvenanceAndPrivacy(Harness):
         self.assertEqual(claim["confidence"], 0.50)
         self.assertEqual(claim["asserted_by"], "whatsapp:vip_detection")
 
-    def test_source_ref_is_the_meta_message_id_only(self):
+    def test_source_ref_is_a_brain_local_reference(self):
         self._turn(VIP_ONLY)
-        self.assertEqual(self.db.claims[0]["source_ref"], f"wa_msg:{MSG_ID}")
+        self.assertEqual(self.db.claims[0]["source_ref"], f"msg:{MSG_ID}")
 
     def test_no_message_text_keyword_or_phone_in_the_claim(self):
         self._turn(VIP_TEXT)
