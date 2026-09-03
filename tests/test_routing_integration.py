@@ -79,6 +79,50 @@ class TestOwnerRoutingEquivalence(unittest.TestCase):
         identity.clear_cache()
         identity.configure(lambda p: None)
 
+        # BOOTSTRAP_OWNERS IS ALSO MODULE-LEVEL STATE, AND IT IS FROZEN AT
+        # IMPORT TIME — this is the second half of the fragility the comment
+        # below already names for identity._fetch_row.
+        #
+        # bic.policy.BOOTSTRAP_OWNERS is computed ONCE, from
+        # os.environ.get("OWNER_PHONE", ...), the first time bic.policy is
+        # imported in this process. 25 other test files call
+        # os.environ.setdefault("OWNER_PHONE", "910000000001,910000000002")
+        # — a DIFFERENT pair from the "918884448141,918861369951" this file
+        # sets at its own top of file — and setdefault() is a no-op once any
+        # earlier file has already set the variable. So whichever file's
+        # bic.policy import happens to run first in THIS process decides
+        # which phone numbers are bootstrap owners for every test that
+        # follows, for the rest of that process.
+        #
+        # OWNER = "918861369951" below is a LITERAL constant, not read back
+        # from BOOTSTRAP_OWNERS the way test_contract_brain.py and
+        # test_policy_tools.py do it (OWNER = policy.BOOTSTRAP_OWNERS[0]) —
+        # that pattern is immune to this by construction, because it never
+        # assumes a specific value. This class assumes one, so it must
+        # guarantee it directly rather than hope collection order supplies
+        # it. Full suite collection order happens to put a matching file
+        # first today, which is exactly why this was never caught by
+        # `pytest tests/` — only by a differently-ordered subset.
+        #
+        # Scoped monkeypatch, not a new production reset hook: mock.patch
+        # already restores the prior list on tearDown (even on failure), so
+        # nothing needs to be added to bic/policy.py for this.
+        #
+        # THE MODULE THAT LOOKS UP THE NAME, NOT THE MODULE THAT DEFINES IT.
+        # bic/identity.py does `from .policy import BOOTSTRAP_OWNERS` — that
+        # copies the REFERENCE into identity's own module namespace once, at
+        # identity's first import. identity.resolve()'s `if sender_id in
+        # BOOTSTRAP_OWNERS` reads identity's own copy of the name, not
+        # policy's. Patching policy.BOOTSTRAP_OWNERS reassigns policy's
+        # attribute to a new list object and leaves identity's copy pointing
+        # at the old one — exactly the module-identity trap this codebase's
+        # own tests have hit before (patches on one module's name silently
+        # not visible through a from-import elsewhere). Verified: the first
+        # version of this fix patched policy and did not fix the failure;
+        # patching identity does.
+        self._owners_patch = mock.patch.object(identity, "BOOTSTRAP_OWNERS", [OWNER])
+        self._owners_patch.start()
+
     def tearDown(self):
         # IDENTITY IS MODULE-LEVEL STATE. configure() installs a fetcher for
         # the whole process, so a test that installs one and walks away
@@ -89,6 +133,7 @@ class TestOwnerRoutingEquivalence(unittest.TestCase):
         # test_1c_closure_validation.py.
         identity.configure(self._saved_fetcher)
         identity.clear_cache()
+        self._owners_patch.stop()
 
     def test_owner_reply_identical(self):
         legacy, brain = run("legacy", OWNER, "status?"), run("brain", OWNER, "status?")
@@ -97,6 +142,53 @@ class TestOwnerRoutingEquivalence(unittest.TestCase):
 
     def test_owner_reply_is_byte_identical(self):
         self.assertEqual(run("brain", OWNER, "x").sent, [(OWNER, "OWNER-REPLY")])
+
+
+class BootstrapOwnersIsolation(unittest.TestCase):
+    """Regression test for the exact cross-file pollution TestOwnerRoutingEquivalence's
+    setUp/tearDown now guards against.
+
+    bic.identity.BOOTSTRAP_OWNERS is frozen at import time from
+    os.environ.get("OWNER_PHONE", ...). This file sets that env var to
+    "918884448141,918861369951"; 25 other test files set it to
+    "910000000001,910000000002"; os.environ.setdefault() means whichever
+    file's bic.identity import runs first in the process wins, for every
+    test that follows. `pytest tests/` happens to collect a matching file
+    first today, which is exactly why this went uncaught until a
+    differently-ordered subset invocation surfaced it.
+
+    These tests reproduce the contamination DIRECTLY rather than hoping a
+    particular file ordering recreates it — deliberate, not incidental,
+    and immune to ever going stale if collection order changes again.
+    """
+
+    WRONG_CAMP = ["910000000001", "910000000002"]
+
+    def test_setup_corrects_a_contaminated_bootstrap_list(self):
+        with mock.patch.object(identity, "BOOTSTRAP_OWNERS", list(self.WRONG_CAMP)):
+            self.assertNotIn(OWNER, identity.BOOTSTRAP_OWNERS)
+            case = TestOwnerRoutingEquivalence("test_owner_reply_is_byte_identical")
+            case.setUp()
+            try:
+                self.assertEqual(identity.BOOTSTRAP_OWNERS, [OWNER])
+                # Not just the list contents — the actual observable symptom
+                # this bug produced: the brain flow silently returning no
+                # reply because the sender resolved as CLIENT, not OWNER.
+                self.assertEqual(run("brain", OWNER, "x").sent,
+                                 [(OWNER, "OWNER-REPLY")])
+            finally:
+                case.tearDown()
+
+    def test_teardown_restores_the_prior_state_for_whoever_runs_next(self):
+        """A fixture that corrects itself but never lets go would just move
+        the pollution downstream instead of removing it — exactly the
+        failure mode identity.configure's own tearDown comment already
+        warns about, now true of BOOTSTRAP_OWNERS too."""
+        with mock.patch.object(identity, "BOOTSTRAP_OWNERS", list(self.WRONG_CAMP)):
+            case = TestOwnerRoutingEquivalence("test_owner_reply_identical")
+            case.setUp()
+            case.tearDown()
+            self.assertEqual(identity.BOOTSTRAP_OWNERS, self.WRONG_CAMP)
 
 
 class TestClientRoutingEquivalence(unittest.TestCase):
