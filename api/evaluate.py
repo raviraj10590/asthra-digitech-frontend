@@ -15,9 +15,11 @@ Design guarantees:
 import json, os
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
+VERIFY_TOKEN   = os.environ.get("VERIFY_TOKEN", "asthra_secret_2024")
 SUPABASE_URL   = os.environ.get("SUPABASE_URL", "https://kpzprllzgqlqkqgcgrbp.supabase.co")
 SUPABASE_KEY   = os.environ.get("SUPABASE_KEY", "")
 EVAL_TABLE     = os.environ.get("EVAL_TABLE", "").strip()          # e.g. "conversation_evals"
@@ -201,6 +203,25 @@ def run_evaluations() -> dict:
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Allow only Vercel Cron or a manual call with ?key=<VERIFY_TOKEN>.
+        # THE SAME GATE digest.py uses — one cron-auth contract, not two.
+        #
+        # This MUST stay above run_evaluations(). Every Supabase read, every
+        # GPT-4o-mini call and every Supabase write in this file happens
+        # inside that call, so gating here is what makes a rejected request
+        # cost nothing. An unauthenticated GET previously ran the whole
+        # sweep: it read production conversations, spent OpenAI credit per
+        # conversation, and wrote rows back.
+        #
+        # `key` must be non-empty: an empty VERIFY_TOKEN would otherwise let
+        # a request carrying no ?key at all compare equal and pass.
+        ua  = self.headers.get("User-Agent", "")
+        key = parse_qs(urlparse(self.path).query).get("key", [""])[0]
+        if "vercel-cron" not in ua and not (key and key == VERIFY_TOKEN):
+            self.send_response(403)
+            self.end_headers()
+            return
+
         result = run_evaluations()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
