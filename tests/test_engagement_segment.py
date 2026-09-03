@@ -29,7 +29,6 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-os.environ.setdefault("OWNER_PHONE", "910000000001,910000000002")
 os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
 
 import webhook as w                                      # noqa: E402

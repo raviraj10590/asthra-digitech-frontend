@@ -29,13 +29,12 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-os.environ.setdefault("OWNER_PHONE", "918884448141,918861369951")
 os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
 
 import webhook as w                                # noqa: E402
 from bic import identity                           # noqa: E402
 
-OWNER = "918861369951"
+OWNER = "910000000001"
 CLIENT = "919555555555"
 SECRET = "test-app-secret"
 

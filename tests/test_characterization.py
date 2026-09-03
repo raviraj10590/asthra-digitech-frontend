@@ -24,14 +24,13 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 # Deterministic env BEFORE import — module-level constants are read at import.
-os.environ.setdefault("OWNER_PHONE", "918884448141,918861369951")
 os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
 
 import webhook as w  # noqa: E402
 from bic import identity as _identity  # canonical cache (1C)  # noqa: E402
 
-OWNER = "918861369951"
-OWNER2 = "918884448141"
+OWNER = "910000000001"
+OWNER2 = "910000000002"
 STRANGER = "919000000123"
 
 

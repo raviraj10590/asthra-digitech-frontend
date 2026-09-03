@@ -22,7 +22,6 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-os.environ.setdefault("OWNER_PHONE", "918884448141,918861369951")
 os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
 
 from bic import decision as d                          # noqa: E402

@@ -35,7 +35,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # here. (Older test modules pin the real defaults; those predate this file and
 # `setdefault` makes whichever module imports first the winner. Nothing below
 # depends on the outcome either way.)
-os.environ.setdefault("OWNER_PHONE", "910000000001,910000000002")
 os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
 
 import webhook as w                                      # noqa: E402
