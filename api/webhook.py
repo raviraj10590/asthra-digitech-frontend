@@ -2848,6 +2848,92 @@ def generate_owner_reply(sender: str, role: str, label: str, user_text: str, his
 
     return reply
 
+# ── OWNER natural-language lookups: topic mention is NOT a capability request ──
+#
+# The original dispatcher matched bare substrings: `"lead" in low` sent BOTH
+# "how many leads today?" and "why are my leads low?" to the same count tool,
+# so a diagnostic question came back as a number. It also fired on `leader`,
+# `leading` and `misleading`, because a substring has no word boundary.
+#
+# The fix is not more keywords — it is requiring the message to be TOOL-SHAPED.
+# Three conditions, all deterministic, ~40 µs, no model:
+#
+#   1. the TOPIC appears as a whole word (so `leading` is not `lead`)
+#   2. the message ASKS FOR THE THING: either an explicit lookup verb
+#      ("show", "how many", "list"…) or a bare topic ("leads", "status")
+#   3. NO reasoning marker is present ("why", "should", "prioritise"…)
+#
+# Rule 3 is what makes this safe. Anything analytical, comparative, causal or
+# strategic falls through to the reasoning path even when it is phrased like a
+# request — because being wrong in that direction costs a slow answer, while
+# being wrong the other way answers "why are my leads low?" with "0".
+#
+# Condition 4 of the original `roles_list` rule (topic AND verb) was already
+# this shape; this generalises it to every lookup rather than adding a
+# parallel mechanism.
+
+# Whole-word topic patterns. Kannada terms stay as plain containment: the
+# script is agglutinative, so a strict boundary would under-match — and
+# under-matching is the safe direction, since it falls through to reasoning.
+_LOOKUP_TOPICS = (
+    ("leads_today",      r"(?<!\w)leads?(?!\w)",            ("ಲೀಡ್",)),
+    ("crm_list_clients", r"(?<!\w)(?:clients?|crm)(?!\w)",  ("ಗ್ರಾಹಕ",)),
+    ("status",           r"(?<!\w)(?:status|health|snapshot)(?!\w)", ()),
+    ("roles_list",       r"(?<!\w)roles?(?!\w)",            ()),
+)
+
+# Phrases that mean "give me the thing". Deliberately small: a longer list is
+# a longer tail of false positives, and a miss here is only a slower answer.
+_LOOKUP_VERBS = (
+    "show", "list", "how many", "count", "give me", "display",
+    "what are my", "who are", "tell me my", "ತೋರಿಸು", "ಎಷ್ಟು",
+)
+
+# Analytical / causal / comparative / strategic intent. ANY of these forces
+# the reasoning path regardless of how request-shaped the rest looks.
+_REASONING_MARKERS = (
+    "why", "should", "prioriti", "improve", "increase", "decrease", "drop",
+    "dropping", "falling", "fall", "low", "poor", "bad", "best", "worst",
+    "better", "recommend", "focus", "strategy", "compare", "instead",
+    "don't", "do not", "not need", "unhappy", "leave", "left", "churn",
+    "which", "what should", "how can", "how do i", "reason", "cause",
+    "ಏಕೆ", "ಯಾಕೆ",
+    # CONTINUATIONS. "what about leads?" is three tokens and mentions the
+    # topic, so the bare-lookup rule below would fire — but it means "carry on
+    # from what we were just discussing", and the previous turn is exactly what
+    # this function cannot see. Anything that defers to prior context must go
+    # to the path that HAS the context.
+    "what about", "how about", "then what", "and what", "any update",
+)
+
+# A message that is essentially just the topic ("leads", "status") is a
+# genuine lookup. Bounded tightly so "leads are falling" cannot qualify.
+_BARE_LOOKUP_MAX_TOKENS = 3
+
+
+def owner_lookup_tool(text: str):
+    """The deterministic OWNER lookup this message asks for, or None.
+
+    None means "not tool-shaped" and the caller falls through to reasoning.
+    That is the safe default and the common case: this function exists to
+    catch the handful of literal lookups, not to classify intent.
+    """
+    low = (text or "").strip().lower()
+    if not low:
+        return None
+    if any(m in low for m in _REASONING_MARKERS):
+        return None
+    tokens = [t for t in re.split(r"[^\w]+", low, flags=re.UNICODE) if t]
+    asks = (len(tokens) <= _BARE_LOOKUP_MAX_TOKENS
+            or any(v in low for v in _LOOKUP_VERBS))
+    if not asks:
+        return None
+    for tool, pattern, kannada in _LOOKUP_TOPICS:
+        if re.search(pattern, low, flags=re.UNICODE) or any(k in low for k in kannada):
+            return tool
+    return None
+
+
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
     """Single entry point for OWNER/STAFF messages: pending confirmation →
     deterministic # command → keyword-routed read-only lookup → AI chat."""
@@ -2889,13 +2975,15 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
 
     # Natural-language read-only lookups — deterministic, zero AI cost, covers
     # the common asks before falling through to the general assistant chat.
-    if any(w in low for w in ("lead", "ಲೀಡ್")):
-        return run_tool(sender, "leads_today", _fallback=tool_leads)
-    if any(w in low for w in ("client", "ಗ್ರಾಹಕ", "crm")):
-        return run_tool(sender, "crm_list_clients", _fallback=tool_clients)
-    if any(w in low for w in ("status", "health", "online", "snapshot")):
+    # A TOPIC MENTION IS NOT A CAPABILITY REQUEST — see owner_lookup_tool().
+    lookup = owner_lookup_tool(stripped)
+    if lookup == "status":
         return compose_status(sender)
-    if "role" in low and any(w in low for w in ("list", "who", "show")):
+    if lookup == "leads_today":
+        return run_tool(sender, "leads_today", _fallback=tool_leads)
+    if lookup == "crm_list_clients":
+        return run_tool(sender, "crm_list_clients", _fallback=tool_clients)
+    if lookup == "roles_list":
         return run_tool(sender, "roles_list", _fallback=tool_roles_list)
 
     return generate_owner_reply(sender, role, label, user_text, ctx.get("history"))
