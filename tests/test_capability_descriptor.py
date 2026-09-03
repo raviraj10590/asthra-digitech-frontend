@@ -79,10 +79,13 @@ class ExistingToolsUnaffected(unittest.TestCase):
         # (#suffice, OWNER-only, read-only, the first 2H consumer), → 18 with
         # the 2B commitment pair: `commitments_list` (#commitments, read-only)
         # and `commitment_resolve` (#commitment <ref> …, the first OWNER tool
-        # that MOVES a business obligation). Plus the `status` composite which
-        # is never a handler. Bumping this number is meant to be a conscious
-        # act: the count is what makes an accidental new tool surface visible.
-        self.assertEqual(len(tools._HANDLERS), 18)
+        # that MOVES a business obligation), → 19 with `business_new_enquiries`
+        # (the OWNER → real business evidence bridge — a direct factual read
+        # of biz.pipeline.new_enquiries_per_month@1, no OWNER GOAL/2H/DECIDE).
+        # Plus the `status` composite which is never a handler. Bumping this
+        # number is meant to be a conscious act: the count is what makes an
+        # accidental new tool surface visible.
+        self.assertEqual(len(tools._HANDLERS), 19)
 
     def test_legacy_act_tool_validates_without_2G_fields(self):
         """A Phase-1 row carries no freshness/degradation and must stay valid."""

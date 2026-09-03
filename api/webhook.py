@@ -62,6 +62,7 @@ try:
                      identity as bic_identity, knowledge as bic_knowledge,
                      outcome_producers as bic_outcome_producers,
                      owner_context as bic_owner_context, party as bic_party,
+                     pipeline_evidence as bic_pipeline_evidence,
                      policy as bic_policy, replay as bic_replay,
                      tools as bic_tools, webhook_events as bic_events,
                      message_ref as bic_message_ref)
@@ -1749,6 +1750,117 @@ def render_knowledge(envelope: dict, title: str = "🧠 Knowledge") -> str:
     return "\n".join(lines)
 
 
+def tool_business_new_enquiries(sender: str, timeout: float = 5, **_) -> str:
+    """The smallest safe bridge from OWNER → real business evidence.
+
+    Answers exactly ONE question — "how many new enquiries this month?" —
+    from biz.pipeline.new_enquiries_per_month@1. NOT OWNER GOAL, NOT
+    business-scoped 2H, NOT OWNER DECIDE/AUTHORIZE. A THIN RENDERER over
+    knowledge.describe (2G §8.2), the exact pattern tool_service_interest
+    establishes: this function does no knowledge work, and every judgement —
+    which claim is live, whether it disagrees, how stale it is — comes back
+    IN the envelope.
+
+    READ-ONLY RESOLUTION, DELIBERATELY. bic_pipeline_evidence.business_subject
+    calls party.resolve_or_create, which WRITES a party row the first time
+    it is ever called. That write already happened on 2026-08-27, when the
+    producer first ran — but a QUERY must not be able to create anything as
+    a side effect even in principle, so this calls party.find_by_identifier
+    with the SAME channel/identifier the producer uses (SELF_CHANNEL,
+    tenant_id), which is read-only and returns None rather than minting a
+    party that has never existed.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return "⚠️ BIC isn't configured yet."
+
+    tenant = bic_config.DEFAULT_TENANT_ID
+    try:
+        subject = bic_party.find_by_identifier(
+            tenant, bic_pipeline_evidence.SELF_CHANNEL, tenant)
+    except Exception as e:
+        # Type only — a DbError body can echo the identifier that was queried.
+        return f"⚠️ Couldn't reach identity ({type(e).__name__})."
+    if not subject:
+        # The evidence producer has never run for this tenant. Absence of
+        # the self-party is absence of evidence, not an outage — say so.
+        return "No enquiry evidence on record yet — the daily refresh hasn't run."
+
+    try:
+        envelope = bic_knowledge.describe(
+            tenant, subject, predicates=[bic_pipeline_evidence.PREDICATE])
+    except Exception as e:
+        return f"⚠️ Couldn't read knowledge ({type(e).__name__})."
+
+    return render_business_evidence(envelope)
+
+
+def render_business_evidence(envelope: dict) -> str:
+    """biz.pipeline.new_enquiries_per_month@1 envelope → WhatsApp text.
+
+    Presentation only, following render_knowledge's rule: every judgement was
+    already made by knowledge.describe / claims.current. This function must
+    never pick a value, decide freshness or resolve a conflict — it states
+    what the envelope already decided, and never fabricates a number when it
+    did not.
+
+    NO INTERNAL IDS. render_knowledge shows `party: <uuid>`, which is right
+    for #service_interest — a customer looking at their OWN record — and
+    wrong here: the business's self-party id is meaningless to the owner and
+    showing it teaches nothing. Suppressed by design, not by omission.
+    """
+    state = envelope.get("state")
+    if state == "DENIED":
+        return "⛔ Not permitted to view this evidence."
+    if state == "UNAVAILABLE":
+        # §6.3 in spirit: an outage must not read as "zero enquiries".
+        return (f"⚠️ Evidence is UNAVAILABLE ({envelope.get('reason')}).\n"
+                "This is NOT the same as zero — it means we couldn't read "
+                "the store just now.")
+    if state == "UNKNOWN":
+        return "No enquiry evidence on record yet — the daily refresh hasn't run."
+
+    # KNOWN. A genuine conflict is surfaced, never guessed (§5.4 in spirit).
+    if envelope.get("conflicts"):
+        return ("⚠️ Evidence CONFLICTS — more than one live measurement for "
+                "this month. Not showing a number until this is resolved.")
+
+    values = envelope.get("values") or []
+    if len(values) != 1:
+        # Defensive: a `single`-cardinality predicate with zero or several
+        # live values outside envelope["conflicts"] means the resolution
+        # layer disagrees with itself. Refuse rather than guess which one.
+        return "⚠️ Evidence is in an unexpected state — not showing a number."
+
+    v = values[0]
+    fresh = v.get("freshness") or {}
+    prov = v.get("provenance") or {}
+    unit = v.get("unit") or ""
+    month_label = "this month"
+    try:
+        when = datetime.fromisoformat(str(v.get("valid_from")).replace("Z", "+00:00"))
+        month_label = when.astimezone(IST).strftime("%B %Y")
+    except (ValueError, TypeError):
+        pass
+
+    if fresh.get("verdict") == bic_knowledge.STALE:
+        # Never presented as current. The number is real evidence, not
+        # fabricated, but the headline says STALE before it says anything
+        # else — an owner skimming WhatsApp reads the first line, not the
+        # freshness footer.
+        age_h = (fresh.get("age_seconds") or 0) / 3600
+        bound_h = (fresh.get("bound_seconds") or 0) / 3600
+        return (f"⚠️ STALE — last known {month_label} figure is "
+                f"{v.get('value')} {unit}, but it's {age_h:.1f}h old "
+                f"(refreshes every {bound_h:.0f}h). Not shown as current.\n"
+                f"measured {v.get('observed_at')}")
+
+    return (f"📊 {v.get('label') or 'New enquiries'}: {v.get('value')} {unit} "
+           f"in {month_label}\n"
+           f"confidence {v.get('confidence')} (tier {prov.get('tier')}, "
+           f"cap {prov.get('cap')})\n"
+           f"freshness: {fresh.get('verdict')} · measured {v.get('observed_at')}")
+
+
 def tool_knowledge_why(sender: str, timeout: float = 5, narrator=None, **_) -> str:
     """`#why` — OWNER-only. Why do we believe what we believe about the
     customer this owner is currently dealing with?
@@ -2935,6 +3047,62 @@ def owner_lookup_tool(text: str):
     return None
 
 
+# ── OWNER factual business-evidence queries — a SEPARATE, narrower gate ────
+#
+# owner_lookup_tool() above accepts a bare ≤3-token topic mention ("leads",
+# "status") as a genuine request — the right call for a lookup with no
+# downside to over-triggering (worst case: an unwanted list). That shortcut
+# is WRONG here: "enquiries", "new enquiries", "enquiry quality" are all
+# ≤3 tokens and none of them asks "how many" — the one question this
+# predicate can answer. So this gate requires an EXPLICIT count-question
+# phrase and never fires on a bare topic mention. It is a separate function
+# rather than a fifth _LOOKUP_TOPICS row for exactly that reason.
+#
+# THIS IS NOT A CLASSIFIER. It answers one question — "does this message
+# unambiguously ask for the count?" — with a fixed, small keyword set, the
+# same kind of mechanism owner_lookup_tool already is. biz.pipeline
+# .new_enquiries_per_month@1 is the ONLY predicate this reaches; nothing here
+# generalises to "business metrics" as a category.
+_EVIDENCE_COUNT_VERBS = ("how many", "what are", "ಎಷ್ಟು")
+
+# Whole-word only: "enquiry", "enquiries", "inquiry", "inquiries" — with or
+# without a "new" prefix, since "new enquiries" already contains "enquiries"
+# as a whole word without special-casing it. NOT a substring match: "enquiry"
+# in text (task's own banned example) would also match "enquiry-related" or
+# a sentence that merely mentions the word in passing.
+_ENQUIRY_TOPIC_RE = re.compile(
+    r"(?<!\w)(?:enquir(?:y|ies)|inquir(?:y|ies))(?!\w)", re.UNICODE)
+
+
+def owner_evidence_query(text: str) -> bool:
+    """True only for an explicit factual COUNT question about enquiries.
+
+    Reuses _REASONING_MARKERS as the SAME override owner_lookup_tool uses —
+    one shared definition of "this is reasoning, not retrieval", not a
+    second one that could quietly drift from the first. Any analytical,
+    causal, comparative or strategic marker forces the reasoning path even
+    when a count-verb and the topic word both appear: "how many enquiries
+    should I focus on" still falls through, because "should" and "focus"
+    win.
+
+    False is the safe default. A miss here is a slower, model-generated
+    answer; a false positive would hand a diagnostic question a bare number.
+
+    Whitespace is collapsed before matching: "how   many    enquiries" (extra
+    spaces from a fat-fingered message or a copy-paste) is the same question
+    as "how many enquiries", and the phrase checks below are exact-substring,
+    so irregular spacing must not silently turn a real match into a miss.
+    """
+    low = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not low:
+        return False
+    if any(m in low for m in _REASONING_MARKERS):
+        return False
+    if not any(v in low for v in _EVIDENCE_COUNT_VERBS):
+        return False
+    return bool(_ENQUIRY_TOPIC_RE.search(low))
+
+
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
     """Single entry point for OWNER/STAFF messages: pending confirmation →
     deterministic # command → keyword-routed read-only lookup → AI chat."""
@@ -2973,6 +3141,16 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
     cmd_result = try_owner_command(sender, role, stripped)
     if cmd_result is not None:
         return cmd_result
+
+    # A direct factual evidence question — checked BEFORE owner_lookup_tool
+    # so a real business metric never risks the bare-topic-mention shortcut
+    # that mechanism uses (see owner_evidence_query's docstring for why that
+    # shortcut is wrong for this predicate specifically). Returns here, so a
+    # matched message structurally cannot reach generate_owner_reply below —
+    # no model call is possible for it, not merely avoided by convention.
+    if owner_evidence_query(stripped):
+        return run_tool(sender, "business_new_enquiries",
+                        _fallback=tool_business_new_enquiries)
 
     # Natural-language read-only lookups — deterministic, zero AI cost, covers
     # the common asks before falling through to the general assistant chat.
@@ -4142,6 +4320,10 @@ if BIC_AVAILABLE:
     def _tool_h_knowledge_suffice(principal, timeout=10, goal_id="", **_):
         return tool_suffice(principal.sender_id, goal_id=goal_id,
                             timeout=timeout)
+
+    @bic_tools.register("business_new_enquiries")
+    def _tool_h_business_new_enquiries(principal, timeout=10, **_):
+        return tool_business_new_enquiries(principal.sender_id, timeout=timeout)
 
     @bic_tools.register("commitments_list")
     def _tool_h_commitments_list(principal, timeout=10, **_):
