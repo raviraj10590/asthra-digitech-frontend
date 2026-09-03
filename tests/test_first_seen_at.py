@@ -44,6 +44,10 @@ from tests.test_claims import ClaimsDb                   # noqa: E402
 SENDER = "919999000444"
 MSG_ID = "wamid.HBgMOTE5OTk5MDAwNDQ0FQIAEhgg"
 FIRST_SEEN = datetime(2026, 8, 18, 10, 30, tzinfo=timezone.utc)
+# A second sender and a message id that embed NO phone number, so the
+# derivation tests below vary exactly one thing: who sent the message.
+OTHER_SENDER = "918888000111"
+SAFE_MSG_ID = "wamid.TEST-NO-EMBEDDED-MSISDN"
 MIG = os.path.join(os.path.dirname(__file__), "..", "supabase", "migrations")
 SEED = os.path.join(MIG, "20260816000012_bic_seed_first_seen_at.sql")
 
@@ -99,11 +103,23 @@ class Harness(unittest.TestCase):
         for x in reversed(self._p):
             x.stop()
 
-    def _capture(self, when=FIRST_SEEN, message_id=MSG_ID):
+    def _capture(self, when=FIRST_SEEN, message_id=MSG_ID, sender=SENDER):
         buf = io.StringIO()
         with redirect_stdout(buf):
-            w.record_first_seen(SENDER, when, message_id)
+            w.record_first_seen(sender, when, message_id)
         return buf.getvalue()
+
+    def _claim_against_fresh_store(self, sender=SENDER, message_id=SAFE_MSG_ID):
+        """One claim, written against a brand-new store with no shared rows.
+
+        Needed for the regeneration proof below: a value DERIVED from the
+        sender is identical every time it is computed, so two independent
+        stores are what tell derivation apart from randomness.
+        """
+        self.tearDown()
+        self.setUp()
+        self._capture(message_id=message_id, sender=sender)
+        return dict(self.db.claims[0])
 
 
 # ── 1-3 · the chain ────────────────────────────────────────────────────────
@@ -267,10 +283,79 @@ class FailureIsolation(Harness):
 class PrivacyAndRegistry(Harness):
 
     def test_no_pii_in_the_claim(self):
+        """The sender's number must not appear in the claim in plaintext.
+
+        SCOPE, stated honestly: this proves PLAINTEXT absence only. It does
+        NOT prove the claim carries no trace of the sender — see
+        test_source_ref_carries_the_meta_message_id below, which pins the
+        one place a trace survives.
+
+        The removed line asserted `SENDER[-4:]` ("0444") was absent too. That
+        was PROBABILISTIC, not a correctness claim: the blob carries a random
+        uuid4 claim_id and subject, and a given 4-digit run occurs in 32 hex
+        characters often enough to fail ~1 run in 400 (measured: 1/400 over
+        400 isolated runs). An accidental substring is not a leak, and the
+        same defect was already removed from test_party.py. Derivation is
+        now proved directly, by regeneration, in the two tests below.
+
+        The full 12-character number is still asserted absent: that
+        collision is ~1e-13, and anything genuinely derived would embed it.
+        """
         self._capture()
         blob = str(self.db.claims[0])
         self.assertNotIn(SENDER, blob)
-        self.assertNotIn(SENDER[-4:], blob)
+
+    def test_claim_identity_is_not_derived_from_the_sender(self):
+        """PROVED BY REGENERATION, NOT BY SUBSTRING ABSENCE.
+
+        A subject derived from the phone — uuid5(phone), a hash, a prefix —
+        is identical every time it is computed. A meaningless identifier is
+        not. So the same sender resolved against two independent stores must
+        produce a different subject and a different claim_id.
+        """
+        first = self._claim_against_fresh_store()
+        second = self._claim_against_fresh_store()
+        self.assertNotEqual(first["subject"], second["subject"])
+        self.assertNotEqual(first["claim_id"], second["claim_id"])
+        for claim in (first, second):
+            self.assertNotIn(SENDER, str(claim))
+
+    def test_claim_body_does_not_vary_with_the_sender(self):
+        """Nothing outside identity may encode WHO sent the message.
+
+        Two different senders, everything else held constant. Every field
+        except the identity/timing ones must be byte-identical — if any
+        carried the sender, in any encoding, it would differ here. This is
+        the assertion that actually tests "not derived/stored", and unlike a
+        substring check it cannot pass by luck.
+        """
+        mine = self._claim_against_fresh_store(sender=SENDER)
+        theirs = self._claim_against_fresh_store(sender=OTHER_SENDER)
+        VARIES_BY_DESIGN = {"claim_id", "subject", "observed_at"}
+        self.assertEqual(
+            {k: v for k, v in mine.items() if k not in VARIES_BY_DESIGN},
+            {k: v for k, v in theirs.items() if k not in VARIES_BY_DESIGN})
+        self.assertNotEqual(mine["subject"], theirs["subject"])
+
+    def test_source_ref_carries_the_meta_message_id(self):
+        """KNOWN GAP, pinned deliberately rather than left implicit.
+
+        source_ref stores Meta's wamid for provenance. Real wamids
+        base64-embed the sender's MSISDN, so the number DOES survive into
+        bic_claims in reversible form — `wamid.HBgMOTE5OTk5MDAwNDQ0FQIAEhgg`
+        decodes to bytes containing "919999000444". test_no_pii_in_the_claim
+        does not catch this because it only looks for plaintext.
+
+        This test does not assert that the gap is acceptable. It records
+        that the claim's provenance is the message id and nothing more, so
+        that if anyone ever widens source_ref the change is visible here.
+        Whether to hash or strip the wamid is a 2C/2D decision, not a test
+        decision.
+        """
+        self._capture()
+        claim = self.db.claims[0]
+        self.assertEqual(claim["source_ref"], f"wa_msg:{MSG_ID}")
+        self.assertNotIn(SENDER, claim["source_ref"])
 
     def test_phone_lives_only_in_the_identifier_table(self):
         self._capture()

@@ -23,6 +23,7 @@ import os
 import sys
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -44,6 +45,9 @@ from tests.test_claims import ClaimsDb                   # noqa: E402
 
 SENDER = "919999000222"
 MSG_ID = "wamid.HBgMOTE5OTk5MDAwMjIyFQIAEhgg"
+# PII-free fixtures for the derivation proofs: vary only WHO sent the message.
+OTHER_SENDER = "918888000111"
+SAFE_MSG_ID = "wamid.TEST-NO-EMBEDDED-MSISDN"
 WEBSITE_ROW, WEBSITE_SERVICE = "svc_website", "Website / App"
 
 
@@ -116,11 +120,18 @@ class Harness(unittest.TestCase):
         for x in reversed(self._patches):
             x.stop()
 
-    def _tap(self, row_id=WEBSITE_ROW, message_id=MSG_ID):
+    def _tap(self, row_id=WEBSITE_ROW, message_id=MSG_ID, sender=SENDER):
         buf = io.StringIO()
         with redirect_stdout(buf):
-            w.handle_list_reply(SENDER, row_id, "title", message_id=message_id)
+            w.handle_list_reply(sender, row_id, "title", message_id=message_id)
         return buf.getvalue()
+
+    def _claim_against_fresh_store(self, sender=SENDER, message_id=SAFE_MSG_ID):
+        """One claim, written against a brand-new store with no shared rows."""
+        self.tearDown()
+        self.setUp()
+        self._tap(message_id=message_id, sender=sender)
+        return dict(self.db.claims[0])
 
 
 # ── The path ───────────────────────────────────────────────────────────────
@@ -179,11 +190,47 @@ class VerticalPath(Harness):
 class NoPii(Harness):
 
     def test_claim_row_contains_no_phone_and_no_message_text(self):
+        """PLAINTEXT absence only — see test_claim_body_does_not_vary_with_the_sender.
+
+        The removed `SENDER[-4:]` ("0222") assertion was probabilistic: the
+        blob carries random uuid4s, and a 4-digit run collides often enough
+        to fail roughly 1 suite run in 400. Third occurrence of this defect
+        in the suite, after test_party.py and test_first_seen_at.py.
+        """
         self._tap()
         blob = str(self.db.claims[0])
         self.assertNotIn(SENDER, blob)
-        self.assertNotIn(SENDER[-4:], blob)
         self.assertNotIn("title", blob)
+
+    def test_claim_body_does_not_vary_with_the_sender(self):
+        """Nothing outside identity may encode WHO sent the message.
+
+        Deterministic, and unlike a substring check it also catches an
+        ENCODED leak — a base64 or hashed sender would differ here while
+        passing the plaintext assertion above.
+        """
+        mine = self._claim_against_fresh_store(sender=SENDER)
+        theirs = self._claim_against_fresh_store(sender=OTHER_SENDER)
+        # valid_from is WALL CLOCK on this path (unlike first_seen_at, which
+        # is handed the instant), so it differs by microseconds between two
+        # captures. Excluded from the equality, then proved below to track
+        # the clock rather than the sender.
+        VARIES_BY_DESIGN = {"claim_id", "subject", "observed_at", "valid_from"}
+        self.assertEqual(
+            {k: v for k, v in mine.items() if k not in VARIES_BY_DESIGN},
+            {k: v for k, v in theirs.items() if k not in VARIES_BY_DESIGN})
+        self.assertNotEqual(mine["subject"], theirs["subject"])
+
+        gap = abs(datetime.fromisoformat(mine["valid_from"])
+                  - datetime.fromisoformat(theirs["valid_from"]))
+        self.assertLess(gap, timedelta(seconds=5))
+
+    def test_claim_identity_is_not_derived_from_the_sender(self):
+        """Regeneration proof: a derived subject would repeat across stores."""
+        first = self._claim_against_fresh_store()
+        second = self._claim_against_fresh_store()
+        self.assertNotEqual(first["subject"], second["subject"])
+        self.assertNotEqual(first["claim_id"], second["claim_id"])
 
     def test_phone_appears_only_in_the_identifiers_table(self):
         self._tap()
@@ -191,7 +238,16 @@ class NoPii(Harness):
         self.assertNotIn(SENDER, str(self.parties))
         self.assertNotIn(SENDER, str(self.db.claims))
 
-    def test_source_ref_is_an_opaque_message_id_only(self):
+    def test_source_ref_is_the_message_id_only(self):
+        """KNOWN GAP: the wamid is NOT opaque.
+
+        Real Meta wamids base64-embed the sender MSISDN — this file's own
+        fixture decodes to bytes containing "919999000222" — so the number
+        survives into bic_claims in reversible form. The assertion below
+        checks PLAINTEXT absence and that source_ref carries the message id
+        and nothing wider; it does not claim the id is anonymous. Whether to
+        hash or strip the wamid is a 2C/2D decision, not a test decision.
+        """
         self._tap()
         ref = self.db.claims[0]["source_ref"]
         self.assertTrue(ref.startswith("wa_msg:"))
