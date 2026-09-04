@@ -616,6 +616,77 @@ def save_messages(items: list):
     except Exception as e:
         print(f"save_messages error: {e}")
 
+# The `tool` value for the durable lead-write record. NOT a registered tool
+# and deliberately not registered: nothing invokes it, and adding a
+# bic_tool_defs row would advertise a capability that does not exist.
+# bic_tool_invocations.tool is intentionally NOT a foreign key — migration
+# 20260802000003 says so in as many words ("not FK: keep logging a tool even
+# after it is removed from the registry") — so the table already accommodates
+# a code the registry does not hold.
+LEAD_UPSERT_EVENT = "lead_upsert"
+
+
+def _record_lead_upsert(phone, ok, http_status, data, started, finished,
+                        error=None) -> None:
+    """Durable, PII-safe record of what the lead write actually did.
+
+    WHY THIS EXISTS. The status code that identifies the production failure
+    is currently only in a Vercel log line, and that log is retained ~1 hour
+    while a lead-writing event happens roughly once a day. The two windows do
+    not overlap, so the diagnosis was hostage to luck. This puts the same
+    fact in a table.
+
+    WHY IT SURVIVES THE FAILURE IT MEASURES. bic.db writes with the
+    SERVICE_ROLE key; upsert_lead writes `leads` with the ANON key. If the
+    lead rejection turns out to be an RLS denial against anon — the leading
+    hypothesis — this row is written by a different, more privileged
+    credential and lands anyway. An observer that shares the failure mode of
+    the thing it observes is not an observer.
+
+    BEST-EFFORT, ALWAYS. Business continuity outranks audit completeness, the
+    same rule bic/tools.py::_audit states: a logging failure must never break
+    or undo a lead capture that already happened.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return
+    try:
+        bic_db.insert("bic_tool_invocations", {
+            "tenant_id": bic_config.DEFAULT_TENANT_ID,
+            "tool": LEAD_UPSERT_EVENT,
+            # upsert_lead is reachable only from the two customer paths
+            # (handle_list_reply and run_client_pipeline), so the caller is a
+            # CLIENT. The crm_capture_self row written moments later carries
+            # the authoritatively resolved role for the same event.
+            "role": "CLIENT",
+            "channel": "whatsapp",
+            # FIELD NAMES ONLY, never values. Which columns travelled is the
+            # diagnostic question ("did we send budget?"); what they contained
+            # is the PII this whole change exists to keep out of storage.
+            "args_redacted": {"fields": sorted(data or {}),
+                              "stored": bool(ok),
+                              "http_status": http_status},
+            "ok": bool(ok),
+            # A BOUNDED CODE, never the PostgREST body. The body echoes the
+            # offending row — for this table that is the customer's name,
+            # company, budget and city. `http_401` distinguishes an RLS denial
+            # from `http_409` (constraint) and `http_400` (bad conflict
+            # target), which is the entire decision this record has to serve.
+            "error": error or (None if ok else f"http_{http_status}"),
+            "latency_ms": int((finished - started) * 1000),
+            "started_at": datetime.fromtimestamp(started, timezone.utc).isoformat(),
+            "finished_at": datetime.fromtimestamp(finished, timezone.utc).isoformat(),
+            # SUFFIX ONLY. Note honestly: the adjacent crm_capture_self row
+            # stores the FULL sender id by owner-approved design ("an audit
+            # trail that cannot identify the actor is useless"), so this
+            # truncation keeps the new field clean rather than reducing net
+            # exposure — the turn is still correlatable by timestamp.
+            "source_ref": f"...{str(phone)[-4:]}",
+        }, timeout=3)
+    except Exception as e:
+        # Type only, and never the row: a DbError body can echo what was sent.
+        print(f"LEAD_UPSERT_AUDIT_FAILED reason={type(e).__name__}")
+
+
 def upsert_lead(phone: str, data: dict):
     """Insert or update lead info (merge on phone). Also mirrors into the
     Asthra CRM's clients table so every captured lead reaches the CRM."""
@@ -631,6 +702,9 @@ def upsert_lead(phone: str, data: dict):
     # Same discipline sync_lead_to_crm already applies three times
     # (`if not r.ok: print(...)`); upsert_lead was the one writer that omitted it.
     stored = False
+    http_status = None
+    transport_error = None
+    started = time.time()
     try:
         r = requests.post(
             f"{SUPABASE_URL}/rest/v1/leads",
@@ -639,6 +713,7 @@ def upsert_lead(phone: str, data: dict):
             timeout=5,
         )
         stored = r.ok
+        http_status = r.status_code
         if stored:
             # NO LEAD PAYLOAD. The old line printed the whole dict — name,
             # company, budget, city — into Vercel logs. The field COUNT says
@@ -655,7 +730,15 @@ def upsert_lead(phone: str, data: dict):
         # Transport failure (timeout, DNS, connection reset). Unchanged, and
         # already correct: the exception skips the success print rather than
         # claiming a write that never left the process.
+        #
+        # Recorded with http_status None and the exception TYPE, so a request
+        # that never reached PostgREST is distinguishable from one it
+        # rejected. Collapsing them would send the next fix hunting for an
+        # RLS policy when the real problem was a timeout.
+        transport_error = type(e).__name__
         print(f"upsert_lead error: {e}")
+    _record_lead_upsert(phone, stored, http_status, data, started, time.time(),
+                        error=transport_error)
     # Routed through the registry (Slice 1C: no direct tool_*() execution).
     # crm_capture_self, not crm_sync_lead: the subject here is the conversing
     # customer recording their OWN details, which must stay reachable for a
