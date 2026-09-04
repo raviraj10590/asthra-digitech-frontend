@@ -189,7 +189,8 @@ class GoalRecognition(unittest.TestCase):
         goal is still PARTY-scoped.
         """
         self.assertEqual(sorted(goals.known_ids()),
-                         ["business_month_review", "real_estate_enquiry",
+                         ["business_focus_recommendation",
+                          "business_month_review", "real_estate_enquiry",
                           "social_media_enquiry", "transformer_quotation"])
         for gid in ("real_estate_enquiry", "social_media_enquiry",
                     "transformer_quotation"):

@@ -166,7 +166,8 @@ class Goals(Base):
         CUSTOMER party and is unaffected by it.
         """
         self.assertEqual(gl.known_ids(),
-                         ["business_month_review", "real_estate_enquiry",
+                         ["business_focus_recommendation",
+                          "business_month_review", "real_estate_enquiry",
                           "social_media_enquiry", "transformer_quotation"])
 
     def test_the_same_evidence_gives_different_verdicts_by_goal(self):

@@ -30,6 +30,7 @@ an in-memory store, so this proves the actual read path, not a mock of it.
 """
 
 import os
+import re
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -558,3 +559,241 @@ class OwnerIntegration(unittest.TestCase):
         import inspect
         src = inspect.getsource(self.w.assemble_business_context)
         self.assertIn("applies_to=bic_registry.applies_to_ref", src)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 7 · business_focus_recommendation — declares its evidence, recommends NOTHING
+# ══════════════════════════════════════════════════════════════════════════
+
+class FocusRecommendationGoal(unittest.TestCase):
+    """The goal exists to say what a recommendation NEEDS, and to report
+    honestly that the Brain does not have it. It must never produce advice.
+    """
+
+    GOAL = "business_focus_recommendation"
+
+    def goal(self):
+        return gl.lookup(self.GOAL)
+
+    def test_the_goal_exists(self):
+        self.assertIsNotNone(self.goal())
+
+    def test_it_is_business_scoped(self):
+        self.assertEqual(self.goal()["scope"], cx.BUSINESS)
+
+    def test_risk_tier_is_two(self):
+        self.assertEqual(self.goal()["risk_tier"], 2)
+
+    def test_tier_is_satisfiable_by_derived_evidence(self):
+        """Tier 3 would demand 0.80, above the 0.70 cap a tier-3 derived fact
+        can ever carry (2C §6) — the goal could never be satisfied however
+        complete the evidence became."""
+        self.assertLessEqual(cx.RISK_CONFIDENCE_FLOOR[self.goal()["risk_tier"]],
+                             c.TIER_CAPS[pe.PROVENANCE_TIER])
+
+    def test_all_four_required_slots_are_declared(self):
+        names = {s["name"] for s in self.goal()["required_slots"]}
+        for required in ("conversion_rate", "pipeline_value",
+                         "channel_attribution", "capacity"):
+            self.assertIn(required, names)
+
+    def test_the_known_enquiry_metric_is_also_declared(self):
+        """Without it the packet would carry no evidence at all and the
+        report would read as "we know nothing", which is false."""
+        preds = [s["predicate"] for s in self.goal()["required_slots"]]
+        self.assertIn(gl.NEW_ENQUIRIES, preds)
+
+    def test_the_four_predicates_are_deliberately_unregistered(self):
+        """Naming a predicate does not create it — 2A registration is a
+        separate, deliberate act that freezes a meaning forever. This pins
+        that none of the four was smuggled into a migration.
+
+        PRECISE, not a substring scan: it looks only inside `insert into
+        bic_concepts` statements and requires the namespace and concept to
+        appear as an adjacent registered pair. A bare scan for the concept
+        name matched the word "value" inside unrelated tool-registry prose —
+        the same false-positive class this repo has hit before, which is also
+        why PIPELINE_VALUE is `open_value` rather than the generic `value`.
+        """
+        mig = os.path.join(os.path.dirname(__file__), "..", "supabase",
+                           "migrations")
+        registered = set()
+        for name in sorted(os.listdir(mig)):
+            with open(os.path.join(mig, name)) as fh:
+                sql = "\n".join(l for l in fh
+                                 if not l.strip().startswith("--"))
+            if "insert into bic_concepts" not in sql.lower():
+                continue
+            for ns, concept in re.findall(
+                    r"'([a-z][a-z0-9_.]*)',\s*\n\s*'([a-z][a-z0-9_]*)',", sql):
+                registered.add(f"{ns}.{concept}")
+
+        # The control: the one predicate that IS registered must be found,
+        # otherwise this test would pass by finding nothing at all.
+        self.assertIn("biz.pipeline.new_enquiries_per_month", registered)
+        for ref in (gl.CONVERSION_RATE, gl.PIPELINE_VALUE,
+                    gl.CHANNEL_ATTRIBUTION, gl.CAPACITY):
+            self.assertNotIn(ref.split("@")[0], registered, ref)
+
+    def test_the_description_states_what_it_requires(self):
+        self.assertIn("Requires", self.goal()["description"])
+
+
+class FocusRecommendationIsInsufficient(RealStack):
+    """Drives the REAL stack. Inherits RealStack's registry/claims wiring,
+    where only new_enquiries is registered — exactly production's state."""
+
+    def focus_packet(self, tenant=TENANT, subject=ORG_A):
+        return self.build(tenant=tenant, subject=subject,
+                          goal_def=gl.lookup("business_focus_recommendation"))
+
+    def with_enquiries(self, value=9):
+        self.claim(value, datetime.now(timezone.utc) - timedelta(hours=1))
+
+    def test_the_known_metric_is_present_as_evidence(self):
+        self.with_enquiries()
+        pk = self.focus_packet()
+        self.assertEqual([str(f["value"]) for f in pk["evidence"]["facts"]],
+                         ["9"])
+
+    def test_the_missing_evidence_is_visible_and_named(self):
+        self.with_enquiries()
+        pk = self.focus_packet()
+        gaps = {g["slot"] for g in pk["epistemic"]["sufficiency"]["gaps"]}
+        self.assertEqual(gaps, {"conversion_rate", "pipeline_value",
+                                "channel_attribution", "capacity"})
+
+    def test_the_result_is_insufficient(self):
+        self.with_enquiries()
+        pk = self.focus_packet()
+        self.assertEqual(pk["epistemic"]["sufficiency"]["verdict"], cx.REFUSE)
+
+    def test_the_enquiry_metric_alone_never_yields_proceed(self):
+        """THE PRODUCT RULE. business_month_review PROCEEDs on this same
+        evidence because its action is "assemble what we know"; sufficiency
+        is a property of the (evidence, ACTION) pair, so the same fact must
+        NOT proceed for a recommendation."""
+        self.with_enquiries()
+        review = self.build(goal_def=gl.lookup("business_month_review"))
+        focus = self.focus_packet()
+        self.assertEqual(review["epistemic"]["sufficiency"]["verdict"],
+                         cx.PROCEED)
+        self.assertEqual(focus["epistemic"]["sufficiency"]["verdict"],
+                         cx.REFUSE)
+
+    def test_the_packet_carries_no_recommendation_field(self):
+        """STRUCTURAL, and deliberately so.
+
+        A word-scan version of this test stripped "recommendation" from the
+        blob first (to avoid matching the goal id business_focus_recommendation)
+        and was thereby blind to an injected {"recommendation": "focus on
+        Digital Ads"} — verified by mutation. Asserting the exact 2H key set
+        instead catches ANY added field, whatever it is called.
+        """
+        self.with_enquiries()
+        self.assertEqual(sorted(self.focus_packet().keys()), [
+            "as_of", "assembled_at", "assembly_state", "assembly_version",
+            "boundaries", "epistemic", "evidence", "goal_ref", "packet_id",
+            "packet_schema_version", "policy_version", "principal",
+            "question", "scope", "subject", "tenant_id", "turn_ref"])
+
+    def test_no_advice_language_reaches_the_evidence_or_verdict(self):
+        """The goal id legitimately contains "recommendation"; the EVIDENCE
+        and the SUFFICIENCY REASON must not contain advice at all."""
+        self.with_enquiries()
+        pk = self.focus_packet()
+        blob = (str(pk["evidence"]) + str(pk["epistemic"]["sufficiency"]["reason"])).lower()
+        for word in ("recommend", "focus on", "priorit", "advice", "suggest",
+                     "you should"):
+            self.assertNotIn(word, blob)
+
+    def test_no_value_is_fabricated_for_a_missing_slot(self):
+        self.with_enquiries()
+        pk = self.focus_packet()
+        preds = {f["predicate"] for f in pk["evidence"]["facts"]}
+        for ref in (gl.CONVERSION_RATE, gl.PIPELINE_VALUE,
+                    gl.CHANNEL_ATTRIBUTION, gl.CAPACITY):
+            self.assertNotIn(ref, preds)
+
+    # ── RETRIEVE vs UNKNOWABLE, preserved per-gap ───────────────────────
+    def test_unregistered_evidence_is_unknowable_not_retrievable(self):
+        """"We haven't measured it yet" and "there is no such measurement"
+        are different answers, and only the second is UNKNOWABLE."""
+        self.with_enquiries()
+        for g_ in self.focus_packet()["epistemic"]["sufficiency"]["gaps"]:
+            self.assertEqual(g_["class"], cx.UNKNOWABLE, g_["slot"])
+            self.assertIn("not registered", g_["why"])
+
+    def test_a_registered_but_unmeasured_slot_is_retrievable_not_unknowable(self):
+        """The distinction the OWNER adapter will later surface: once a
+        predicate IS registered, its absence becomes obtainable."""
+        pk = self.build(goal_def=gl.lookup("business_month_review"))
+        gap = [g_ for g_ in pk["epistemic"]["sufficiency"]["gaps"]
+               if g_["slot"] == "new_enquiries"][0]
+        self.assertEqual(gap["class"], cx.OBTAINABLE_BY_RETRIEVAL)
+        self.assertEqual(pk["epistemic"]["sufficiency"]["verdict"], cx.RETRIEVE)
+
+    def test_both_classes_are_distinguishable_in_one_packet(self):
+        """REFUSE outranks RETRIEVE in the aggregate, but the per-gap classes
+        must both survive so the adapter can word them differently."""
+        pk = self.focus_packet()          # no enquiry claim written
+        classes = {g_["slot"]: g_["class"]
+                   for g_ in pk["epistemic"]["sufficiency"]["gaps"]}
+        self.assertEqual(classes["new_enquiries"], cx.OBTAINABLE_BY_RETRIEVAL)
+        self.assertEqual(classes["conversion_rate"], cx.UNKNOWABLE)
+        self.assertEqual(pk["epistemic"]["sufficiency"]["verdict"], cx.REFUSE)
+
+    # ── tenant isolation ────────────────────────────────────────────────
+    def test_recommendation_evidence_is_tenant_isolated(self):
+        """Same subject id under both tenants, so party lookup succeeds
+        either way and only the claims tenant filter can separate them."""
+        shared = "7f7f7f7f-8888-4888-8888-999999999999"
+        for tenant in (TENANT, OTHER_TENANT):
+            self.parties.append({"tenant_id": tenant, "knowledge_id": shared,
+                                 "kind": "ORGANIZATION",
+                                 "resolution_state": "PROVISIONAL",
+                                 "merged_into": None})
+        now = datetime.now(timezone.utc)
+        self.claim(11, now - timedelta(hours=1), tenant=TENANT, subject=shared)
+        self.claim(22, now - timedelta(hours=1),
+                   tenant=OTHER_TENANT, subject=shared)
+        a = self.focus_packet(tenant=TENANT, subject=shared)
+        b = self.focus_packet(tenant=OTHER_TENANT, subject=shared)
+        self.assertEqual([str(f["value"]) for f in a["evidence"]["facts"]], ["11"])
+        self.assertEqual([str(f["value"]) for f in b["evidence"]["facts"]], ["22"])
+
+
+class FocusRecommendationMakesNoModelCall(unittest.TestCase):
+    """Phase 7: zero LLM calls, even for "what should I focus on this month?"
+    """
+
+    def test_assemble_business_context_reaches_no_provider(self):
+        import webhook as w
+        import inspect
+        src = inspect.getsource(w.assemble_business_context)
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.strip().startswith("#")).split('"""')[-1]
+        for banned in ("generate_owner_reply", "openai", "OpenAI", "deepseek",
+                       "gemini", "call_ai", "chat.completions"):
+            self.assertNotIn(banned, code)
+
+    def test_the_context_engine_imports_no_provider(self):
+        """2H I11: "Assembly makes no AI calls" — enforced by there being
+        nothing there that could make one."""
+        import inspect
+        src = inspect.getsource(cx)
+        for banned in ("import openai", "import requests", "chat.completions"):
+            self.assertNotIn(banned, src)
+
+    def test_the_whole_focus_path_is_offline(self):
+        """Belt and braces: assembling the focus packet with a describe that
+        records every call proves no second retrieval sneaks in."""
+        calls = []
+
+        def spy(tenant_id, subject, predicates=None, as_of=None):
+            calls.append(list(predicates or []))
+            return None
+        cx.assemble(TENANT, "what should I focus on this month?", owner(),
+                    gl.lookup("business_focus_recommendation"), ORG_A,
+                    describe=spy, applies_to=lambda ref: None)
+        self.assertEqual(len(calls), 1)
