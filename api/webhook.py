@@ -2442,6 +2442,257 @@ def assemble_business_context(request: str, principal=None, *, as_of=None,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# OWNER DESCRIPTIVE BUSINESS STATUS — ⑧ CONSULT → ⑨ DECIDE, advisory only
+# ══════════════════════════════════════════════════════════════════════════════
+# The first OWNER question answered from the BUSINESS packet rather than from
+# the model's general knowledge. It DESCRIBES and refuses to recommend:
+# `business_focus_recommendation` stays blocked on its own missing evidence
+# and is never reached from here.
+#
+# NOTHING IS AUTHORIZED OR EXECUTED. decide.authorize() is not called, no
+# Commitment is created, no tool with side effects runs. The reply is marked
+# advisory and action_required=False so no downstream reader can mistake it
+# for permission.
+
+BUSINESS_STATUS_GOAL = "business_month_review"
+
+
+def _business_consult_envelope(packet: dict) -> dict:
+    """2H packet → the shape bic.explain's narration validator already reads.
+
+    An ADAPTER, not a second validator. explain.allowed_tokens/validate_narration
+    were written against a knowledge.describe envelope; the packet carries the
+    same material under different keys, so this renames rather than
+    reimplements. Writing a second validator for business prose is how the two
+    would drift and how a number would eventually slip through one of them.
+    """
+    ep = packet.get("epistemic") or {}
+    return {
+        "evidence": (packet.get("evidence") or {}).get("facts") or [],
+        "conflicts": ep.get("conflicts") or [],
+        # 2H carries NO packet-level confidence scalar by design (C2), so
+        # there is nothing to map here. allowed_tokens tolerates the absence.
+        "confidence": {},
+        "coverage": ep.get("coverage") or {},
+        "subject": packet.get("subject"),
+        "entity": packet.get("subject"),
+    }
+
+
+def _business_consult_brief(packet: dict, question: str) -> list:
+    """The ONLY thing the model is given: question + packet-derived facts.
+
+    PACKET-ONLY, and that is the whole point. generate_owner_reply feeds the
+    model long-term owner memory, an archive recall, a live CRM/leads
+    snapshot and the recent conversation. Every one of those is an unverified
+    business assertion, and letting them into this call would let the model
+    answer a business question from something other than the evidence. None
+    of them appears below.
+
+    NO PII. Facts contribute predicate, value, unit, confidence, tier and
+    freshness — never a claim_id, never the subject id, never a phone, never
+    a message. The gap list contributes slot names and epistemic classes.
+    """
+    ep = packet.get("epistemic") or {}
+    lines = ["EVIDENCE (the only facts you may state):"]
+    for f in (packet.get("evidence") or {}).get("facts") or []:
+        prov = f.get("provenance") or {}
+        fresh = f.get("freshness") or {}
+        lines.append(
+            f"- {f.get('label') or f.get('predicate')} = {f.get('value')}"
+            f" {f.get('unit') or ''}".rstrip()
+            + f" | confidence {f.get('confidence')}"
+              f" | provenance tier {prov.get('tier')} (cap {prov.get('cap')})"
+              f" | freshness {fresh.get('verdict')}")
+    if not (packet.get("evidence") or {}).get("facts"):
+        lines.append("- (none)")
+
+    gaps = (ep.get("sufficiency") or {}).get("gaps") or []
+    lines.append("\nNOT MEASURED (you may NOT estimate or infer these):")
+    for g in gaps:
+        lines.append(f"- {g.get('slot')}: {g.get('class')}")
+    if not gaps:
+        lines.append("- (none)")
+
+    for c in ep.get("conflicts") or []:
+        lines.append(f"\nUNRESOLVED CONFLICT on {c.get('predicate')} — "
+                     "state that it is contested; do not pick a value.")
+
+    lines.append(
+        "\nRULES: State only the numbers above, verbatim. Do not compute, "
+        "estimate, forecast or infer any other figure. Do not mention "
+        "revenue, conversion, pipeline value, channels or capacity — they "
+        "are not measured. Do not recommend an action. Two or three short "
+        "sentences.")
+    return [{"role": "system", "content": "\n".join(lines)},
+            {"role": "user", "content": question}]
+
+
+def _business_narrator(packet: dict, question: str):
+    """Default CONSULT provider — packet-only, and injectable for tests.
+
+    Injected the same way bic.explain takes its narrator: the capability owns
+    the contract, the caller owns the provider. Returns None on any failure,
+    which DECIDE then treats exactly as "no proposal available".
+    """
+    try:
+        return _call_openai(_business_consult_brief(packet, question),
+                            max_tokens=220)
+    except Exception as e:
+        print(f"business_status consult failed: {type(e).__name__}")
+        return None
+
+
+def tool_business_status(sender: str, question: str = "", timeout: float = 20,
+                         narrator=None, **_) -> str:
+    """OWNER descriptive business status.
+
+    ⑤ CONTEXT → ⑥ SUFFICIENCY → ⑧ CONSULT → ⑨ DECIDE → render.
+
+    CONSULT RUNS ONLY AFTER SUFFICIENCY PASSES. A model asked to describe a
+    business whose evidence the gate has just refused would fill the gap from
+    general knowledge, which is precisely what an evidence-bound answer must
+    never do. Insufficient evidence therefore produces a deterministic
+    epistemic reply and makes NO provider call at all.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return "⚠️ BIC isn't configured yet."
+
+    packet, reason = assemble_business_context(
+        question or "business status this month", goal_id=BUSINESS_STATUS_GOAL)
+    if packet is None:
+        if reason == "no_business_subject":
+            return ("📊 No business evidence on record yet — the daily "
+                    "refresh hasn't run. This is absence of measurement, not "
+                    "a business result.")
+        return f"⚠️ Couldn't assemble business context ({reason})."
+
+    verdict = (packet["epistemic"]["sufficiency"] or {}).get("verdict")
+    if verdict != bic_context.PROCEED:
+        # ⑨ DECIDE still adjudicates — the outcome comes from the same
+        # function the customer path uses — but its customer-facing Kannada
+        # text is not sent to an owner asking a business question, so the
+        # rendering below is owner-shaped while the DECISION is shared.
+        outcome = bic_decide.decide(bic_goals.lookup(BUSINESS_STATUS_GOAL),
+                                    packet, None)["outcome"]
+        return render_business_status(packet, None, outcome=outcome)
+
+    narrate = narrator or (lambda p, q: _business_narrator(p, q))
+    proposal = None
+    try:
+        raw = narrate(packet, question or "What is the business status?")
+    except Exception as e:
+        print(f"business_status narrator failed: {type(e).__name__}")
+        raw = None
+
+    rejected = None
+    if raw:
+        # ⑧→⑨ THE MODEL PROPOSES, THE VALIDATOR DISPOSES. Reuses 2G's
+        # existing narration validator verbatim: a number the packet does not
+        # contain, an identifier, certainty language or PII is refused, and
+        # the deterministic rendering is returned instead.
+        rejected = bic_explain.validate_narration(
+            raw, _business_consult_envelope(packet))
+        proposal = None if rejected else raw
+
+    decision = bic_decide.decide(bic_goals.lookup(BUSINESS_STATUS_GOAL),
+                                 packet, proposal)
+    return render_business_status(packet, proposal,
+                                  outcome=decision["outcome"],
+                                  narration_rejected=rejected)
+
+
+def business_status_result(packet: dict, proposal, outcome,
+                           narration_rejected=None) -> dict:
+    """The advisory decision record for this turn.
+
+    Preserves decide()'s {outcome, text, reason} contract and adds only
+    epistemic metadata the packet already computed. `advisory` and
+    `action_required` are constants: they are carried explicitly so a future
+    executor cannot read silence as permission.
+    """
+    ep = packet["epistemic"]
+    suff = ep["sufficiency"] or {}
+    return {
+        "outcome": outcome,
+        "text": proposal,
+        "reason": suff.get("reason"),
+        "evidence_refs": [f.get("claim_id")
+                          for f in (packet.get("evidence") or {}).get("facts") or []],
+        "gaps": suff.get("gaps") or [],
+        "risk_tier": suff.get("risk_tier"),
+        "advisory": True,
+        "action_required": False,
+        "narration_rejected": narration_rejected,
+    }
+
+
+def render_business_status(packet: dict, proposal, outcome,
+                           narration_rejected=None) -> str:
+    """Packet → owner text. Presentation only; decides nothing.
+
+    ALWAYS SEPARATES THE TWO HALVES: what the evidence supports, and what it
+    does not. A status report that showed only the number it has would read
+    as a complete picture of a business the Brain can barely see.
+
+    NO INTERNAL IDS. claim_id and the business subject id are meaningless to
+    the owner and are carried in the structured result, not the message.
+    """
+    facts = (packet.get("evidence") or {}).get("facts") or []
+    suff = packet["epistemic"]["sufficiency"] or {}
+    lines = ["📊 Business status — what the Brain has measured"]
+
+    if facts:
+        for f in facts:
+            prov = f.get("provenance") or {}
+            fresh = f.get("freshness") or {}
+            month = ""
+            try:
+                when = datetime.fromisoformat(
+                    str(f.get("valid_from")).replace("Z", "+00:00"))
+                month = f" ({when.astimezone(IST):%B %Y})"
+            except (ValueError, TypeError):
+                pass
+            lines.append(
+                f"\n• {f.get('label') or f.get('predicate')}: "
+                f"{f.get('value')} {f.get('unit') or ''}".rstrip() + month
+                + f"\n  confidence {f.get('confidence')} "
+                  f"(tier {prov.get('tier')}, cap {prov.get('cap')}) · "
+                  f"{fresh.get('verdict')}")
+    else:
+        lines.append("\n• Nothing measured is currently available.")
+
+    for c in packet["epistemic"].get("conflicts") or []:
+        lines.append(f"\n⚠️ CONTESTED: {c.get('predicate')} has more than one "
+                     "live value. No number is shown until it is resolved.")
+
+    gaps = suff.get("gaps") or []
+    if gaps:
+        lines.append("\n🚫 What this does NOT tell you:")
+        for g in gaps:
+            cls = g.get("class")
+            if cls == bic_context.UNKNOWABLE:
+                how = "not in the evidence model — nothing can record it yet"
+            elif cls == bic_context.OBTAINABLE_BY_RETRIEVAL:
+                how = "measured, but not currently available"
+            else:
+                how = str(cls)
+            lines.append(f"• {g.get('slot')} — {how}")
+
+    if proposal:
+        lines.append(f"\n🗣 {proposal}")
+    elif narration_rejected:
+        lines.append(f"\nℹ️ Narration refused ({narration_rejected}) — the "
+                     "figures above come from records only.")
+
+    if outcome != bic_decide.PROCEED:
+        lines.append(f"\nVerdict: {suff.get('verdict')} — "
+                     f"{suff.get('reason')}")
+    lines.append("\n(Advisory only. No action has been taken or authorised.)")
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 2B COMMITMENT — the OWNER consumer that CLOSES a promise
 # ══════════════════════════════════════════════════════════════════════════════
 # Stage ⑮ creates commitments; without this they stay `made` forever.
@@ -3467,6 +3718,45 @@ def owner_evidence_query(text: str) -> bool:
     return bool(_ENQUIRY_TOPIC_RE.search(low))
 
 
+# ── OWNER DESCRIPTIVE BUSINESS STATUS — a third narrow gate ────────────────
+#
+# NOT A NEW CLASSIFIER. This is the same mechanism owner_lookup_tool and
+# owner_evidence_query already are: a fixed, tiny phrase set plus the SAME
+# _REASONING_MARKERS override, evaluated deterministically in microseconds.
+# It adds a phrase list, not a decision procedure, and nothing here inspects
+# intent — "what should I focus on" still falls through to reasoning because
+# "should" and "focus" are reasoning markers, exactly as before.
+#
+# WHY IT IS SEPARATE FROM owner_evidence_query. That gate answers "how many
+# enquiries" with a single number. This one assembles the whole business
+# packet and reports what the evidence does and does not support. They are
+# different questions with different answers, and merging them would make
+# "how many enquiries this month?" return a status essay.
+_BUSINESS_STATUS_PHRASES = (
+    "business status", "business situation", "business update",
+    "current business", "how is the business", "how's the business",
+    "status of the business", "how are enquiries", "how are the enquiries",
+    "how are our enquiries", "how are my enquiries",
+    "ವ್ಯಾಪಾರ ಸ್ಥಿತಿ",
+)
+
+
+def owner_business_status_query(text: str) -> bool:
+    """True only for an explicit DESCRIPTIVE business-status question.
+
+    Exact phrases, never a topic mention: "business" alone, or "enquiries"
+    alone, must not reach here. A miss costs a slower model answer; a false
+    positive answers a strategic question with a status report, which is the
+    failure the OWNER routing fix already exists to prevent.
+    """
+    low = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not low:
+        return False
+    if any(m in low for m in _REASONING_MARKERS):
+        return False
+    return any(p in low for p in _BUSINESS_STATUS_PHRASES)
+
+
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
     """Single entry point for OWNER/STAFF messages: pending confirmation →
     deterministic # command → keyword-routed read-only lookup → AI chat."""
@@ -3512,6 +3802,14 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
     # shortcut is wrong for this predicate specifically). Returns here, so a
     # matched message structurally cannot reach generate_owner_reply below —
     # no model call is possible for it, not merely avoided by convention.
+    # Descriptive status is checked BEFORE the count question. "how are
+    # enquiries this month?" is a status question and carries no count verb,
+    # so the two gates cannot both match — the ordering makes that explicit
+    # rather than relying on it.
+    if owner_business_status_query(stripped):
+        return run_tool(sender, "business_status",
+                        _fallback=tool_business_status, question=stripped)
+
     if owner_evidence_query(stripped):
         return run_tool(sender, "business_new_enquiries",
                         _fallback=tool_business_new_enquiries)
@@ -4695,6 +4993,11 @@ if BIC_AVAILABLE:
     @bic_tools.register("business_new_enquiries")
     def _tool_h_business_new_enquiries(principal, timeout=10, **_):
         return tool_business_new_enquiries(principal.sender_id, timeout=timeout)
+
+    @bic_tools.register("business_status")
+    def _tool_h_business_status(principal, timeout=20, question="", **_):
+        return tool_business_status(principal.sender_id, question=question,
+                                    timeout=timeout)
 
     @bic_tools.register("commitments_list")
     def _tool_h_commitments_list(principal, timeout=10, **_):

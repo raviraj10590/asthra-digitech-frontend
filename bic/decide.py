@@ -145,11 +145,26 @@ def decide(goal_def: dict, packet: dict, llm_proposal: Optional[str]) -> dict:
     return refusal_result(packet["epistemic"]["sufficiency"]["reason"])
 
 
-def authorize(principal, packet: dict, goal_def: dict, tenant_id: str) -> dict:
+def authorize(principal, packet: dict, goal_def: dict, tenant_id: str,
+              expected_role: str = "CLIENT") -> dict:
     """⑩ AUTHORIZE. Reuses what already exists — bic.policy's role ordering
     (via the Principal the caller resolved) and 2H's own tier-ceiling verdict
     (already computed inside the packet). No new authorization system, no
     new registry row, no new descriptor.
+
+    `expected_role` DEFAULTS TO CLIENT, so every existing caller behaves
+    byte-identically. It exists because the role was previously a literal in
+    the comparison below, which made this function structurally unusable for
+    any principal other than a customer — a future OWNER action path would
+    have had to either loosen this check for everyone or write a second one.
+    Naming the expectation is the smallest change that leaves both options
+    open without taking either.
+
+    NOTHING PASSES OWNER TODAY, DELIBERATELY. The OWNER business status
+    command is advisory: it authorizes no action and therefore never calls
+    this function. Enabling OWNER action authorization is a separate decision
+    with its own risk tier and its own approval, and adding the parameter
+    must not be mistaken for having made it.
 
     Returns {"allowed": bool, "reason": str}.
     """
@@ -158,7 +173,7 @@ def authorize(principal, packet: dict, goal_def: dict, tenant_id: str) -> dict:
     if packet.get("goal_ref") != goal_def["goal_id"]:
         return {"allowed": False, "reason": "goal mismatch"}
     role = getattr(principal, "role", None)
-    if role != "CLIENT":
+    if role != expected_role:
         return {"allowed": False,
                "reason": f"not a customer-facing principal (role={role!r})"}
     ceiling = packet["principal"]["risk_tier_ceiling"]

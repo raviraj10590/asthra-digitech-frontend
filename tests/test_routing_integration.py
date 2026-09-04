@@ -269,7 +269,8 @@ class TestHandlerRegistration(unittest.TestCase):
         than through the registry (2G §5.1)."""
         self.assertEqual(
             sorted(tools._HANDLERS),
-            ["add_role", "aitest", "business_new_enquiries", "chat_pause",
+            ["add_role", "aitest", "business_new_enquiries", "business_status",
+             "chat_pause",
              "chat_resume", "commitment_resolve", "commitments_list",
              "crm_capture_self", "crm_list_clients", "crm_sync_lead",
              "knowledge_suffice", "knowledge_why", "leads_today",
