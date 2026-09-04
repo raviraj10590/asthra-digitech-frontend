@@ -933,6 +933,88 @@ EXTRACTION_PARSE_FAILED = "parse_failed"       # answered, JSON unusable
 EXTRACTION_PROVIDER_FAILED = "provider_failed"  # call itself failed
 
 
+# ── The ELIGIBILITY DECISION, made observable ──────────────────────────────
+# The guard that decides whether extraction runs at all lives at the CALL
+# SITE, outside extract_lead_info. So a guard-skip produces no row from the
+# recorder below it, and "the guard said no" is indistinguishable from "the
+# function was never called" — which is exactly the ambiguity that forced the
+# last root cause to be found by reading code instead of reading data.
+#
+# THIS RECORDS THE DECISION. It does not make one. The `if` at the call site
+# is untouched and remains the sole authority on whether extraction runs.
+LEAD_EXTRACTION_GUARD_EVENT = "lead_extraction_guard"
+
+GUARD_SHORT_HISTORY = "short_history"    # len < 4
+GUARD_EARLY_PASS = "early_pass"          # 4 <= len < 8, always runs
+GUARD_PERIODIC_PASS = "periodic_pass"    # len >= 8, (len//2) % 2 == 0
+GUARD_PERIODIC_SKIP = "periodic_skip"    # len >= 8, (len//2) % 2 != 0
+
+
+def _extraction_guard_reason(history_len: int):
+    """(reason, eligible) for a history length — mirrors the call-site guard.
+
+    A SECOND EXPRESSION OF THE SAME RULE, and that is a real risk: two copies
+    can drift. It is accepted here because the alternative — restructuring
+    the `if` so the decision is computed once and reused — would change the
+    guard line itself, which this task forbids. The drift risk is closed by
+    a test that evaluates the ACTUAL call-site expression against this
+    classifier across a wide range of lengths and asserts they never
+    disagree, so a change to either is caught.
+
+    No special case for 22. The saturated value falls out of the formula
+    (22 // 2 = 11, odd -> periodic_skip) exactly as every other length does;
+    encoding it would hide the structural cause behind a magic number.
+    """
+    if history_len < 4:
+        return GUARD_SHORT_HISTORY, False
+    if history_len < 8:
+        return GUARD_EARLY_PASS, True
+    if (history_len // 2) % 2 == 0:
+        return GUARD_PERIODIC_PASS, True
+    return GUARD_PERIODIC_SKIP, False
+
+
+def _record_extraction_guard(history_len: int) -> None:
+    """Durable, PII-safe record of the eligibility decision.
+
+    ok=True ALWAYS. This is an observation of a decision, not a failed tool
+    call: `periodic_skip` is the guard working as written, and recording it
+    as a failure would fill the failure index with correct behaviour and
+    train whoever reads it to ignore the signal.
+
+    latency_ms=0 deliberately — the decision is an integer comparison, not an
+    operation, and inventing a duration for it would be noise dressed as
+    measurement.
+
+    STORES ONE INTEGER AND TWO LABELS. No transcript, no phone, no prompt, no
+    lead values. history_len is a COUNT of messages, not their content.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return
+    reason, eligible = _extraction_guard_reason(history_len)
+    try:
+        stamp = datetime.now(timezone.utc).isoformat()
+        bic_db.insert("bic_tool_invocations", {
+            "tenant_id": bic_config.DEFAULT_TENANT_ID,
+            "tool": LEAD_EXTRACTION_GUARD_EVENT,
+            "role": "CLIENT",
+            "channel": "whatsapp",
+            "args_redacted": {"history_len": int(history_len),
+                              "eligible": bool(eligible),
+                              "reason": reason},
+            "ok": True,
+            "error": None,
+            "latency_ms": 0,
+            "tokens_in": None,
+            "tokens_out": None,
+            "started_at": stamp,
+            "finished_at": stamp,
+            "source_ref": None,
+        }, timeout=3)
+    except Exception as e:
+        print(f"LEAD_EXTRACTION_GUARD_AUDIT_FAILED reason={type(e).__name__}")
+
+
 def _record_lead_extraction(outcome, *, provider=None, model=None,
                             fields=None, started=None, error=None,
                             tokens_in=None, tokens_out=None) -> None:
@@ -4020,6 +4102,13 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": reply},
         ]
+        # OBSERVE THE DECISION, DO NOT MAKE IT. The `if` below is unchanged,
+        # byte for byte, and still decides everything; this only writes down
+        # what it is about to conclude. Placed before the branch so a SKIP is
+        # recorded too — a skip leaves no other trace anywhere, which is why
+        # the guard's behaviour had to be reconstructed from source rather
+        # than read from data.
+        _record_extraction_guard(len(history))
         if len(history) >= 4 and (len(history) < 8 or (len(history) // 2) % 2 == 0):
             lead = extract_lead_info(history)
             if lead:
