@@ -917,11 +917,108 @@ EXTRACTION_SYSTEM_PROMPT = (
 )
 
 
+# Internal observability event for the AI extraction path. Like
+# LEAD_UPSERT_EVENT this is deliberately NOT registered in bic_tool_defs:
+# extraction is not an invocable capability, and a registry row would claim
+# otherwise. bic_tool_invocations.tool is not a foreign key, which is what
+# makes an internal code legitimate here.
+LEAD_EXTRACTION_EVENT = "lead_extraction"
+
+# Outcomes, closed set. Each is a DIFFERENT operational question, and
+# collapsing any two would hide the one we are actually trying to answer.
+EXTRACTION_SKIPPED = "skipped_short_history"   # guard hit; no provider call
+EXTRACTION_SUCCESS = "success"                 # fields parsed
+EXTRACTION_EMPTY = "empty"                     # provider answered, no fields
+EXTRACTION_PARSE_FAILED = "parse_failed"       # answered, JSON unusable
+EXTRACTION_PROVIDER_FAILED = "provider_failed"  # call itself failed
+
+
+def _record_lead_extraction(outcome, *, provider=None, model=None,
+                            fields=None, started=None, error=None,
+                            tokens_in=None, tokens_out=None) -> None:
+    """Durable, PII-safe record of what the extraction attempt did.
+
+    WHY. Nothing today can answer "is extract_lead_info even being reached?"
+    It is not a registered tool, so it writes no audit row, and its only
+    trace is a print that survives ~1 hour. Production shows 17 upsert_lead
+    executions all attributable to menu taps, which IMPLIES the AI path has
+    never produced a lead — but an inference from an absence is not an
+    observation, and this makes it one.
+
+    NEVER STORED: the prompt, the provider response, the conversation, any
+    lead VALUE, or the phone. Only field NAMES, a count, an outcome, the
+    provider/model, latency, and an exception TYPE.
+
+    NO SENDER MARKER, deliberately. extract_lead_info receives `history` and
+    no phone — adding a parameter to carry one would change the call
+    contract this task must not touch, and correlating to the adjacent
+    lead_upsert row by timestamp is sufficient. Less PII, no signature change.
+
+    BEST-EFFORT. A failure here logs its type and returns; extraction must
+    continue exactly as before, the same rule bic/tools.py::_audit states.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return
+    try:
+        finished = time.time()
+        bic_db.insert("bic_tool_invocations", {
+            "tenant_id": bic_config.DEFAULT_TENANT_ID,
+            "tool": LEAD_EXTRACTION_EVENT,
+            "role": "CLIENT",
+            "channel": "whatsapp",
+            # FIELD NAMES ONLY. Which keys the model returned is the
+            # diagnostic question; what they contained is the PII.
+            "args_redacted": {"outcome": outcome,
+                              "provider": provider,
+                              "model": model,
+                              "fields": sorted(fields or {}),
+                              "field_count": len(fields or {})},
+            "ok": outcome == EXTRACTION_SUCCESS,
+            "error": error,
+            "latency_ms": int((finished - started) * 1000) if started else None,
+            # The columns exist and nothing has ever written them (migration
+            # 20260802000003). No migration needed, and this is the first
+            # real answer to "what is extraction costing?".
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "started_at": (datetime.fromtimestamp(started, timezone.utc).isoformat()
+                           if started else None),
+            "finished_at": datetime.fromtimestamp(finished, timezone.utc).isoformat(),
+            "source_ref": None,
+        }, timeout=3)
+    except Exception as e:
+        print(f"LEAD_EXTRACTION_AUDIT_FAILED reason={type(e).__name__}")
+
+
+def _extraction_failure_kind(exc) -> str:
+    """A JSON error means the provider ANSWERED and we could not read it; any
+    other exception means the call itself failed. Different remedies."""
+    return (EXTRACTION_PARSE_FAILED if isinstance(exc, (json.JSONDecodeError,
+                                                        ValueError))
+            else EXTRACTION_PROVIDER_FAILED)
+
+
+def _usage_of(resp):
+    """(tokens_in, tokens_out) from an OpenAI response, or (None, None).
+
+    Read defensively: a stub client or an older SDK may not carry `usage`,
+    and observability must never be the thing that breaks extraction.
+    """
+    try:
+        usage = getattr(resp, "usage", None)
+        return (getattr(usage, "prompt_tokens", None),
+                getattr(usage, "completion_tokens", None))
+    except Exception:
+        return None, None
+
+
 def extract_lead_info(history: list) -> dict:
     """Extract structured lead info from conversation history.
     Tries OpenAI, then falls back to Gemini so lead capture survives an
     OpenAI outage or quota exhaustion."""
+    started = time.time()
     if len(history) < 3:
+        _record_lead_extraction(EXTRACTION_SKIPPED, started=started)
         return {}
     conv = ""
     try:
@@ -937,8 +1034,20 @@ def extract_lead_info(history: list) -> dict:
         )
         raw = resp.choices[0].message.content.strip()
         match = re.search(r'\{.*\}', raw, re.DOTALL)
-        return json.loads(match.group()) if match else {}
+        # Same expression as before, bound to a name so the outcome can be
+        # recorded before returning it. `if match else {}` still returns {}
+        # WITHOUT trying Gemini — that control flow is unchanged.
+        result = json.loads(match.group()) if match else {}
+        tin, tout = _usage_of(resp)
+        _record_lead_extraction(
+            EXTRACTION_SUCCESS if result else EXTRACTION_EMPTY,
+            provider="openai", model="gpt-4o-mini", fields=result,
+            started=started, tokens_in=tin, tokens_out=tout)
+        return result
     except Exception as e:
+        _record_lead_extraction(_extraction_failure_kind(e), provider="openai",
+                                model="gpt-4o-mini", started=started,
+                                error=type(e).__name__)
         print(f"extract_lead_info error (openai): {e}")
 
     # Fallback to Gemini so lead capture, scoring and alerts keep working even
@@ -951,9 +1060,22 @@ def extract_lead_info(history: list) -> dict:
         raw = generate_reply_gemini(gem_msgs)
         match = re.search(r'\{.*\}', raw or "", re.DOTALL)
         if match:
+            result = json.loads(match.group())
+            _record_lead_extraction(
+                EXTRACTION_SUCCESS if result else EXTRACTION_EMPTY,
+                provider="gemini", model="gemini", fields=result,
+                started=started)
             print("↪️ lead extraction via Gemini fallback")
-            return json.loads(match.group())
+            return result
+        # Fell through: Gemini answered but carried no JSON object. Recorded
+        # as EMPTY rather than a failure — the provider worked, the
+        # conversation simply yielded nothing extractable.
+        _record_lead_extraction(EXTRACTION_EMPTY, provider="gemini",
+                                model="gemini", started=started)
     except Exception as e:
+        _record_lead_extraction(_extraction_failure_kind(e), provider="gemini",
+                                model="gemini", started=started,
+                                error=type(e).__name__)
         print(f"extract_lead_info error (gemini): {e}")
     return {}
 
