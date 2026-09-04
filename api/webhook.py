@@ -621,28 +621,57 @@ def upsert_lead(phone: str, data: dict):
     Asthra CRM's clients table so every captured lead reaches the CRM."""
     if not data:
         return
+    # THE RESPONSE IS CHECKED. requests.post() does NOT raise on 4xx/5xx — it
+    # returns a Response — so the previous `try: post(); print("lead upserted")`
+    # announced success for every rejected write. Production ran this 17 times
+    # (17 crm_capture_self audit rows, matching 17 declared_service_interest
+    # claims) and stored 0 rows, logging success each time. The status code
+    # that would have identified the cause was discarded on every one.
+    #
+    # Same discipline sync_lead_to_crm already applies three times
+    # (`if not r.ok: print(...)`); upsert_lead was the one writer that omitted it.
+    stored = False
     try:
-        requests.post(
+        r = requests.post(
             f"{SUPABASE_URL}/rest/v1/leads",
             headers=_supa_headers("resolution=merge-duplicates"),
             json={"phone": phone, **data},
             timeout=5,
         )
-        print(f"lead upserted: {data}")
+        stored = r.ok
+        if stored:
+            # NO LEAD PAYLOAD. The old line printed the whole dict — name,
+            # company, budget, city — into Vercel logs. The field COUNT says
+            # a write happened and how much travelled, and identifies nobody.
+            print(f"LEAD_UPSERT_OK phone=...{phone[-4:]} fields={len(data)}")
+        else:
+            # STATUS ONLY, never r.text: a PostgREST error body echoes the
+            # offending row, which for this table is exactly the lead PII the
+            # success log was just cleaned of. The status is what distinguishes
+            # an RLS denial from a constraint violation, and it is enough.
+            print(f"LEAD_UPSERT_FAILED phone=...{phone[-4:]} "
+                  f"status={r.status_code}")
     except Exception as e:
+        # Transport failure (timeout, DNS, connection reset). Unchanged, and
+        # already correct: the exception skips the success print rather than
+        # claiming a write that never left the process.
         print(f"upsert_lead error: {e}")
     # Routed through the registry (Slice 1C: no direct tool_*() execution).
     # crm_capture_self, not crm_sync_lead: the subject here is the conversing
     # customer recording their OWN details, which must stay reachable for a
     # CLIENT principal without relaxing the STAFF gate on the admin sync tool.
     # H1, same pattern: a denial here silently drops the lead out of the CRM.
-    # The lead IS still in the `leads` table (upserted just above), so this is
-    # recoverable rather than lost — a greppable marker plus the audit row is
-    # proportionate, where a WhatsApp alert per sync would be noise.
+    #
+    # `stored` is reported because the old claim here — "the lead IS still in
+    # the leads table, so this is recoverable rather than lost" — is only true
+    # when the upsert actually succeeded, and production has been the case
+    # where it did not. stored=False alongside a CRM failure means the lead
+    # reached neither store and is genuinely gone.
     synced, why = invoke_tool(phone, "crm_capture_self",
                               _fallback=sync_lead_to_crm, data=data)
     if not synced:
-        print(f"LEAD_CRM_SYNC_FAILED phone=...{phone[-4:]} reason={why}")
+        print(f"LEAD_CRM_SYNC_FAILED phone=...{phone[-4:]} reason={why} "
+              f"stored={stored}")
 
 def is_duplicate_webhook(ctx: dict, text: str) -> bool:
     """Meta retries webhooks — identical text within 60s is a retry, not a person."""
