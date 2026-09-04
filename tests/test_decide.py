@@ -179,11 +179,21 @@ class GoalRecognition(unittest.TestCase):
             self.assertNotIn(banned, code)
 
     def test_no_new_predicates_or_verticals_were_added(self):
-        """This slice must use only the existing goal — no transformer/real
-        estate goal, no new predicate, per the task's explicit scope limit."""
+        """No new VERTICAL. The decide slice must not grow industry
+        vocabulary — no second transformer/real-estate goal, no new predicate.
+
+        `business_month_review` is not a vertical: it is BUSINESS-scoped
+        (about Asthra itself, not a counterparty) and reuses the already
+        registered biz.pipeline predicate. DECIDE never reaches it — the
+        assertion below in test_decide_is_party_scoped proves decide's own
+        goal is still PARTY-scoped.
+        """
         self.assertEqual(sorted(goals.known_ids()),
-                         ["real_estate_enquiry", "social_media_enquiry",
-                          "transformer_quotation"])
+                         ["business_month_review", "real_estate_enquiry",
+                          "social_media_enquiry", "transformer_quotation"])
+        for gid in ("real_estate_enquiry", "social_media_enquiry",
+                    "transformer_quotation"):
+            self.assertEqual(goals.lookup(gid)["scope"], cx.PARTY)
 
 
 # ── 3. CONTEXT ───────────────────────────────────────────────────────────

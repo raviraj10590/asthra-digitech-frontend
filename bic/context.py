@@ -78,6 +78,31 @@ _CLASS_TO_VERDICT = {
     REFUSED: REFUSE,
 }
 
+# ── Subject scope (§2.2 "whose context is this?") ──────────────────────────
+# A packet has always carried a `subject`. It has never carried what KIND of
+# thing that subject is, and the two questions the Brain must answer are not
+# the same question:
+#
+#   PARTY     "why is this customer's engagement low?"  → about a counterparty
+#   BUSINESS  "what should I focus on this month?"      → about Asthra itself
+#
+# Forcing the second into the first is what this adds scope to prevent. There
+# is no fake party for the business: the subject of a BUSINESS packet is the
+# tenant's own ORGANIZATION party, which 2B already models and
+# bic/pipeline_evidence.py already resolves — this introduces no second
+# identity concept.
+#
+# PARTY is the default everywhere, so every goal, packet and caller that
+# existed before this constant behaves exactly as it did.
+PARTY, BUSINESS = "PARTY", "BUSINESS"
+SCOPES = (PARTY, BUSINESS)
+
+# The 2B party kind a BUSINESS-scoped subject must be, and the value the 2A
+# registry's `applies_to` must contain for a predicate to be assertable about
+# it. Named here so the compatibility rule is one constant, not a literal
+# repeated at each comparison.
+BUSINESS_PARTY_KIND = "ORGANIZATION"
+
 # ── Assembly outcome, kept SEPARATE from the verdict ───────────────────────
 # A packet that could not be assembled and a packet that was assembled and
 # found wanting are different situations. Collapsing them would make an
@@ -169,17 +194,26 @@ def slot(name: str, predicate: str, absent_class: str = OBTAINABLE_BY_ASKING,
 
 
 def goal(goal_id: str, risk_tier: int, required_slots: list,
-         description: str = "") -> dict:
-    """A business task, with what it needs and what it risks.
+         description: str = "", scope: str = PARTY) -> dict:
+    """A business task, with what it needs, what it risks, and who it is about.
 
     `risk_tier` is what makes sufficiency a property of the (evidence, action)
     pair: the SAME evidence yields different verdicts for a tier-1 answer and
     a tier-4 payment (§4.4, criterion 17).
+
+    `scope` is goal DATA in exactly the way risk_tier is: the author of the
+    goal knows whether it asks about a counterparty or about the business,
+    and nothing downstream can infer it from free text without letting the
+    phrasing of a message decide which evidence is admissible. Defaults to
+    PARTY, so every goal written before scope existed keeps its meaning.
     """
     if risk_tier not in RISK_CONFIDENCE_FLOOR:
         raise ContextError(f"risk_tier must be 1-4, got {risk_tier!r}")
+    if scope not in SCOPES:
+        raise ContextError(f"scope must be one of {SCOPES}, got {scope!r}")
     return {"goal_id": goal_id, "risk_tier": int(risk_tier),
-            "description": description, "required_slots": list(required_slots)}
+            "description": description, "required_slots": list(required_slots),
+            "scope": scope}
 
 
 # ── Assembly (§3.1) ────────────────────────────────────────────────────────
@@ -187,7 +221,8 @@ def goal(goal_id: str, risk_tier: int, required_slots: list,
 def assemble(tenant_id: str, request: str, principal, goal_def: dict,
              subject: str, *, describe=None, as_of=None, turn_ref=None,
              policies=None, constraints=None, commitments=None,
-             open_risks=None, evidence_budget=None, descriptor=None) -> dict:
+             open_risks=None, evidence_budget=None, descriptor=None,
+             applies_to=None) -> dict:
     """Build a Business Context Packet, then freeze it.
 
     ORDER IS THE CONTRACT (§3.2). Identity is resolved by the CALLER and
@@ -203,6 +238,14 @@ def assemble(tenant_id: str, request: str, principal, goal_def: dict,
     may not invoke retrieval, the capability is never called — filtering after
     retrieval means the data was fetched, and a filter is one bug away from
     being bypassed.
+
+    `applies_to` is injected for the same reason `describe` is: deciding
+    whether a predicate may describe this subject needs the 2A registry, and
+    this module must not be able to reach storage. It is
+    `callable(predicate_ref) -> list[str] | None` returning the concept's
+    registered `applies_to`. Injected but NOT optional for BUSINESS scope —
+    see _out_of_scope: silently skipping the check would let a party-scoped
+    predicate become business-scoped, which is the whole failure this guards.
     """
     if not isinstance(goal_def, dict) or "required_slots" not in goal_def:
         raise ContextError("goal_def must come from context.goal()")
@@ -231,8 +274,21 @@ def assemble(tenant_id: str, request: str, principal, goal_def: dict,
             return _finish(packet, goal_def, tier, denied_reason=reason)
 
     # ④ RETRIEVE — one capability call, gated and audited by the capability.
-    predicates = [s["predicate"] for s in goal_def["required_slots"]]
+    #
+    # SCOPE FILTERS THE PLAN, exactly as authorization does above: a predicate
+    # that cannot describe this kind of subject is never requested, rather
+    # than requested and then discarded. Same reasoning as §3.2's rule for
+    # authority — filtering after retrieval means the data was fetched, and a
+    # filter is one bug away from being bypassed.
+    out_of_scope = _out_of_scope(goal_def, applies_to)
+    predicates = [s["predicate"] for s in goal_def["required_slots"]
+                  if s["predicate"] not in out_of_scope]
     packet["epistemic"]["coverage"]["planned"] = list(predicates)
+    packet["epistemic"]["coverage"]["out_of_scope"] = sorted(out_of_scope)
+    for ref in sorted(out_of_scope):
+        packet["epistemic"]["degradation"].append(
+            {"capability": "knowledge.describe", "reason": "out_of_scope",
+             "detail": f"{ref} does not apply to a {packet['scope']} subject"})
     evidence_envelope = None
     if describe is not None:
         try:
@@ -262,6 +318,42 @@ def assemble(tenant_id: str, request: str, principal, goal_def: dict,
     return _finish(packet, goal_def, tier)
 
 
+def _out_of_scope(goal_def, applies_to) -> set:
+    """Predicates the goal requires that cannot describe this kind of subject.
+
+    THE RULE IS THE REGISTRY'S OWN, NOT A NEW ONE. 2A already records
+    `applies_to` per concept, and knowledge._concepts_for already honours it
+    when it consults the whole vocabulary. It does NOT honour it when the
+    caller names predicates explicitly — which is every call assembly makes —
+    so a business goal naming a PERSON-only predicate, or a party goal naming
+    a business-only one, would retrieve it without complaint. This closes
+    that gap in 2H rather than changing 2G's contract for every other caller.
+
+    An empty or absent `applies_to` means "anything", matching
+    _concepts_for's own reading of it.
+
+    PARTY scope does not filter. A party subject may be a PERSON or an
+    ORGANIZATION (2B allows a firm to be a counterparty), and assembly is
+    handed an opaque knowledge_id whose kind it cannot know without a lookup
+    it must not perform. Constraining PARTY here would reject legitimate
+    organization-counterparty goals on a guess. BUSINESS scope is different:
+    its subject kind is fixed by construction, so the check is exact.
+    """
+    if goal_def.get("scope", PARTY) != BUSINESS:
+        return set()
+    if applies_to is None:
+        raise ContextError(
+            "a BUSINESS-scoped goal requires the `applies_to` resolver: "
+            "without it a party-scoped predicate would silently become "
+            "business-scoped, which is the failure scope exists to prevent")
+    blocked = set()
+    for s in goal_def["required_slots"]:
+        kinds = applies_to(s["predicate"])
+        if kinds and BUSINESS_PARTY_KIND not in kinds:
+            blocked.add(s["predicate"])
+    return blocked
+
+
 def _skeleton(tenant_id, request, principal, goal_def, subject, started,
               as_of, turn_ref) -> dict:
     role = getattr(principal, "role", None)
@@ -282,6 +374,12 @@ def _skeleton(tenant_id, request, principal, goal_def, subject, started,
         # (§8.1) must be self-describing, and an opaque knowledge_id is the
         # right handle: meaningless by design (2B V3), so it carries no PII.
         "subject": subject,
+        # WHAT KIND OF THING THE SUBJECT IS. `subject` alone is an opaque
+        # knowledge_id: a stored, replayed packet could not say whether it
+        # described a customer or the business, and those two readings of the
+        # same id support completely different decisions. Declared by the
+        # goal, carried here so the packet stays self-describing (§8.1).
+        "scope": goal_def.get("scope", PARTY),
         "assembly_state": A_OK,
         # ② QUESTION
         "question": {
@@ -317,7 +415,12 @@ def _skeleton(tenant_id, request, principal, goal_def, subject, started,
             "conflicts": [], "missing": [],
             "freshness": {"verdict": None, "oldest_observed_at": None},
             "coverage": {"planned": [], "retrieved": [], "absent": [],
-                         "unavailable": [], "unregistered": []},
+                         "unavailable": [], "unregistered": [],
+                         # Required by the goal, never requested, because the
+                         # predicate cannot describe this scope's subject.
+                         # Distinct from `absent` (we looked and found none)
+                         # and from `unregistered` (no such predicate).
+                         "out_of_scope": []},
             "degradation": [], "sufficiency": None, "evidence_refs": [],
             "pruning_trace": [],
         },
@@ -484,6 +587,7 @@ def _detect_missing(packet, goal_def, denied_reason) -> list:
     conflicted = {c["predicate"] for c in packet["epistemic"]["conflicts"]}
     unreadable = set(packet["epistemic"]["coverage"].get("unavailable") or [])
     unregistered = set(packet["epistemic"]["coverage"].get("unregistered") or [])
+    out_of_scope = set(packet["epistemic"]["coverage"].get("out_of_scope") or [])
 
     missing = []
     for s in goal_def["required_slots"]:
@@ -498,6 +602,19 @@ def _detect_missing(packet, goal_def, denied_reason) -> list:
         if pred in unreadable:
             missing.append(_gap(s, UNOBTAINABLE_NOW,
                                 "source unreachable during assembly"))
+            continue
+        if pred in out_of_scope:
+            # UNKNOWABLE for the same reason `unregistered` is: no answer
+            # anyone could give would be recordable. The predicate exists and
+            # is perfectly askable — just not ABOUT this subject. Asking the
+            # owner for a customer's declared interest when the question was
+            # about the business would be a nonsense question, so the gate
+            # must not classify this as OBTAINABLE_BY_ASKING.
+            missing.append(_gap(
+                s, UNKNOWABLE,
+                "predicate does not apply to a "
+                f"{packet.get('scope')}-scoped subject, so no fact of this "
+                "kind can exist for it"))
             continue
         if pred in unregistered:
             # UNKNOWABLE, not "ask the customer": the vocabulary to hold this

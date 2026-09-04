@@ -30,12 +30,15 @@ is what makes the SAME customer fact sufficient to answer an enquiry and
 insufficient to price a transformer.
 """
 
-from .context import (OBTAINABLE_BY_ASKING, OBTAINABLE_BY_RETRIEVAL,
+from .context import (BUSINESS, OBTAINABLE_BY_ASKING, OBTAINABLE_BY_RETRIEVAL,
                       goal, slot)
 
 # Predicates already live and registered in production (2A).
 INTEREST = "core.party.declared_service_interest@1"
 FIRST_SEEN = "core.party.first_seen_at@1"
+# The first BUSINESS-scoped predicate — about Asthra, not about a
+# counterparty. Registered by 20260827000020 with applies_to ORGANIZATION.
+NEW_ENQUIRIES = "biz.pipeline.new_enquiries_per_month@1"
 
 # ── The registry ───────────────────────────────────────────────────────────
 # NOTE ON THE VERTICAL PREDICATES BELOW. `mfg.*` and `realestate.*` are NOT
@@ -80,6 +83,30 @@ GOALS = {
          slot("locality", "realestate.enquiry.locality@1",
               OBTAINABLE_BY_ASKING)],
         "Qualify a real-estate enquiry"),
+
+    # ── The first BUSINESS-scoped goal ─────────────────────────────────────
+    # "What should I focus on this month?" — a question about Asthra, not
+    # about a counterparty. It exists to ASSEMBLE AND ASSESS, nothing more:
+    # no recommendation is produced anywhere in this slice, so the goal
+    # deliberately declares no completion condition and no goal_type. Those
+    # are 3B lifecycle concerns and adding them here would claim a goal that
+    # can be worked, which nothing yet can do.
+    #
+    # TIER 2, not 1. The owner acts on the answer — a wrong monthly figure
+    # redirects real spend — so it clears the 0.60 floor rather than tier 1's
+    # 0.50. Deliberately NOT tier 3: that would demand 0.80, above the 0.70
+    # cap a tier-3 derived fact can ever carry (2C §6), so the goal could
+    # never be satisfiable by its own evidence however healthy the pipeline.
+    #
+    # OBTAINABLE_BY_RETRIEVAL, not ASKING: nobody can answer "how many new
+    # enquiries" by being asked — the number is measured from first_seen_at
+    # by the daily producer. If it is missing the fix is a refresh, not a
+    # conversation, and the gate should say RETRIEVE.
+    "business_month_review": goal(
+        "business_month_review", 2,
+        [slot("new_enquiries", NEW_ENQUIRIES, OBTAINABLE_BY_RETRIEVAL)],
+        "Assemble what the Brain knows about the business this month",
+        scope=BUSINESS),
 
     "transformer_quotation": goal(
         "transformer_quotation", 4,

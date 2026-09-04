@@ -63,7 +63,8 @@ try:
                      outcome_producers as bic_outcome_producers,
                      owner_context as bic_owner_context, party as bic_party,
                      pipeline_evidence as bic_pipeline_evidence,
-                     policy as bic_policy, replay as bic_replay,
+                     policy as bic_policy, registry as bic_registry,
+                     replay as bic_replay,
                      tools as bic_tools, webhook_events as bic_events,
                      message_ref as bic_message_ref)
     from adapters import whatsapp as wa_adapter
@@ -2075,6 +2076,53 @@ def tool_suffice(sender: str, goal_id: str = "", timeout: float = 5, **_) -> str
         return f"⚠️ UNAVAILABLE — couldn't assemble context ({type(e).__name__})."
 
     return render_sufficiency(packet, context)
+
+
+def assemble_business_context(request: str, principal=None, *, as_of=None,
+                              goal_id="business_month_review"):
+    """BUSINESS-scoped 2H assembly for an OWNER question about the business.
+
+    THE SMALLEST SAFE INTEGRATION POINT, AND DELIBERATELY NOT MORE. It
+    assembles a packet and returns it with its sufficiency verdict. It makes
+    NO recommendation, calls NO model, decides nothing and executes nothing —
+    "what should I focus on?" is answerable only by a DECIDE stage that does
+    not exist yet, and producing advice here would be inventing one.
+
+    Returns (packet, None) or (None, reason) — reason is a short machine
+    string, never an exception body, because a store error can echo an
+    identifier.
+
+    THE SUBJECT IS READ, NEVER CREATED. find_business_subject returns None
+    when the evidence producer has never run, and that is reported as genuine
+    absence rather than resolved into a freshly minted party — a question
+    must not have identity side effects.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return None, "not_configured"
+
+    goal_def = bic_goals.lookup(goal_id)
+    if goal_def is None:
+        return None, "unknown_goal"
+
+    tenant = bic_config.DEFAULT_TENANT_ID
+    try:
+        subject = bic_pipeline_evidence.find_business_subject(tenant)
+    except Exception as e:
+        return None, f"identity_unavailable:{type(e).__name__}"
+    if not subject:
+        return None, "no_business_subject"
+
+    try:
+        packet = bic_context.assemble(
+            tenant, request, principal, goal_def, subject,
+            describe=bic_knowledge.describe,
+            # The 2A registry decides which predicates may describe the
+            # business. Injected, not imported by 2H — see context.assemble.
+            applies_to=bic_registry.applies_to_ref,
+            as_of=as_of)
+    except Exception as e:
+        return None, f"assembly_failed:{type(e).__name__}"
+    return packet, None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

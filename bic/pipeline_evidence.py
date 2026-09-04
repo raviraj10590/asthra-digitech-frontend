@@ -137,6 +137,23 @@ def business_subject(tenant_id: str = None) -> str:
                                    kind=party.ORGANIZATION)
 
 
+def find_business_subject(tenant_id: str = None) -> Optional[str]:
+    """The business party if it already exists, else None. NEVER creates one.
+
+    business_subject() above calls party.resolve_or_create, which WRITES the
+    first time it is ever called — correct for the producer, which is
+    asserting a fact and must have somewhere to put it. A READER must not be
+    able to mint an identity as a side effect of a question, so context
+    assembly and the OWNER read path use this instead.
+
+    None means the producer has never run for this tenant. That is genuine
+    absence of evidence and the sufficiency gate should say so — not an
+    outage, and not a reason to fabricate a party.
+    """
+    tenant = tenant_id or config.DEFAULT_TENANT_ID
+    return party.find_by_identifier(tenant, SELF_CHANNEL, tenant)
+
+
 def count_new_enquiries(tenant_id: str = None, *, at=None) -> dict:
     """Deterministic count for the calendar month containing `at`.
 

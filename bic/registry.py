@@ -199,6 +199,24 @@ def lookup_ref(ref: str) -> Optional[dict]:
     return _fetch(*parse_ref(ref))
 
 
+def applies_to_ref(ref: str) -> Optional[list]:
+    """The party kinds this concept may describe, or None if unregistered.
+
+    Read-only accessor, added so 2H can enforce subject scope without
+    importing a db primitive itself (bic/context.py deliberately cannot reach
+    storage). Returns the registry's own `applies_to` verbatim — an empty
+    list keeps its existing meaning of "anything", exactly as
+    knowledge._concepts_for reads it.
+
+    None and [] are deliberately NOT the same answer: None means the
+    predicate is not registered at all, which the sufficiency gate already
+    classifies separately (UNKNOWABLE, "no fact of this kind can be recorded
+    yet") and must not be collapsed into "applies to anything".
+    """
+    row = lookup_ref(ref)
+    return None if row is None else (row.get("applies_to") or [])
+
+
 def active_concepts() -> list:
     """Every ACTIVE concept, newest version first.
 

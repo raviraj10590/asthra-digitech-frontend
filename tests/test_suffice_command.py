@@ -157,10 +157,17 @@ class Goals(Base):
         self.assertIn("risk tier 4", out)
         self.assertIn("human approval required", out)
 
-    def test_all_three_are_registered(self):
+    def test_all_registered_goals(self):
+        """The goal inventory, asserted whole so a new one is a conscious act.
+
+        `business_month_review` is the first BUSINESS-scoped goal — about
+        Asthra rather than a counterparty. It is listed here because
+        known_ids() is the whole registry; #suffice itself still resolves a
+        CUSTOMER party and is unaffected by it.
+        """
         self.assertEqual(gl.known_ids(),
-                         ["real_estate_enquiry", "social_media_enquiry",
-                          "transformer_quotation"])
+                         ["business_month_review", "real_estate_enquiry",
+                          "social_media_enquiry", "transformer_quotation"])
 
     def test_the_same_evidence_gives_different_verdicts_by_goal(self):
         """§4.4 — sufficiency is a property of the (evidence, action) pair."""
