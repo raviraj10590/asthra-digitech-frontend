@@ -2964,17 +2964,36 @@ def _reasoning_brief(result: dict, question: str) -> list:
     if not result["diagnoses"]:
         lines.append("- (none)")
 
+    lines.append("\nHYPOTHESES (CANDIDATES ONLY — never state these as fact):")
+    for h in result.get("hypotheses") or []:
+        lines.append(f"- [{h['epistemic']}] {h['statement']}. "
+                     f"{'Testable by: ' + ', '.join(h['refutable_by']) if h['testable'] else h['note']}")
+    if not result.get("hypotheses"):
+        lines.append("- (none — nothing has moved, so there is nothing to explain)")
+
     lines.append("\nPRIORITIES:")
     for pr in result["priorities"]:
         lines.append(f"- [{pr['kind']}] {pr['priority']} — {pr['reason']}")
 
+    plan = result.get("decision_plan")
+    if plan:
+        lines.append("\nDECISION UNDER CONSIDERATION (advisory, not authorised):")
+        lines.append(f"- question: {plan['decision_question']}")
+        lines.append(f"- option:   [{plan['option_kind']}] {plan['recommended_option']}")
+        lines.append(f"- reverse if: {plan['reversal_condition']}")
+
     lines.append(
-        "\nRULES: State only the numbers above, verbatim. Do not compute, "
+        "\nRULES. State only the numbers above, verbatim. Do not compute, "
         "estimate or forecast any other figure. Do not assert a CAUSE for any "
         "movement — no evidence establishes one. Do not mention revenue, "
         "conversion, pipeline value, capacity or attribution as if measured. "
-        "Do not recommend spending changes. Present unresolved things as "
-        "unresolved. Three to five short sentences.")
+        "Do not recommend spending changes. "
+        "\nUSE THIS LANGUAGE FOR EACH CATEGORY: FACT -> \"the evidence "
+        "shows\"; DERIVED -> \"based on these observations\"; HYPOTHESIS -> "
+        "\"a possible explanation is\"; UNKNOWN -> \"we cannot currently "
+        "determine\"; CONTRADICTION -> \"the available evidence conflicts\". "
+        "Never write \"this caused\". Never tell the owner to increase "
+        "spending. Three to five short sentences.")
     return [{"role": "system", "content": "\n".join(lines)},
             {"role": "user", "content": question}]
 
@@ -3009,7 +3028,8 @@ def tool_business_reasoning(sender: str, question: str = "", timeout: float = 25
     history = _reasoning_history(bic_config.DEFAULT_TENANT_ID, subject,
                                  [p for p in predicates if p])
     try:
-        result = bic_reasoning.reason(packet, history=history)
+        result = bic_reasoning.reason(packet, history=history,
+                                      question=question or "")
     except bic_reasoning.ReasoningError as e:
         print(f"business_reasoning refused: {type(e).__name__}")
         return "⚠️ Business reasoning could not run on this context."
@@ -3085,10 +3105,31 @@ def render_business_reasoning(result: dict, proposal, outcome,
                          f"\n  Objective: {r['expected_objective']}"
                          f"\n  Would change if: {r['would_change_if']}")
 
+    if result.get("hypotheses"):
+        lines.append("\n💭 POSSIBLE EXPLANATIONS (hypotheses — none established)")
+        for h in result["hypotheses"][:4]:
+            tail = (f"testable via {', '.join(h['refutable_by'])}"
+                    if h["testable"] else h["note"])
+            lines.append(f"• {h['statement']}\n  {tail}")
+
     if sit["unknowns"]:
         lines.append("\n🚫 CANNOT BE ASSESSED")
         for u in sit["unknowns"]:
             lines.append(f"• {u['predicate']} — {u['why']}")
+
+    plan = result.get("decision_plan")
+    if plan:
+        lines.append("\n🧭 DECISION PLAN (advisory)")
+        lines.append(f"• Question: {plan['decision_question']}")
+        lines.append(f"• Option:   [{plan['option_kind']}] "
+                     f"{plan['recommended_option']}")
+        lines.append(f"• Reverse if: {plan['reversal_condition']}")
+
+    cf = (result.get("recommendations") or [{}])[0].get("counterfactual")
+    if cf and cf.get("would_change_if"):
+        lines.append("\n🔄 WHAT WOULD CHANGE THIS")
+        for w in cf["would_change_if"][:3]:
+            lines.append(f"• {w}")
 
     if proposal:
         lines.append(f"\n🗣 {proposal}")
@@ -4192,6 +4233,17 @@ _BUSINESS_TOPIC = (
 _SITUATION_MARKERS = ("happening", "going on", "situation", "state of",
                       "ಏನಾಗುತ್ತಿದೆ")
 
+# §16 adds two more OWNER question shapes, and both are already answered by
+# the same reasoning state — "what would change your mind" reads the
+# counterfactual, "are you sure" reads confidence plus supporting and
+# contradicting evidence. They route to the SAME tool rather than gaining
+# their own, because a second entry point would mean a second place where the
+# epistemic rules have to be enforced.
+_CONFIDENCE_MARKERS = (
+    "change your mind", "change our mind", "how sure", "are you sure",
+    "how confident", "confidence", "certain", "convince", "prove it",
+)
+
 # Strategic asks that are unambiguously about the business for an OWNER even
 # without a topic word. An explicit phrase list, not a rule — "what should I
 # do about my phone" must NOT match.
@@ -4216,10 +4268,15 @@ def owner_reasoning_query(text: str) -> bool:
         return False
     if any(p in low for p in _STRATEGIC_PHRASES):
         return True
+    # "What would change your mind?" carries no business topic word at all,
+    # yet it is unambiguously a follow-up about the reasoning just given.
+    if any(m in low for m in _CONFIDENCE_MARKERS):
+        return True
     if not any(t in low for t in _BUSINESS_TOPIC):
         return False
     return (any(m in low for m in _REASONING_MARKERS)
-            or any(m in low for m in _SITUATION_MARKERS))
+            or any(m in low for m in _SITUATION_MARKERS)
+            or any(m in low for m in _CONFIDENCE_MARKERS))
 
 
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
