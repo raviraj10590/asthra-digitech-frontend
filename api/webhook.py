@@ -132,6 +132,46 @@ DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL      = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip()
 DEEPSEEK_BASE_URL   = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 DEEPSEEK_MAX_TOKENS = int(os.environ.get("DEEPSEEK_MAX_TOKENS", "1200"))
+
+# ── PROVIDER TIMEOUTS — the tail, bounded ──────────────────────────────────
+# DeepSeek and OpenAI were constructed with NO timeout, so both inherited the
+# OpenAI SDK default of ~10 MINUTES. Gemini already passes timeout=15. The
+# asymmetry is why a slow DeepSeek could hold a WhatsApp turn open for 73s
+# while Gemini could not: measured in production, the provider phase reached
+# p90 44.48s, p95 49.50s, max 73.49s.
+#
+# CHOSEN FROM THE MEASURED DISTRIBUTION, NOT PICKED. Successful DeepSeek calls
+# run p50 24.16s, p75 32.67s, p90 41.88s, max 52.05s — it is a reasoning model
+# and it is genuinely slow. 35s sits just above p75, so roughly three quarters
+# of successful calls are untouched; simulated against the real distribution it
+# caps the provider phase at 40.72s instead of 73.49s, a 45% cut in the worst
+# case, while reclassifying 21.5% of calls into the existing Gemini fallback
+# (measured 5.72s) where they still get an answer.
+#
+# A TIMEOUT CANNOT FIX THE MEDIAN, and pretending otherwise would be the wrong
+# lesson to leave here: DeepSeek's own median is 24s, so no finite timeout
+# brings a turn under Meta's window. This bounds the tail. Making the median
+# fast is a model or acknowledgement-timing decision, not this one.
+DEEPSEEK_TIMEOUT_SECONDS = float(os.environ.get("DEEPSEEK_TIMEOUT_SECONDS", "35"))
+
+# No successful OpenAI sample exists in the current window — every attempt has
+# been a 429, failing fast at p50 2.23s. So this is set generously rather than
+# fitted: above Gemini's proven 15s for comparable calls, and far below the
+# pathological range. Every OpenAI call in this codebase is small (extraction
+# 380 tokens, consults 220-320, replies 900).
+OPENAI_TIMEOUT_SECONDS = float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "20"))
+
+
+def _is_timeout(exc) -> bool:
+    """True when an exception represents a provider timeout.
+
+    Matched by TYPE NAME rather than by importing httpx/openai error classes:
+    the SDKs raise several distinct timeout types across versions, this module
+    imports openai lazily on purpose, and a missing import must never turn a
+    classification helper into an ImportError on the customer path.
+    """
+    name = type(exc).__name__.lower()
+    return "timeout" in name or "timedout" in name
 # 400 WAS TOO SMALL FOR KANNADA, and it showed. Kannada script costs several
 # tokens per character, so a 400-token ceiling cut roughly one customer reply
 # in six off mid-sentence — measured in production: 18 of 104 customer-facing
@@ -177,7 +217,10 @@ def get_openai():
     # Lazy import — the openai package costs ~0.5-1.5s at import time, which was
     # paid on EVERY cold start even for messages that never call the AI.
     from openai import OpenAI
-    return OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+    # BOUNDED. Without this the SDK default (~10 min) applies and one slow
+    # call holds the whole WhatsApp turn open.
+    return OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""),
+                  timeout=OPENAI_TIMEOUT_SECONDS)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1532,7 +1575,15 @@ def _call_openai(messages: list, max_tokens: int = None) -> str:
                   f"— structured output will not parse")
         return choice.message.content.strip()
     except Exception as e:
-        print(f"openai error: {e}")
+        # TYPE ONLY on timeout: a provider error message can carry the
+        # request URL and echo request content. The type is what
+        # distinguishes "too slow" from "rejected", which is the whole
+        # diagnostic question here.
+        if _is_timeout(e):
+            print(f"openai TIMEOUT after {OPENAI_TIMEOUT_SECONDS}s "
+                  f"({type(e).__name__}) — falling through to the next provider")
+        else:
+            print(f"openai error: {e}")
         return ""
 
 def _call_deepseek(messages: list, max_tokens: int = None) -> str:
@@ -1542,7 +1593,8 @@ def _call_deepseek(messages: list, max_tokens: int = None) -> str:
         return ""
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL,
+                        timeout=DEEPSEEK_TIMEOUT_SECONDS)
         budget = max_tokens or DEEPSEEK_MAX_TOKENS
         resp = client.chat.completions.create(
             model=DEEPSEEK_MODEL, messages=messages,
@@ -1562,7 +1614,15 @@ def _call_deepseek(messages: list, max_tokens: int = None) -> str:
             return ""
         return content
     except Exception as e:
-        print(f"deepseek error: {e}")
+        # TYPE ONLY on timeout: a provider error message can carry the
+        # request URL and echo request content. The type is what
+        # distinguishes "too slow" from "rejected", which is the whole
+        # diagnostic question here.
+        if _is_timeout(e):
+            print(f"deepseek TIMEOUT after {DEEPSEEK_TIMEOUT_SECONDS}s "
+                  f"({type(e).__name__}) — falling through to the next provider")
+        else:
+            print(f"deepseek error: {e}")
         return ""
 
 # Provider registry — name → callable. Adding a provider means one entry here
