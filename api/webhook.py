@@ -1714,8 +1714,23 @@ def _crm_headers():
 
 def log_reply_to_crm(phone: str, body: str):
     """Mirror an outbound bot reply into the Asthra CRM's whatsapp_messages.
+
+    ONE LEGITIMATE CALLER: send_text. This writes direction="outbound",
+    status="sent" — a claim that the customer received this text. Anything
+    passed here that was NOT sent to the customer is a false record at best,
+    and reaches the customer at worst.
+
+    Three callers once passed internal notes through it: a lead summary
+    literally labelled "not sent to customer", a quotation task carrying the
+    customer's budget, and a follow-up task. All three were removed; the owner
+    receives that material through notify_owner instead. If an internal note
+    ever needs to live in the CRM, it needs a representation the CRM treats as
+    internal — not this one.
+
     Fire-and-forget: any failure is printed and swallowed — CRM logging must
-    never delay or break a customer reply."""
+    never delay or break a customer reply. That same property is why a wrong
+    `direction` here would fail silently.
+    """
     if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
         return
     try:
@@ -4553,14 +4568,16 @@ def run_workflows(sender: str, lead: dict, ctx: dict):
         if actions.get("quotation_requested") and once("WF_QUOTE"):
             svc = lead.get("service_needed") or "—"
             bud = lead.get("budget") or "not stated"
+            # Owner only. The CRM mirror was removed with the lead note above
+            # and for the same reason — it wrote an internal task into the
+            # customer's message stream, and this one echoed the customer's
+            # stated BUDGET back at them.
             notify_owner(f"🧾 QUOTATION request\nwa.me/{sender}\nService: {svc} · Budget: {bud}\n👉 Prepare and send a quote.")
-            log_reply_to_crm(sender, f"🤖 Task: prepare quotation — {svc} (budget {bud})")
 
         # 5. Create a CRM task (mirrored as an internal note) + 7. schedule follow-up
         fdate = actions.get("followup_date")
         if fdate and once("WF_FOLLOWUP"):
             notify_owner(f"⏰ FOLLOW-UP scheduled\nwa.me/{sender} — {fdate}\n👉 Reach out on that date.")
-            log_reply_to_crm(sender, f"🤖 Task: follow up with this lead on {fdate}")
 
         # 9. Detect unhappy customer → escalate immediately
         if actions.get("unhappy") and once("WF_UNHAPPY"):
@@ -4609,16 +4626,25 @@ def maybe_alert_lead(sender: str, lead: dict, already_alerted: bool):
         lines += [f"🧑‍💼 Assigned: {_assign_owner(lead)}"]
     notify_owner("\n".join(lines))
 
-    # Make the lead readable inside the CRM conversation as an internal note.
-    if lead.get("summary") or lead.get("next_action"):
-        note = f"🤖 Internal lead note (not sent to customer) — {badge}"
-        if score_txt:
-            note += f" {score_txt}"
-        if lead.get("summary"):
-            note += f": {lead['summary']}"
-        if lead.get("next_action"):
-            note += f" | Next: {lead['next_action']}"
-        log_reply_to_crm(sender, note)
+    # NO INTERNAL NOTE IS WRITTEN HERE, AND THAT IS THE FIX.
+    #
+    # This used to build a note beginning "Internal lead note (not sent to
+    # customer)" and hand it to log_reply_to_crm. That function's only
+    # mechanism is an INSERT with direction="outbound", status="sent" — the
+    # customer's own message stream. The label was a comment to ourselves; the
+    # row said "we sent this to them". A real customer received one, containing
+    # their name, their city, their trade and our internal next-step wording.
+    #
+    # Nothing is lost by removing it. notify_owner() directly above already
+    # sends the owner the complete alert — badge, score, every metric, the
+    # summary, the next action and the assignment — of which this note was a
+    # strict subset.
+    #
+    # It is NOT re-labelled with a different `direction`, deliberately. The CRM
+    # schema is not readable from here (its credentials are write-only to this
+    # process), so any other value would be a guess; and because the write is
+    # fire-and-forget, a value the CRM rejects fails SILENTLY and would look
+    # exactly like a fix. A note that cannot be delivered safely is not written.
 
 
 def run_client_pipeline(sender: str, user_text: str, ctx: dict,
