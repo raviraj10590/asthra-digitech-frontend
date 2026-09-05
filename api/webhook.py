@@ -131,8 +131,19 @@ DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL      = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip()
 DEEPSEEK_BASE_URL   = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 DEEPSEEK_MAX_TOKENS = int(os.environ.get("DEEPSEEK_MAX_TOKENS", "1200"))
-OPENAI_MAX_TOKENS   = int(os.environ.get("OPENAI_MAX_TOKENS", "400"))
-GEMINI_MAX_TOKENS   = int(os.environ.get("GEMINI_MAX_TOKENS", "400"))
+# 400 WAS TOO SMALL FOR KANNADA, and it showed. Kannada script costs several
+# tokens per character, so a 400-token ceiling cut roughly one customer reply
+# in six off mid-sentence — measured in production: 18 of 104 customer-facing
+# replies ended mid-word. DeepSeek was never affected because it already had
+# 1200; the damage only became visible when DeepSeek stopped answering on
+# 2026-09-03 and every reply fell through to these two.
+#
+# Neither name is set in Vercel, so THIS DEFAULT IS WHAT PRODUCTION USES.
+# 900 is chosen to match DeepSeek's headroom without inviting essays — the
+# system prompt still asks for 3-5 lines, and the median healthy reply is
+# ~160 characters, so this is ceiling, not target.
+OPENAI_MAX_TOKENS   = int(os.environ.get("OPENAI_MAX_TOKENS", "900"))
+GEMINI_MAX_TOKENS   = int(os.environ.get("GEMINI_MAX_TOKENS", "900"))
 
 # The OWNER turn asks for ONE JSON object containing a reply AND a rolled-forward
 # memory note of up to 400 words across six sections. In Kannada — a non-Latin
@@ -1477,7 +1488,28 @@ def generate_reply_gemini(messages: list, max_tokens: int = None) -> str:
         if not r.ok:
             print(f"gemini fallback {r.status_code}: {r.text[:160]}")
             return ""
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        cand = (r.json().get("candidates") or [{}])[0]
+
+        # THE SILENT TRUNCATION. OpenAI and DeepSeek both report finish_reason
+        # and log it; this path ignored it entirely and returned the partial
+        # text as though it were a finished sentence. So when DeepSeek went
+        # down and every reply came through here, customers got half-sentences
+        # and nothing anywhere said so. Same signal, same warning, same words.
+        if cand.get("finishReason") == "MAX_TOKENS":
+            print(f"⚠️ gemini TRUNCATED at max_tokens="
+                  f"{max_tokens or GEMINI_MAX_TOKENS} — reply cut mid-sentence")
+
+        # DEFENSIVE EXTRACTION. On a MAX_TOKENS finish Gemini can return a
+        # candidate with no `parts` at all; the old chained subscript raised
+        # KeyError there, which the handler below turned into "" and the
+        # caller turned into the apology text — a provider failure reported as
+        # a content failure.
+        parts = (cand.get("content") or {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts).strip()
+        if not text:
+            print(f"gemini returned no text (finishReason="
+                  f"{cand.get('finishReason')!r})")
+        return text
     except Exception as e:
         print(f"gemini fallback error: {e}")
         return ""
