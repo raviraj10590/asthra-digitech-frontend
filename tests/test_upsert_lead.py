@@ -71,8 +71,17 @@ class FakeResponse:
 _UNSET = object()   # so data=None can mean "explicitly empty", not "omitted"
 
 
+# The leads WRITE now authenticates with the service-role credential, because
+# `leads` holds customer PII and correctly denies INSERT to the public anon
+# role (production: anon SELECT 200, anon INSERT 401 / 42501). A fake value is
+# injected here so the suite exercises the real header-building path; the
+# missing-credential case has its own class below.
+FAKE_SERVICE_ROLE = "test-service-role-key-not-a-real-credential"
+FAKE_ANON = "test-anon-key-not-a-real-credential"
+
+
 def run(status=None, exc=None, data=_UNSET, synced=True, why="ok",
-        audit_raises=None):
+        audit_raises=None, service_role=FAKE_SERVICE_ROLE, anon=FAKE_ANON):
     """Drive the REAL upsert_lead.
 
     Returns (stdout, posts, invocations, audits) — `audits` are the durable
@@ -98,6 +107,8 @@ def run(status=None, exc=None, data=_UNSET, synced=True, why="ok",
 
     buf = io.StringIO()
     with mock.patch.object(w.requests, "post", fake_post), \
+         mock.patch.object(w, "SUPABASE_SERVICE_ROLE_KEY", service_role), \
+         mock.patch.object(w, "SUPABASE_KEY", anon), \
          mock.patch.object(w, "invoke_tool", fake_invoke), \
          mock.patch.object(w, "BIC_AVAILABLE", True), \
          mock.patch.object(w.bic_config, "is_configured", lambda: True), \
@@ -204,6 +215,8 @@ class NoPiiInLogs(unittest.TestCase):
             return FakeResponse(409, text=posts_text)
         buf = io.StringIO()
         with mock.patch.object(w.requests, "post", fake_post), \
+             mock.patch.object(w, "SUPABASE_SERVICE_ROLE_KEY",
+                               FAKE_SERVICE_ROLE), \
              mock.patch.object(w, "invoke_tool", lambda *a, **k: (True, "ok")), \
              redirect_stdout(buf):
             w.upsert_lead(PHONE, LEAD)
@@ -386,6 +399,8 @@ class DurableRecordCarriesNoPii(unittest.TestCase):
             return FakeResponse(409, text=body)
         audits = []
         with mock.patch.object(w.requests, "post", fake_post), \
+             mock.patch.object(w, "SUPABASE_SERVICE_ROLE_KEY",
+                               FAKE_SERVICE_ROLE), \
              mock.patch.object(w, "invoke_tool", lambda *a, **k: (True, "ok")), \
              mock.patch.object(w, "BIC_AVAILABLE", True), \
              mock.patch.object(w.bic_config, "is_configured", lambda: True), \

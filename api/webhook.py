@@ -80,6 +80,11 @@ WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN",  "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://kpzprllzgqlqkqgcgrbp.supabase.co")
 SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in Vercel env vars
+# SERVER-ONLY. Used by exactly one caller: the `leads` WRITE path. See
+# _leads_write_headers for why that write cannot use the anon key above.
+# .strip() because a trailing newline in an env var silently corrupts the
+# Bearer header — the same normalisation bic/config.py already applies.
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 BROCHURE_URL    = os.environ.get("BROCHURE_URL",    "")
 # Lead/alert recipients — comma-separated, so alerts can go to multiple people.
 # This is the OWNER bootstrap/fallback list: always OWNER role even if the
@@ -315,6 +320,53 @@ def _supa_headers(prefer="return=minimal"):
     if prefer:
         h["Prefer"] = prefer
     return h
+
+def _leads_write_headers(prefer="return=minimal"):
+    """Service-role headers for the `leads` WRITE path — and nothing else.
+
+    WHY THIS EXISTS RATHER THAN A CHANGE TO _supa_headers.
+    _supa_headers has 19 call sites. Switching it to the service-role key
+    would silently escalate every one of them — including reads that are
+    correctly anon today — turning a one-table fix into a blanket RLS bypass.
+    A separate builder keeps the escalation to the single write that needs it.
+
+    WHY THE ANON KEY CANNOT DO THIS WRITE. Proven in production: the anon key
+    can SELECT `leads` (HTTP 200) but its INSERT is refused with HTTP 401.
+    Postgres raises 42501 insufficient_privilege, and PostgREST maps 42501 to
+    401 (not 403) when the JWT role is the configured anon role — which is why
+    an authorization failure looked like an authentication one for a month.
+    `leads` holds customer PII (name, company, budget, city, phone), so the
+    database is RIGHT to refuse the public key. The application was wrong to
+    offer it. Granting anon INSERT would "fix" this by widening a public
+    credential's write surface to a PII table; using the privileged key the
+    process already holds does not.
+
+    NO SILENT FALLBACK. Returns None when the credential is absent — never
+    anon headers. bic/config.py states the same rule for the same reason: a
+    silent downgrade reappears as "leads mysteriously stopped saving" instead
+    of a named misconfiguration, which is precisely the failure mode this
+    whole investigation just spent four tasks unwinding.
+
+    The returned dict CONTAINS the secret. It is passed straight to requests
+    and never logged; the caller must not print it.
+    """
+    # .strip() again, not redundantly: the module constant is already
+    # stripped, but this function must be correct on its own terms — a
+    # blank-but-truthy credential ("   ") would otherwise be sent as a Bearer
+    # token and rejected as a puzzling 401, which is the exact class of
+    # failure this change exists to eliminate.
+    key = (SUPABASE_SERVICE_ROLE_KEY or "").strip()
+    if not key:
+        return None
+    h = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        h["Prefer"] = prefer
+    return h
+
 
 def _within_hours(iso_ts: str, hours: float) -> bool:
     try:
@@ -705,38 +757,51 @@ def upsert_lead(phone: str, data: dict):
     http_status = None
     transport_error = None
     started = time.time()
-    try:
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/leads",
-            headers=_supa_headers("resolution=merge-duplicates"),
-            json={"phone": phone, **data},
-            timeout=5,
-        )
-        stored = r.ok
-        http_status = r.status_code
-        if stored:
-            # NO LEAD PAYLOAD. The old line printed the whole dict — name,
-            # company, budget, city — into Vercel logs. The field COUNT says
-            # a write happened and how much travelled, and identifies nobody.
-            print(f"LEAD_UPSERT_OK phone=...{phone[-4:]} fields={len(data)}")
-        else:
-            # STATUS ONLY, never r.text: a PostgREST error body echoes the
-            # offending row, which for this table is exactly the lead PII the
-            # success log was just cleaned of. The status is what distinguishes
-            # an RLS denial from a constraint violation, and it is enough.
-            print(f"LEAD_UPSERT_FAILED phone=...{phone[-4:]} "
-                  f"status={r.status_code}")
-    except Exception as e:
-        # Transport failure (timeout, DNS, connection reset). Unchanged, and
-        # already correct: the exception skips the success print rather than
-        # claiming a write that never left the process.
-        #
-        # Recorded with http_status None and the exception TYPE, so a request
-        # that never reached PostgREST is distinguishable from one it
-        # rejected. Collapsing them would send the next fix hunting for an
-        # RLS policy when the real problem was a timeout.
-        transport_error = type(e).__name__
-        print(f"upsert_lead error: {e}")
+    # SERVICE ROLE, NOT ANON. The anon key's INSERT here is refused with 401
+    # (42501 insufficient_privilege) because `leads` holds customer PII and
+    # correctly denies the public role. See _leads_write_headers.
+    headers = _leads_write_headers("resolution=merge-duplicates")
+    if headers is None:
+        # FAIL LOUDLY, NEVER FALL BACK. Retrying with the anon key would
+        # reproduce the exact 401 this change removes, and would do it
+        # silently. No request is made; the attempt is still recorded.
+        transport_error = "missing_service_role_credential"
+        print(f"LEAD_UPSERT_FAILED phone=...{phone[-4:]} "
+              f"status=no_service_role_credential")
+    else:
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/leads",
+                headers=headers,
+                json={"phone": phone, **data},
+                timeout=5,
+            )
+            stored = r.ok
+            http_status = r.status_code
+            if stored:
+                # NO LEAD PAYLOAD. The old line printed the whole dict — name,
+                # company, budget, city — into Vercel logs. The field COUNT
+                # says a write happened and how much travelled, and identifies
+                # nobody.
+                print(f"LEAD_UPSERT_OK phone=...{phone[-4:]} fields={len(data)}")
+            else:
+                # STATUS ONLY, never r.text: a PostgREST error body echoes the
+                # offending row, which for this table is exactly the lead PII
+                # the success log was just cleaned of. The status is what
+                # distinguishes an RLS denial from a constraint violation.
+                print(f"LEAD_UPSERT_FAILED phone=...{phone[-4:]} "
+                      f"status={r.status_code}")
+        except Exception as e:
+            # Transport failure (timeout, DNS, connection reset). Unchanged,
+            # and already correct: the exception skips the success print
+            # rather than claiming a write that never left the process.
+            #
+            # Recorded with http_status None and the exception TYPE, so a
+            # request that never reached PostgREST is distinguishable from one
+            # it rejected. Collapsing them would send the next fix hunting for
+            # an RLS policy when the real problem was a timeout.
+            transport_error = type(e).__name__
+            print(f"upsert_lead error: {e}")
     _record_lead_upsert(phone, stored, http_status, data, started, time.time(),
                         error=transport_error)
     # Routed through the registry (Slice 1C: no direct tool_*() execution).
