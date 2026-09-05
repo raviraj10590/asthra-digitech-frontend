@@ -368,6 +368,21 @@ def _leads_write_headers(prefer="return=minimal"):
     return h
 
 
+def _content_range_total(header):
+    """Total row count from a PostgREST `Content-Range: 0-44/2226` header.
+
+    None whenever the count is absent or unparseable (a missing header, "*",
+    an error response). The caller must treat None as "unknown" and fall
+    back — never as zero, which would read as "brand new conversation" for
+    someone mid-negotiation.
+    """
+    try:
+        total = str(header).split("/")[-1].strip()
+        return int(total) if total.isdigit() else None
+    except (AttributeError, ValueError, IndexError):
+        return None
+
+
 def _within_hours(iso_ts: str, hours: float) -> bool:
     try:
         ts = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
@@ -605,11 +620,20 @@ def fetch_context(phone: str) -> dict:
     AI history, last inbound message (dedupe), pause state, alert markers.
     Replaces the 5-7 separate queries v2.2 made per message."""
     ctx = {"history": [], "last_user": {}, "paused": False,
-           "vip_alerted": False, "lead_alerted": False, "recent_sys": []}
+           "vip_alerted": False, "lead_alerted": False, "recent_sys": [],
+           # Total rows stored for this chat, independent of the 45-row
+           # window below. None when unknown. See the count=exact note.
+           "stored_messages": None}
     try:
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
-            headers=_supa_headers(""),
+            # count=exact COSTS NO EXTRA ROUND TRIP: PostgREST returns the
+            # full match count in Content-Range while still honouring the
+            # limit below (verified in production: 45 rows returned with
+            # "Content-Range: 0-44/2226"). It is the only unbounded measure
+            # of conversation progress available here, and without it the
+            # extraction guard can only see a window that stops growing.
+            headers=_supa_headers("count=exact"),
             params={
                 "phone":  f"eq.{phone}",
                 "order":  "created_at.desc",
@@ -622,6 +646,9 @@ def fetch_context(phone: str) -> dict:
             timeout=5,
         )
         rows = r.json() if r.ok else []
+        if r.ok:
+            ctx["stored_messages"] = _content_range_total(
+                r.headers.get("Content-Range"))
     except Exception as e:
         print(f"fetch_context error: {e}")
         return ctx
@@ -1014,6 +1041,10 @@ GUARD_EARLY_PASS = "early_pass"          # 4 <= len < 8, always runs
 GUARD_PERIODIC_PASS = "periodic_pass"    # len >= 8, (len//2) % 2 == 0
 GUARD_PERIODIC_SKIP = "periodic_skip"    # len >= 8, (len//2) % 2 != 0
 
+# Where the depth the guard judged came from.
+GUARD_SOURCE_STORED = "stored_count"     # unbounded; the intended measure
+GUARD_SOURCE_HISTORY = "history_window"  # fallback; saturates at 22
+
 
 def _extraction_guard_reason(history_len: int):
     """(reason, eligible) for a history length — mirrors the call-site guard.
@@ -1039,7 +1070,8 @@ def _extraction_guard_reason(history_len: int):
     return GUARD_PERIODIC_SKIP, False
 
 
-def _record_extraction_guard(history_len: int) -> None:
+def _record_extraction_guard(depth: int, history_len: int = None,
+                             source: str = GUARD_SOURCE_HISTORY) -> None:
     """Durable, PII-safe record of the eligibility decision.
 
     ok=True ALWAYS. This is an observation of a decision, not a failed tool
@@ -1054,9 +1086,11 @@ def _record_extraction_guard(history_len: int) -> None:
     STORES ONE INTEGER AND TWO LABELS. No transcript, no phone, no prompt, no
     lead values. history_len is a COUNT of messages, not their content.
     """
+    if history_len is None:
+        history_len = depth
     if not (BIC_AVAILABLE and bic_config.is_configured()):
         return
-    reason, eligible = _extraction_guard_reason(history_len)
+    reason, eligible = _extraction_guard_reason(depth)
     try:
         stamp = datetime.now(timezone.utc).isoformat()
         bic_db.insert("bic_tool_invocations", {
@@ -1064,7 +1098,14 @@ def _record_extraction_guard(history_len: int) -> None:
             "tool": LEAD_EXTRACTION_GUARD_EVENT,
             "role": "CLIENT",
             "channel": "whatsapp",
-            "args_redacted": {"history_len": int(history_len),
+            # BOTH NUMBERS, because they diverge and the divergence IS the
+            # diagnosis. `depth` is what the guard judged; `history_len` is
+            # the truncated window. When history_len pins at 22 while depth
+            # keeps climbing, that is the dead zone being avoided, visible
+            # in the data instead of reconstructed from source.
+            "args_redacted": {"depth": int(depth),
+                              "depth_source": source,
+                              "history_len": int(history_len),
                               "eligible": bool(eligible),
                               "reason": reason},
             "ok": True,
@@ -4465,14 +4506,46 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": reply},
         ]
-        # OBSERVE THE DECISION, DO NOT MAKE IT. The `if` below is unchanged,
-        # byte for byte, and still decides everything; this only writes down
-        # what it is about to conclude. Placed before the branch so a SKIP is
-        # recorded too — a skip leaves no other trace anywhere, which is why
-        # the guard's behaviour had to be reconstructed from source rather
-        # than read from data.
-        _record_extraction_guard(len(history))
-        if len(history) >= 4 and (len(history) < 8 or (len(history) // 2) % 2 == 0):
+        # THE CADENCE IS MEASURED ON CONVERSATION PROGRESS, NOT ON THE
+        # RETAINED WINDOW. fetch_context caps ctx["history"] at [-20:], so
+        # len(history) pins at 22 for every established chat — and
+        # (22 // 2) % 2 == 1, so the rule below said "skip" on that value
+        # forever. Extraction was permanently dead for exactly the mature
+        # conversations most likely to contain a real lead. Production
+        # confirmed it: 17 upsert_lead executions, all from menu taps, none
+        # from this path.
+        #
+        # THE RULE ITSELF IS UNCHANGED. Same thresholds, same modulo, same
+        # intent — "every turn while the chat is short, then every 2nd turn
+        # once established". Only the number it reads changes, from a
+        # truncated window to an unbounded count of the rows this chat
+        # actually has. On a short chat the two are equal, so early
+        # behaviour is identical.
+        #
+        # WHY ALTERNATION SURVIVES. Each turn stores exactly two rows, so
+        # depth // 2 advances by exactly one per turn and its parity flips
+        # every turn — which is precisely "every 2nd turn". A system marker
+        # (BOT_PAUSED, LEAD_ALERTED) adds a single row and can shift the
+        # PHASE once; it cannot break the alternation.
+        #
+        # UNKNOWN COUNT FALLS BACK, never guesses. If the count is missing
+        # the old windowed value is used: no worse than today, and never a
+        # zero that would read as "new customer" for someone mid-deal.
+        stored = ctx.get("stored_messages")
+        if stored is None:
+            depth, depth_source = len(history), GUARD_SOURCE_HISTORY
+        else:
+            # +2 for this turn's user and assistant rows, which are saved
+            # after this point and so are not yet in the stored count.
+            depth, depth_source = int(stored) + 2, GUARD_SOURCE_STORED
+        # OBSERVE THE DECISION, DO NOT MAKE IT. The `if` below still decides
+        # everything; this only writes down what it is about to conclude.
+        # Placed before the branch so a SKIP is recorded too — a skip leaves
+        # no other trace anywhere, which is why the guard's behaviour had to
+        # be reconstructed from source rather than read from data.
+        _record_extraction_guard(depth, history_len=len(history),
+                                 source=depth_source)
+        if depth >= 4 and (depth < 8 or (depth // 2) % 2 == 0):
             lead = extract_lead_info(history)
             if lead:
                 # Upsert only columns the leads table actually has —

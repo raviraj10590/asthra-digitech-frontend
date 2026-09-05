@@ -330,8 +330,7 @@ class UnrelatedPathsUntouched(unittest.TestCase):
         import inspect
         src = inspect.getsource(w.run_client_pipeline)
         self.assertIn(
-            "if len(history) >= 4 and (len(history) < 8 or "
-            "(len(history) // 2) % 2 == 0):", src)
+            "if depth >= 4 and (depth < 8 or (depth // 2) % 2 == 0):", src)
 
     def test_extract_lead_info_provider_config_is_unchanged(self):
         import inspect

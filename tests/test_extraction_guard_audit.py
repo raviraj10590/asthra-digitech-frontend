@@ -150,13 +150,21 @@ class ClassifierMatchesTheRealGuard(unittest.TestCase):
             else:
                 self.assertFalse(eligible, n)
 
-    def test_the_call_site_guard_source_is_unchanged(self):
-        """Byte-level: the exact expression must still be present."""
+    def test_the_call_site_rule_is_unchanged(self):
+        """The RULE is unchanged — same thresholds, same modulo. Only the
+        number it reads changed, from the truncated window to the unbounded
+        conversation depth, because the window pinned at 22 forever."""
         import inspect
         src = inspect.getsource(w.run_client_pipeline)
         self.assertIn(
-            "if len(history) >= 4 and (len(history) < 8 or "
-            "(len(history) // 2) % 2 == 0):", src)
+            "if depth >= 4 and (depth < 8 or (depth // 2) % 2 == 0):", src)
+
+    def test_the_guard_no_longer_reads_the_truncated_window(self):
+        """The dead zone was len(history) pinning at 22; reading it again
+        would restore the dead zone."""
+        import inspect
+        src = inspect.getsource(w.run_client_pipeline)
+        self.assertNotIn("if len(history) >= 4", src)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -185,9 +193,12 @@ class RowShape(unittest.TestCase):
         self.assertIn("started_at", row)
         self.assertIn("finished_at", row)
 
-    def test_args_redacted_holds_exactly_three_keys(self):
+    def test_args_redacted_holds_exactly_the_declared_keys(self):
+        """`depth` and `history_len` are BOTH recorded: their divergence is
+        the dead zone being avoided, visible in data."""
         a = record(12)[0][0]["args_redacted"]
-        self.assertEqual(sorted(a), ["eligible", "history_len", "reason"])
+        self.assertEqual(sorted(a), ["depth", "depth_source", "eligible",
+                                     "history_len", "reason"])
 
     def test_history_len_is_a_count_never_content(self):
         a = record(22)[0][0]["args_redacted"]
@@ -220,12 +231,12 @@ class NoPiiIsPersisted(unittest.TestCase):
                        "sales analyst", "budget", "Bengaluru", "content"):
             self.assertNotIn(secret, blob, secret)
 
-    def test_the_recorder_takes_only_an_integer(self):
+    def test_the_recorder_takes_only_counts_and_a_label(self):
         """STRUCTURAL: it cannot leak a transcript because it is never given
         one. The signature is the guarantee."""
         import inspect
         params = list(inspect.signature(w._record_extraction_guard).parameters)
-        self.assertEqual(params, ["history_len"])
+        self.assertEqual(params, ["depth", "history_len", "source"])
 
 
 # ══════════════════════════════════════════════════════════════════════════
