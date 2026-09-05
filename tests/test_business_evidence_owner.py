@@ -180,9 +180,14 @@ class DispatcherModelBypass(unittest.TestCase):
         self.dispatch("How many enquiries this month?")
         self.assertNotIn(("MODEL", None), self.calls)
 
-    def test_diagnostic_question_reaches_the_model_not_the_tool(self):
+    def test_diagnostic_question_reaches_reasoning_not_the_evidence_tool(self):
+        """Was ("MODEL", None). Diagnostic questions now reach the Business
+        Reasoning Core, which answers from evidence and leaves the cause
+        explicitly unresolved — strictly stronger than the bare model answer
+        this previously asserted. The invariant that matters, that it must not
+        hit the direct evidence tool, is unchanged and asserted below."""
         self.dispatch("Why are my enquiries low?")
-        self.assertEqual(self.calls, [("MODEL", None)])
+        self.assertEqual(self.calls, [("TOOL", "business_reasoning")])
 
     def test_diagnostic_question_never_calls_the_evidence_tool(self):
         self.dispatch("Why did my enquiries fall?")

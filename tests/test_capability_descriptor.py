@@ -87,7 +87,10 @@ class ExistingToolsUnaffected(unittest.TestCase):
         # Plus the `status` composite which is never a handler. Bumping this
         # number is meant to be a conscious act: the count is what makes an
         # accidental new tool surface visible.
-        self.assertEqual(len(tools._HANDLERS), 20)
+        # -> 21 with `business_reasoning` (the Business Reasoning Core:
+        # situation -> patterns -> diagnosis -> priorities -> recommendations,
+        # advisory only; it authorizes nothing and executes nothing).
+        self.assertEqual(len(tools._HANDLERS), 21)
 
     def test_legacy_act_tool_validates_without_2G_fields(self):
         """A Phase-1 row carries no freshness/degradation and must stay valid."""

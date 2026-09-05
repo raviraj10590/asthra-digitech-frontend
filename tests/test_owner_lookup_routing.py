@@ -281,11 +281,27 @@ class DispatcherUsesTheRouter(Base):
         return self.calls[0] if self.calls else None
 
     def test_diagnostic_reaches_reasoning_through_the_dispatcher(self):
-        self.assertEqual(self.dispatch("Why are my leads low?"), "REASONING")
+        """Diagnostic questions now reach the BUSINESS REASONING CORE rather
+        than a bare model answer. The contract this test has always defended
+        is unchanged and is asserted below: they must never become a direct
+        data LOOKUP. What changed is that "why are my leads low" is now
+        answered from evidence with its causes explicitly unresolved, instead
+        of by a model free to invent one."""
+        self.assertEqual(self.dispatch("Why are my leads low?"),
+                         "business_reasoning")
 
     def test_prioritisation_reaches_reasoning_through_the_dispatcher(self):
         self.assertEqual(self.dispatch("Which client should I prioritize?"),
-                         "REASONING")
+                         "business_reasoning")
+
+    def test_diagnostic_never_becomes_a_direct_lookup(self):
+        """THE ORIGINAL BUG, still pinned: a diagnostic question must not be
+        answered by dumping a table."""
+        for q in ("Why are my leads low?", "Which client should I prioritize?",
+                  "Why did enquiries fall?"):
+            self.assertNotIn(self.dispatch(q),
+                             ("leads_today", "crm_list_clients",
+                              "business_new_enquiries"), q)
 
     def test_lookup_reaches_the_tool_through_the_dispatcher(self):
         self.assertEqual(self.dispatch("How many leads do I have today?"),

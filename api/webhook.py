@@ -57,6 +57,7 @@ try:
                      explain as bic_explain,
                      goal_lifecycle as bic_goal_lifecycle,
                      observe as bic_observe,
+                     reasoning as bic_reasoning,
                      recovery as bic_recovery,
                      goals as bic_goals,
                      identity as bic_identity, knowledge as bic_knowledge,
@@ -2831,6 +2832,216 @@ def render_business_status(packet: dict, proposal, outcome,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# OWNER BUSINESS REASONING — ⑤ CONTEXT → ⑥ SUFFICIENCY → reasoning core
+#                            → ⑧ CONSULT → ⑨ DECIDE.  Advisory only.
+# ══════════════════════════════════════════════════════════════════════════════
+# Where business_status DESCRIBES one measured number, this REASONS: it builds
+# a situation, derives movement only from comparable observations, grades every
+# conclusion by what actually supports it, and refuses to name a cause the
+# evidence cannot establish.
+#
+# THE CONCLUSIONS ARE FIXED BEFORE THE MODEL IS ASKED ANYTHING. bic.reasoning
+# is deterministic and runs first; CONSULT receives the finished reasoning and
+# supplies language for it. The model can therefore shape the prose and never
+# the verdict — the evidence layer stays authoritative (§13).
+#
+# NOTHING IS AUTHORIZED OR EXECUTED. decide.authorize() is not called, no
+# Commitment is created, no tool with side effects runs (§16).
+
+REASONING_GOAL = "business_month_review"
+
+
+def _reasoning_history(tenant: str, subject: str, predicates) -> dict:
+    """Prior comparable observations per predicate, for trend derivation.
+
+    READ-ONLY and best-effort. Reuses bic.claims.history — the store's own
+    record — rather than inventing a second notion of "what we knew before".
+    A failure here loses TRENDS, not facts: the reasoning core simply sees a
+    single point and correctly declines to call it a movement.
+    """
+    out = {}
+    for ref in predicates:
+        try:
+            out[ref] = bic_claims.history(tenant, subject, ref)
+        except Exception as e:
+            print(f"reasoning history unavailable for {ref}: {type(e).__name__}")
+    return out
+
+
+def _reasoning_brief(result: dict, question: str) -> list:
+    """The ONLY thing the model is given: question + finished reasoning.
+
+    PACKET-ONLY (§13). No owner memory, no archive, no CRM or leads snapshot,
+    no transcript, no phone. The brief carries labels, values, epistemic
+    categories and the named unknowns — never a claim_id, never a subject id.
+    """
+    sit = result["situation"]
+    lines = ["EVIDENCE (the only facts you may state):"]
+    for o in sit["observations"]:
+        lines.append(f"- {o['label']} = {o['value']} {o['unit'] or ''}".rstrip()
+                     + f" | confidence {o['confidence']} | {o['freshness']}"
+                       f" | epistemic {o['epistemic']}")
+    if not sit["observations"]:
+        lines.append("- (none)")
+
+    lines.append("\nDERIVED MOVEMENTS (arithmetic on two comparable readings):")
+    for t in sit["changes"] or []:
+        lines.append(f"- {t['label']}: {t['from_value']} -> {t['to_value']} "
+                     f"({t['pattern']}, {t['epistemic']}). CAUSE NOT ESTABLISHED.")
+    if not sit["changes"]:
+        lines.append("- (none — a single reading is not a trend)")
+
+    lines.append("\nNOT MEASURED (you may NOT estimate, infer or discuss these):")
+    for u in sit["unknowns"] or []:
+        lines.append(f"- {u['predicate']}: {u['why']}")
+    if not sit["unknowns"]:
+        lines.append("- (none)")
+
+    lines.append("\nDIAGNOSES (state, not conclusions):")
+    for d in result["diagnoses"]:
+        lines.append(f"- {d['statement']} -> {d['state']} ({d['epistemic']}). "
+                     f"{d['why_unresolved']}")
+    if not result["diagnoses"]:
+        lines.append("- (none)")
+
+    lines.append("\nPRIORITIES:")
+    for pr in result["priorities"]:
+        lines.append(f"- [{pr['kind']}] {pr['priority']} — {pr['reason']}")
+
+    lines.append(
+        "\nRULES: State only the numbers above, verbatim. Do not compute, "
+        "estimate or forecast any other figure. Do not assert a CAUSE for any "
+        "movement — no evidence establishes one. Do not mention revenue, "
+        "conversion, pipeline value, capacity or attribution as if measured. "
+        "Do not recommend spending changes. Present unresolved things as "
+        "unresolved. Three to five short sentences.")
+    return [{"role": "system", "content": "\n".join(lines)},
+            {"role": "user", "content": question}]
+
+
+def _reasoning_narrator(result: dict, question: str):
+    """Default CONSULT provider — packet-only, injectable for tests."""
+    try:
+        return _call_openai(_reasoning_brief(result, question), max_tokens=320)
+    except Exception as e:
+        print(f"business_reasoning consult failed: {type(e).__name__}")
+        return None
+
+
+def tool_business_reasoning(sender: str, question: str = "", timeout: float = 25,
+                            narrator=None, **_) -> str:
+    """OWNER diagnostic / strategic reasoning over business evidence."""
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return "⚠️ BIC isn't configured yet."
+
+    packet, reason = assemble_business_context(
+        question or "business reasoning", goal_id=REASONING_GOAL)
+    if packet is None:
+        if reason == "no_business_subject":
+            return ("🧠 No business evidence on record yet — the daily refresh "
+                    "hasn't run. That is absence of measurement, not a "
+                    "business result.")
+        return f"⚠️ Couldn't assemble business context ({reason})."
+
+    subject = packet.get("subject")
+    predicates = [f.get("predicate")
+                  for f in (packet.get("evidence") or {}).get("facts") or []]
+    history = _reasoning_history(bic_config.DEFAULT_TENANT_ID, subject,
+                                 [p for p in predicates if p])
+    try:
+        result = bic_reasoning.reason(packet, history=history)
+    except bic_reasoning.ReasoningError as e:
+        print(f"business_reasoning refused: {type(e).__name__}")
+        return "⚠️ Business reasoning could not run on this context."
+
+    # ⑧ CONSULT — only for LANGUAGE, and only over the finished reasoning.
+    narrate = narrator or (lambda r, q: _reasoning_narrator(r, q))
+    raw = None
+    try:
+        raw = narrate(result, question or "What is happening in my business?")
+    except Exception as e:
+        print(f"business_reasoning narrator failed: {type(e).__name__}")
+
+    rejected = None
+    proposal = None
+    if raw:
+        # ⑨ The model proposes, the EXISTING 2G validator disposes.
+        rejected = bic_explain.validate_narration(
+            raw, _business_consult_envelope(packet))
+        proposal = None if rejected else raw
+
+    # ⑨ DECIDE — the same function the customer path uses. No second engine.
+    decision = bic_decide.decide(bic_goals.lookup(REASONING_GOAL),
+                                 packet, proposal)
+    return render_business_reasoning(result, proposal, decision["outcome"],
+                                     narration_rejected=rejected)
+
+
+def render_business_reasoning(result: dict, proposal, outcome,
+                              narration_rejected=None) -> str:
+    """Reasoning -> owner text. Presentation only; decides nothing.
+
+    Every section is labelled with what it IS — observed, derived, unresolved,
+    unknown — because the whole value of the engine is lost the moment the
+    reader cannot tell which is which. No claim_id and no subject id reach the
+    owner; they are meaningless to a human and are carried in the structured
+    result instead.
+    """
+    sit = result["situation"]
+    lines = ["🧠 Business reasoning"]
+
+    lines.append("\n📌 OBSERVED (fact)")
+    if sit["observations"]:
+        for o in sit["observations"]:
+            lines.append(f"• {o['label']}: {o['value']} {o['unit'] or ''}".rstrip()
+                         + f"\n  confidence {o['confidence']} · {o['freshness']}")
+    else:
+        lines.append("• Nothing measured is currently available.")
+
+    if sit["changes"]:
+        lines.append("\n📈 DERIVED (movement between two comparable readings)")
+        for t in sit["changes"]:
+            lines.append(f"• {t['label']}: {t['from_value']} → {t['to_value']} "
+                         f"({t['pattern'].lower()}, {t['relative']:.0%})"
+                         "\n  Cause NOT established.")
+    else:
+        lines.append("\n📈 DERIVED: none — a single reading is not a trend.")
+
+    if result["diagnoses"]:
+        lines.append("\n🔍 DIAGNOSIS")
+        for d in result["diagnoses"]:
+            lines.append(f"• {d['statement']} → {d['state']}"
+                         f"\n  {d['why_unresolved']}")
+
+    if result["priorities"]:
+        lines.append("\n🎯 PRIORITIES")
+        for pr in result["priorities"][:4]:
+            lines.append(f"• [{pr['kind']}] {pr['priority']}\n  {pr['reason']}")
+
+    if result["recommendations"]:
+        lines.append("\n✅ RECOMMENDED NEXT")
+        for r in result["recommendations"][:3]:
+            lines.append(f"• {r['recommendation']}"
+                         f"\n  Objective: {r['expected_objective']}"
+                         f"\n  Would change if: {r['would_change_if']}")
+
+    if sit["unknowns"]:
+        lines.append("\n🚫 CANNOT BE ASSESSED")
+        for u in sit["unknowns"]:
+            lines.append(f"• {u['predicate']} — {u['why']}")
+
+    if proposal:
+        lines.append(f"\n🗣 {proposal}")
+    elif narration_rejected:
+        lines.append(f"\nℹ️ Narration refused ({narration_rejected}) — the "
+                     "reasoning above comes from records only.")
+
+    lines.append(f"\nWhy: {result['rationale']['limiting_factor']}")
+    lines.append("\n(Advisory only. No action has been taken or authorised.)")
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 2B COMMITMENT — the OWNER consumer that CLOSES a promise
 # ══════════════════════════════════════════════════════════════════════════════
 # Stage ⑮ creates commitments; without this they stay `made` forever.
@@ -3895,6 +4106,62 @@ def owner_business_status_query(text: str) -> bool:
     return any(p in low for p in _BUSINESS_STATUS_PHRASES)
 
 
+# ── OWNER BUSINESS REASONING — the diagnostic/strategic boundary ───────────
+#
+# NOT A NEW CLASSIFIER (§10). It is the SAME two ingredients the other OWNER
+# gates already use, combined the opposite way round:
+#
+#   business_status         : business topic AND NOT a reasoning marker
+#   business_reasoning      : business topic AND     a reasoning marker
+#
+# So the split is exhaustive and cannot overlap by construction — the marker
+# set is shared, and the OWNER routing fix that keeps "why is X low" out of a
+# direct lookup is what now routes it HERE instead of to a generic model
+# answer. Nothing inspects intent; no model is consulted to decide.
+_BUSINESS_TOPIC = (
+    "business", "enquir", "inquir", "lead", "pipeline", "revenue",
+    "conversion", "client", "customer", "sales", "growth",
+    "ವ್ಯಾಪಾರ", "ಗ್ರಾಹಕ",
+)
+
+# "What is happening in my business?" carries a business TOPIC but none of the
+# shared reasoning markers — it asks for a SITUATION, which is the reasoning
+# core's first stage. Kept local rather than added to _REASONING_MARKERS,
+# because that set is also what business_status uses to exclude; widening it
+# there would silently change which questions the descriptive tool refuses.
+_SITUATION_MARKERS = ("happening", "going on", "situation", "state of",
+                      "ಏನಾಗುತ್ತಿದೆ")
+
+# Strategic asks that are unambiguously about the business for an OWNER even
+# without a topic word. An explicit phrase list, not a rule — "what should I
+# do about my phone" must NOT match.
+_STRATEGIC_PHRASES = (
+    "what should i focus on", "what should i do next",
+    "what should i prioriti", "where should i focus",
+    "what do i focus on", "what should we focus on",
+)
+
+
+def owner_reasoning_query(text: str) -> bool:
+    """True for a DIAGNOSTIC or STRATEGIC question about the business.
+
+    These are exactly the questions the existing markers already divert away
+    from direct tool lookups — "why are enquiries low", "what should I focus
+    on". Until now they fell through to a general model answer with no
+    evidence behind it, which is the failure mode this whole slice exists to
+    end: the model would confidently explain a decline it had no data for.
+    """
+    low = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not low:
+        return False
+    if any(p in low for p in _STRATEGIC_PHRASES):
+        return True
+    if not any(t in low for t in _BUSINESS_TOPIC):
+        return False
+    return (any(m in low for m in _REASONING_MARKERS)
+            or any(m in low for m in _SITUATION_MARKERS))
+
+
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
     """Single entry point for OWNER/STAFF messages: pending confirmation →
     deterministic # command → keyword-routed read-only lookup → AI chat."""
@@ -3947,6 +4214,13 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
     if owner_business_status_query(stripped):
         return run_tool(sender, "business_status",
                         _fallback=tool_business_status, question=stripped)
+
+    # Checked AFTER status: the status gate already excludes reasoning
+    # markers, so the two are disjoint, and this ordering makes that explicit
+    # rather than relying on it.
+    if owner_reasoning_query(stripped):
+        return run_tool(sender, "business_reasoning",
+                        _fallback=tool_business_reasoning, question=stripped)
 
     if owner_evidence_query(stripped):
         return run_tool(sender, "business_new_enquiries",
@@ -5168,6 +5442,11 @@ if BIC_AVAILABLE:
     def _tool_h_business_status(principal, timeout=20, question="", **_):
         return tool_business_status(principal.sender_id, question=question,
                                     timeout=timeout)
+
+    @bic_tools.register("business_reasoning")
+    def _tool_h_business_reasoning(principal, timeout=25, question="", **_):
+        return tool_business_reasoning(principal.sender_id, question=question,
+                                       timeout=timeout)
 
     @bic_tools.register("commitments_list")
     def _tool_h_commitments_list(principal, timeout=10, **_):
