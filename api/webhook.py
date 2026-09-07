@@ -3686,6 +3686,8 @@ OWNER_COMMANDS_HELP = (
     "#suffice <goal> — is there enough to proceed? (context + sufficiency)\n"
     "#commitments — what we still owe, and what is overdue\n"
     "#commitment <ref> start|met|waive <reason> — resolve one commitment\n"
+    "#paid 91XXXXXXXXXX [YYYY-MM-DD] confirm — record FIRST payment received "
+    "(permanent, owner only)\n"
     "#status — quick business snapshot\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
@@ -3784,6 +3786,26 @@ def try_owner_command(sender: str, role: str, text: str):
         return run_tool(sender, "memory_show", _fallback=tool_memory_show)
     if low == "#forget":
         return run_tool(sender, "memory_clear", _fallback=tool_memory_clear)
+
+    # #paid <phone> [YYYY-MM-DD] [confirm] — the conversion event.
+    #
+    # NO _fallback, UNLIKE EVERY OTHER COMMAND HERE. run_tool's fallback is the
+    # documented rollback for a registry outage, and for a read-only lookup it
+    # is correct. This tool writes a permanent business fact, and
+    # try_owner_command is reached by INTERNAL_ROLES = ('OWNER','STAFF') — so a
+    # fallback would let STAFF assert revenue whenever the registry was down.
+    # With none, invoke_tool returns "Tool layer unavailable" and the claim is
+    # simply not written, which is the correct failure for evidence.
+    m = _PAID_RE.match(stripped)
+    if m:
+        return run_tool(sender, "record_first_payment",
+                        target=m.group(1).lstrip("+"),
+                        when=m.group(2) or "",
+                        confirmed=(m.group(3) or "").strip())
+    if low.startswith("#paid"):
+        return ("❓ Usage: #paid <phone> [YYYY-MM-DD] confirm\n"
+                "Records the FIRST payment received from that party. "
+                "Permanent — it cannot be edited afterwards.")
 
     m = re.match(r'^#(stop|start)\s+(\+?\d{10,15})\s*$', stripped, re.IGNORECASE)
     if m:
@@ -4483,6 +4505,144 @@ def record_first_seen(sender: str, first_seen, message_id=None) -> None:
         # on bic_party_identifiers echoes the customer's phone number.
         print(f"CLAIM_WRITE_FAILED predicate={FIRST_SEEN_PREDICATE} "
               f"reason={type(e).__name__}")
+
+
+# ── CONVERSION EVIDENCE v1 — the first payment ────────────────────────────
+#
+# OWNER RULING (2026-09-07): a party is CONVERTED when the business records
+# the party's FIRST PAYMENT RECEIVED. Not a meeting, not a proposal, not a
+# signature. That single sentence decides everything below.
+#
+# WHY THIS EXISTS AT ALL. The preceding audit found NO record in the system
+# that a party had become a client. leads.status is 3 rows all reading 'new'
+# with no code anywhere that writes the column; bic_commitments is empty; the
+# CRM `clients` table gets a row for EVERY extracted lead, so its name asserts
+# exactly what it does not mean. The event had to be created because it did
+# not exist — not because the existing data was inconvenient to read.
+BECAME_CLIENT_PREDICATE = "core.party.became_client_at@1"
+
+# The command grammar, kept deliberately rigid. `confirm` must appear INSIDE
+# the command: the shared _stage_confirm flow accepts CONFIRM_WORDS including
+# a bare "ok" and "yes" — see the KNOWN HAZARD note on that constant — which
+# is not an acceptable trigger for a permanent revenue fact.
+_PAID_RE = re.compile(
+    r"^#paid\s+(\+?\d{10,15})(?:\s+(\d{4}-\d{2}-\d{2}))?(\s+confirm)?\s*$",
+    re.IGNORECASE)
+
+
+def _paid_party(target: str):
+    """Resolve an OWNER-typed phone to a party. LOOKUP ONLY — never creates.
+
+    resolve_or_create is deliberately NOT used here. It mints a PROVISIONAL
+    party for an unknown number, which on this path would attach revenue to
+    someone the Brain has never observed and manufacture an identity as a side
+    effect of recording a payment. A party with no first_seen_at is also in no
+    enquiry cohort, so the event would be invisible to the very metric it
+    exists to feed. Unknown number -> refuse and say so.
+
+    resolve_survivor is still honoured, so a merged party redirects and a
+    DISPUTED one raises rather than silently taking the claim.
+    """
+    tenant = bic_config.DEFAULT_TENANT_ID
+    known = bic_party.find_by_identifier(tenant, bic_party.WHATSAPP, target)
+    if not known:
+        return None
+    return bic_party.resolve_survivor(tenant, known)
+
+
+def tool_record_first_payment(sender: str, target: str = "", when: str = "",
+                              confirmed: str = "", **_) -> str:
+    """Record core.party.became_client_at@1 — the conversion event.
+
+    TIER 1, CONFIDENCE 0.90. 2C §6.1 places "verified human, in role —
+    owner-confirmed" at tier 1, capped at 0.90. Tier 0 is an AUTHORITATIVE
+    SYSTEM OF RECORD — a bank statement, Tally, the GST portal — and none of
+    those is integrated. Calling the owner's own word tier 0 would have been
+    easy and wrong: the cap is what lets a real payment feed supersede this
+    later on AUTHORITY rather than on recency.
+
+    READ BEFORE WRITE. A party has exactly one first payment, so a second
+    claim is a DEFECT, not a correction. The existing value is reported back
+    and nothing is written — idempotent, not an error, because the owner
+    re-sending a command must never depend on remembering whether it landed.
+
+    NO AMOUNT, EVER. The claim carries a timestamp and nothing else. No sum,
+    no currency, no transaction reference, no bank detail. We need to know
+    THAT the first payment happened and WHEN; the money belongs in the
+    accounting system, not the evidence store.
+
+    BITEMPORAL. `valid_from` is when the payment happened (world time) and is
+    what the cohort metric will read; `observed_at` defaults to when the Brain
+    recorded it. They differ whenever the owner backdates, which is precisely
+    why the optional date exists rather than silently stamping "now" onto a
+    payment that arrived last week.
+    """
+    if not (BIC_AVAILABLE and bic_config.is_configured()):
+        return "⚠️ Evidence store unavailable — nothing was recorded."
+
+    try:
+        knowledge_id = _paid_party(target)
+    except Exception as e:
+        # TYPE ONLY. A DbError carries the response body, which on the
+        # identifiers table echoes the phone number.
+        print(f"FIRST_PAYMENT_IDENTITY_FAILED reason={type(e).__name__}")
+        return "⚠️ That party's identity could not be resolved safely."
+
+    if not knowledge_id:
+        return ("🚫 That number is not known to the Brain, so no first payment "
+                "can be recorded against it.\n\n"
+                "Only parties who have contacted us are counted, because a "
+                "party with no first contact belongs to no enquiry cohort. "
+                "Recording it would create an identity, not evidence.")
+
+    existing = bic_claims.history(bic_config.DEFAULT_TENANT_ID, knowledge_id,
+                                  BECAME_CLIENT_PREDICATE)
+    if existing:
+        # PERMANENT. Later payments create no new event and this one is never
+        # overwritten — the first payment is historical fact.
+        prior = (existing[0].get("value") or "")[:10]
+        return (f"ℹ️ Already recorded — first payment {prior}.\n"
+                "A party has exactly one first payment. Later payments do not "
+                "create a new conversion event, and nothing was changed.")
+
+    if not confirmed:
+        stamp = when or "today"
+        return (f"⚠️ Record FIRST PAYMENT received for wa.me/{target}, "
+                f"dated {stamp}?\n\n"
+                "This is permanent business evidence and cannot be edited "
+                "afterwards.\n"
+                f"Send: #paid {target}{(' ' + when) if when else ''} confirm")
+
+    valid_from = datetime.now(IST)
+    if when:
+        try:
+            valid_from = datetime.strptime(when, "%Y-%m-%d").replace(tzinfo=IST)
+        except ValueError:
+            return "❓ Date must be YYYY-MM-DD."
+        if valid_from > datetime.now(IST):
+            # A future first payment is not evidence, it is a typo.
+            return "🚫 That date is in the future — nothing was recorded."
+
+    try:
+        bic_claims.assert_claim(
+            bic_config.DEFAULT_TENANT_ID, knowledge_id,
+            BECAME_CLIENT_PREDICATE, valid_from.isoformat(),
+            source="owner_confirmation", provenance_tier=1,
+            asserted_by=f"owner:{sender[-4:]}",
+            confidence=0.90,
+            # WORLD time. observed_at is left to default to system time.
+            valid_from=valid_from,
+        )
+    except Exception as e:
+        print(f"CLAIM_WRITE_FAILED predicate={BECAME_CLIENT_PREDICATE} "
+              f"reason={type(e).__name__}")
+        return "⚠️ That didn't save. Nothing was recorded — please try again."
+
+    print(f"FIRST_PAYMENT_RECORDED predicate={BECAME_CLIENT_PREDICATE} "
+          f"tier=1 party=...{knowledge_id[-4:]}")
+    return (f"✅ First payment recorded for wa.me/{target} "
+            f"({valid_from.date().isoformat()}).\n"
+            "This party is now counted as converted. The record is permanent.")
 
 
 # The second predicate to reach production, and the first sourced from
