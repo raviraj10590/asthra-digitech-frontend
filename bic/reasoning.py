@@ -85,6 +85,20 @@ PERSISTENCE = "PERSISTENCE"       # 3+ readings, same direction held
 RECURRENCE_T = "RECURRENCE"       # 3+ readings, direction alternates
 TEMPORAL = (POINT_IN_TIME, MOVEMENT, PERSISTENCE, RECURRENCE_T)
 
+# ── Evidence availability, three ways — never collapsed to "missing" ──────
+# The distinction an owner has to act on:
+#   EV_MEASURED    we have a usable reading
+#   EV_UNKNOWN     the predicate IS registered, we could not read it — an
+#                  outage or a gap in collection; someone can go and fetch it
+#   EV_UNKNOWABLE  the predicate is NOT registered — nothing in the business
+#                  records it yet; this needs a DEFINITION, not a query
+# Collapsing these into "missing data" sends someone hunting for a broken
+# query that never existed, or waiting for a number nobody is capturing.
+EV_MEASURED = "MEASURED"
+EV_UNKNOWN = "UNKNOWN"
+EV_UNKNOWABLE = "UNKNOWABLE"
+EVIDENCE_CLASSES = (EV_MEASURED, EV_UNKNOWN, EV_UNKNOWABLE)
+
 # ── Situation classification (§3) ─────────────────────────────────────────
 OBSERVED = "OBSERVED"
 CHANGED = "CHANGED"
@@ -189,6 +203,7 @@ def observation(fact: dict) -> dict:
         "provenance_tier": prov.get("tier"),
         "confidence": fact.get("confidence"),
         "epistemic": FACT,
+        "evidence_class": EV_MEASURED,
         "evidence_ref": fact.get("claim_id"),
     }
 
@@ -212,10 +227,20 @@ def unknowns_from(packet: dict) -> List[dict]:
             "epistemic": UNKNOWN,
             "situation_class": MISSING,
             "missing_class": cls,
+            "evidence_class": (EV_UNKNOWABLE if cls == ctx_mod.UNKNOWABLE
+                               else EV_UNKNOWN),
             "measurable": cls != ctx_mod.UNKNOWABLE,
             "why": ("not in the evidence model — nothing records it yet"
                     if cls == ctx_mod.UNKNOWABLE
                     else "measured, but not currently available"),
+            # WHAT WOULD CLOSE IT — and the two are different work. An
+            # unregistered predicate needs the BUSINESS to define and capture
+            # the event; a registered one that did not arrive needs the
+            # collection path fixed. Naming the wrong one wastes the effort.
+            "closed_by": ("the business defining and capturing this event, "
+                          "then registering it as a predicate"
+                          if cls == ctx_mod.UNKNOWABLE
+                          else "restoring the collection path that supplies it"),
         })
     return out
 
@@ -531,6 +556,41 @@ def diagnose(sit: dict) -> List[dict]:
                 "or measurement loss."),
         })
 
+    # THE DIAGNOSIS ABOUT THE WHOLE BUSINESS, when the scorecard has holes.
+    #
+    # Without this the engine is silent whenever nothing has moved — which is
+    # exactly the state production was in, and "no diagnosis" reads as "nothing
+    # to report" rather than "we cannot tell". Those are opposite messages.
+    #
+    # It is UNRESOLVED, never SUPPORTED, and it makes a claim about our
+    # KNOWLEDGE rather than about the business: enquiry volume being visible
+    # says nothing about whether it converts to anything, and asserting the
+    # business is doing well or badly from one acquisition metric is precisely
+    # the fabrication this engine exists to refuse.
+    blocking = [u for u in sit.get("unknowns") or []]
+    if blocking:
+        measured = [o["label"] for o in sit.get("observations") or []]
+        out.append({
+            "about": "overall business performance",
+            "statement": (
+                "overall business performance cannot be determined from the "
+                "current evidence base"),
+            "state": UNRESOLVED,
+            "epistemic": UNKNOWN,
+            "supporting_evidence": [o.get("evidence_ref")
+                                    for o in sit.get("observations") or []],
+            "contradicting_evidence": [],
+            "confidence": None,
+            "missing_evidence": [u["predicate"] for u in blocking],
+            "assumptions": [],
+            "why_unresolved": (
+                (f"{', '.join(measured)} is measurable, but " if measured
+                 else "") +
+                f"{len(blocking)} of the scorecard's dimensions are not, so "
+                "whether the signals we can see produce any commercial "
+                "outcome is unknown"),
+        })
+
     for c in sit.get("contradictions") or []:
         out.append({
             "about": c["predicate"],
@@ -647,12 +707,20 @@ def prioritise(sit: dict, diagnoses: List[dict]) -> List[dict]:
         # one is a missing definition, the other a missing fetch.
         weight = 0.8 if not u.get("measurable") else 0.5
         items.append({
-            "priority": f"Define and capture {u['predicate']}",
+            "priority": (f"Define and capture {u['predicate']}"
+                         if not u.get("measurable")
+                         else f"Restore collection of {u['predicate']}"),
             "kind": MEASURE,
             "score": weight,
             "epistemic": UNKNOWN,
-            "reason": (f"{u['predicate']} is {u['why']}. It cannot be "
-                       "reasoned about until it exists."),
+            "evidence_class": u.get("evidence_class"),
+            # THE BOTTLENECK, NAMED. Not "we lack data" but which conclusion
+            # this specific absence blocks — that is what makes measuring it
+            # worth doing rather than a chore on a list.
+            "reason": (f"{u['predicate']} is {u['why']}. Until it exists the "
+                       "Brain cannot judge whether the signals it CAN see "
+                       "produce any commercial outcome."),
+            "closed_by": u.get("closed_by"),
             "evidence_refs": [],
             "uncertainty": "high",
             # INFORMATION VALUE, not impact. What is unmeasurable blocks every

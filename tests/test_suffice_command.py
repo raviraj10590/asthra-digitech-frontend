@@ -163,11 +163,13 @@ class Goals(Base):
         `business_month_review` is the first BUSINESS-scoped goal — about
         Asthra rather than a counterparty. It is listed here because
         known_ids() is the whole registry; #suffice itself still resolves a
-        CUSTOMER party and is unaffected by it.
+        CUSTOMER party and is unaffected by it. `business_operating_review`
+        is the same: BUSINESS-scoped, reusing predicates that already exist.
         """
         self.assertEqual(gl.known_ids(),
                          ["business_focus_recommendation",
-                          "business_month_review", "real_estate_enquiry",
+                          "business_month_review", "business_operating_review",
+                          "real_estate_enquiry",
                           "social_media_enquiry", "transformer_quotation"])
 
     def test_the_same_evidence_gives_different_verdicts_by_goal(self):

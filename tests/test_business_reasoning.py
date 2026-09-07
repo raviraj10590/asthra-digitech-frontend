@@ -475,9 +475,14 @@ class ConsultBriefIsPacketOnly(unittest.TestCase):
             self.assertIn(banned, blob)
         self.assertIn("do not recommend spending changes", blob)
 
-    def test_the_brief_states_that_one_reading_is_not_a_trend(self):
+    def test_the_brief_states_why_no_movement_could_be_derived(self):
+        """Was "a single reading is not a trend" — true HERE (one fact, no
+        history) but printed unconditionally, so production saw it while
+        holding ten readings. The brief now states which case it is in."""
         out = r.reason(packet([fact("14")]))
-        self.assertIn("not a trend", str(w._reasoning_brief(out, "q")))
+        blob = str(w._reasoning_brief(out, "q"))
+        self.assertIn("no comparable earlier reading exists yet", blob)
+        self.assertNotIn("a single reading is not a trend", blob)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -503,7 +508,9 @@ class ExistingBehaviourUnchanged(unittest.TestCase):
         import inspect
         self.assertNotIn("business_focus_recommendation",
                          inspect.getsource(w.tool_business_reasoning))
-        self.assertEqual(w.REASONING_GOAL, "business_month_review")
+        # The loop now reasons over the SCORECARD goal. Still not the
+        # recommendation goal, which keeps its own gate.
+        self.assertEqual(w.REASONING_GOAL, "business_operating_review")
 
     def test_AE_the_client_path_is_unchanged(self):
         import inspect

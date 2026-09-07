@@ -2923,7 +2923,14 @@ def render_business_status(packet: dict, proposal, outcome,
 # NOTHING IS AUTHORIZED OR EXECUTED. decide.authorize() is not called, no
 # Commitment is created, no tool with side effects runs (§16).
 
-REASONING_GOAL = "business_month_review"
+# THE SCORECARD, NOT THE ONE-METRIC GOAL. business_month_review asks for a
+# single predicate, so it reaches PROCEED with an empty gap list — and
+# production proved the cost: the loop ran correctly and said almost nothing,
+# because every stage after SITUATION is fed by gaps or changes and there were
+# neither. business_operating_review declares the five dimensions the business
+# is actually judged by; four are unregistered, which does not make them
+# measurable and is not meant to — it makes them VISIBLE.
+REASONING_GOAL = "business_operating_review"
 
 
 def _reasoning_history(tenant: str, subject: str, predicates) -> dict:
@@ -2963,12 +2970,22 @@ def _reasoning_brief(result: dict, question: str) -> list:
     for t in sit["changes"] or []:
         lines.append(f"- {t['label']}: {t['from_value']} -> {t['to_value']} "
                      f"({t['pattern']}, {t['epistemic']}). CAUSE NOT ESTABLISHED.")
-    if not sit["changes"]:
-        lines.append("- (none — a single reading is not a trend)")
+    # SAME CORRECTION AS THE RENDERER, and it matters more here: this text is
+    # what the model reads. Telling it "a single reading" while ten flat
+    # readings exist invites it to hedge about data it actually has, or to
+    # treat a genuine stable period as an absence of information.
+    for t in sit.get("stable_signals") or []:
+        lines.append(f"- {t['label']}: STABLE at {t['to_value']} across "
+                     f"{t['observations']} comparable readings. No movement.")
+    if not sit["changes"] and not sit.get("stable_signals"):
+        n = len(sit["observations"])
+        lines.append("- (none — " + ("no comparable earlier reading exists yet"
+                                     if n else "nothing is measured") + ")")
 
     lines.append("\nNOT MEASURED (you may NOT estimate, infer or discuss these):")
     for u in sit["unknowns"] or []:
-        lines.append(f"- {u['predicate']}: {u['why']}")
+        lines.append(f"- [{u.get('evidence_class')}] {u['predicate']}: "
+                     f"{u['why']}")
     if not sit["unknowns"]:
         lines.append("- (none)")
 
@@ -3099,8 +3116,22 @@ def render_business_reasoning(result: dict, proposal, outcome,
             lines.append(f"• {t['label']}: {t['from_value']} → {t['to_value']} "
                          f"({t['pattern'].lower()}, {t['relative']:.0%})"
                          "\n  Cause NOT established.")
+    elif sit.get("stable_signals"):
+        # THE BUG THIS REPLACES. The old branch said "a single reading is not
+        # a trend" whenever `changes` was empty — and production hit it with
+        # TEN comparable readings sitting flat at 20. Saying we lack data when
+        # we have plenty is the most misleading thing this renderer could do.
+        lines.append("\n📈 DERIVED (comparable readings, no movement)")
+        for t in sit["stable_signals"]:
+            lines.append(f"• {t['label']}: stable at {t['to_value']} across "
+                         f"{t['observations']} comparable readings "
+                         f"({t['relative']:.0%} change)")
     else:
-        lines.append("\n📈 DERIVED: none — a single reading is not a trend.")
+        # Genuinely one reading, or none comparable. Say which.
+        n = len(sit.get("observations") or [])
+        lines.append("\n📈 DERIVED: no movement can be derived — " +
+                     ("no comparable earlier reading exists yet"
+                      if n else "nothing is currently measured"))
 
     if result["diagnoses"]:
         lines.append("\n🔍 DIAGNOSIS")
@@ -3128,9 +3159,18 @@ def render_business_reasoning(result: dict, proposal, outcome,
             lines.append(f"• {h['statement']}\n  {tail}")
 
     if sit["unknowns"]:
-        lines.append("\n🚫 CANNOT BE ASSESSED")
-        for u in sit["unknowns"]:
-            lines.append(f"• {u['predicate']} — {u['why']}")
+        # THREE CLASSES, NOT ONE. "not yet defined" and "defined but did not
+        # arrive" need different people to do different work.
+        undefined = [u for u in sit["unknowns"] if not u.get("measurable")]
+        unavailable = [u for u in sit["unknowns"] if u.get("measurable")]
+        if undefined:
+            lines.append("\n🚫 NOT YET MEASURABLE (no definition exists)")
+            for u in undefined:
+                lines.append(f"• {u['predicate']}\n  {u['closed_by']}")
+        if unavailable:
+            lines.append("\n⚠️ MEASURED BUT UNAVAILABLE (collection gap)")
+            for u in unavailable:
+                lines.append(f"• {u['predicate']}\n  {u['closed_by']}")
 
     plan = result.get("decision_plan")
     if plan:
@@ -4245,7 +4285,14 @@ _BUSINESS_TOPIC = (
 # core's first stage. Kept local rather than added to _REASONING_MARKERS,
 # because that set is also what business_status uses to exclude; widening it
 # there would silently change which questions the descriptive tool refuses.
+#
+# "business review" is here rather than in _REASONING_MARKERS for the same
+# reason: it is the name the OWNER gives this capability out loud, it carries
+# no "why"/"should", and today it reaches NOTHING — neither gate claims it, so
+# it falls through to an evidence-free model answer. Matched as the full two
+# word phrase, never bare "review", so "review my clients" stays a lookup.
 _SITUATION_MARKERS = ("happening", "going on", "situation", "state of",
+                      "business review", "review of the business",
                       "ಏನಾಗುತ್ತಿದೆ")
 
 # §16 adds two more OWNER question shapes, and both are already answered by

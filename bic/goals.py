@@ -162,6 +162,40 @@ GOALS = {
     # UNKNOWABLE. The declared class states what will be true once the
     # predicates exist — none of these is answerable by asking a customer;
     # each is measured or derived.
+    # ── THE BUSINESS SCORECARD, and why it declares what it cannot get ────
+    # business_month_review asks for ONE metric, so it reaches PROCEED with an
+    # empty gap list — and production proved what that costs: the reasoning
+    # loop ran correctly and told the owner almost nothing, because every stage
+    # after SITUATION is fed by gaps or changes and there were neither.
+    #
+    # This goal declares the five dimensions the business actually needs to
+    # judge itself by. Four of them are NOT REGISTERED, and declaring them does
+    # not make them measurable — that is the point. Sufficiency will classify
+    # them UNKNOWABLE and the verdict will be REFUSE, which is the honest
+    # verdict for "how is the business doing" on this evidence base. What
+    # changes is that the gaps become VISIBLE, so the loop can name what is
+    # missing, why it matters and what would fix it.
+    #
+    # SAME PREDICATES AS business_focus_recommendation, deliberately: one
+    # definition of the scorecard, not two that can drift. This goal DESCRIBES
+    # and DIAGNOSES; that one RECOMMENDS and stays governed by its own gate.
+    # Sufficiency is a property of the (evidence, ACTION) pair, so the same
+    # five slots licence a review while still refusing a recommendation.
+    "business_operating_review": goal(
+        "business_operating_review", 2,
+        [slot("new_enquiries", NEW_ENQUIRIES, OBTAINABLE_BY_RETRIEVAL),
+         slot("conversion_rate", CONVERSION_RATE, OBTAINABLE_BY_RETRIEVAL),
+         slot("pipeline_value", PIPELINE_VALUE, OBTAINABLE_BY_RETRIEVAL),
+         slot("channel_attribution", CHANNEL_ATTRIBUTION,
+              OBTAINABLE_BY_RETRIEVAL),
+         slot("capacity", CAPACITY, OBTAINABLE_BY_RETRIEVAL)],
+        "Review the current business situation and, just as importantly, the "
+        "evidence gaps preventing a stronger conclusion. Descriptive and "
+        "diagnostic only: it surfaces what is measured, what is unknown and "
+        "what is not yet measurable at all. It recommends measurement and "
+        "investigation, never action.",
+        scope=BUSINESS),
+
     "business_focus_recommendation": goal(
         "business_focus_recommendation", 2,
         [slot("new_enquiries", NEW_ENQUIRIES, OBTAINABLE_BY_RETRIEVAL),

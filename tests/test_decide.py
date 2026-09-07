@@ -187,10 +187,16 @@ class GoalRecognition(unittest.TestCase):
         registered biz.pipeline predicate. DECIDE never reaches it — the
         assertion below in test_decide_is_party_scoped proves decide's own
         goal is still PARTY-scoped.
+
+        `business_operating_review` is likewise BUSINESS-scoped and adds NO
+        predicate: it declares the same five references
+        business_focus_recommendation already declared, so the vocabulary is
+        unchanged and only the (evidence, ACTION) pairing is new.
         """
         self.assertEqual(sorted(goals.known_ids()),
                          ["business_focus_recommendation",
-                          "business_month_review", "real_estate_enquiry",
+                          "business_month_review", "business_operating_review",
+                          "real_estate_enquiry",
                           "social_media_enquiry", "transformer_quotation"])
         for gid in ("real_estate_enquiry", "social_media_enquiry",
                     "transformer_quotation"):
