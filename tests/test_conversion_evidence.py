@@ -309,27 +309,28 @@ class NothingElseIsAConversion(unittest.TestCase):
 
 class TheMetricIsBlockedOnPolicy(unittest.TestCase):
 
-    def test_19_the_conversion_metric_was_not_invented(self):
-        """POLICY_REQUIRED: conversion window. Registering the ratio without a
-        window would produce a confident, wrong number — worse than UNKNOWN."""
-        import bic.registry  # noqa: F401
-        src = io.open(os.path.join(os.path.dirname(__file__), "..",
-                                   "bic", "goals.py"), encoding="utf-8").read()
-        self.assertNotIn("conversion_rate@1\"", src.replace(
-            gl.CONVERSION_RATE, "<declared-gap>"))
-        for f in os.listdir(MIG):
-            if f >= "20260907":
-                sql = io.open(os.path.join(MIG, f), encoding="utf-8").read()
-                self.assertNotIn("'conversion_rate'", sql,
-                                 f"{f} registers the blocked metric")
-
-    def test_19b_no_conversion_window_was_silently_defaulted(self):
+    def test_19_the_window_is_declared_once_and_is_30(self):
+        """SUPERSEDES the previous slice's "metric must not exist" test. The
+        window was POLICY_REQUIRED and is now ruled at 30 days, so the metric
+        is legitimately registered. What must still hold is that 30 lives in
+        exactly ONE place: a second copy is how 30 and 7 end up coexisting."""
+        self.assertEqual(ce.WINDOW_DAYS, 30)
+        code = module_code("bic/conversion_evidence.py")
+        self.assertEqual(code.count("WINDOW_DAYS = 30"), 1)
         for mod in ("api/webhook.py", "bic/reasoning.py", "bic/goals.py",
                     "bic/pipeline_evidence.py"):
-            code = module_code(mod)
-            for bad in ("CONVERSION_WINDOW", "ATTRIBUTION_WINDOW",
-                        "conversion_window_days", "WINDOW_DAYS"):
-                self.assertNotIn(bad, code, f"{mod} invented a window")
+            self.assertNotIn("WINDOW_DAYS", module_code(mod),
+                             f"{mod} holds a second copy of the window")
+
+    def test_19b_no_second_window_was_smuggled_in(self):
+        """A literal 30 anywhere in the arithmetic that is not WINDOW_DAYS
+        would be a hardcoded window that the constant no longer controls."""
+        import ast, inspect
+        tree = ast.parse(inspect.getsource(ce.cohort))
+        literals = [n.value for n in ast.walk(tree)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, int)]
+        self.assertNotIn(30, literals, "a bare 30 bypasses WINDOW_DAYS")
+        self.assertIn("WINDOW_DAYS", executable_only(ce.window_end_for))
 
     def test_18_20_21_conversion_stays_a_declared_gap_never_zero(self):
         """Missing evidence is NOT zero. The review must keep reporting the
@@ -517,3 +518,369 @@ class ConfirmationIsExplicit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# THE DERIVED METRIC — biz.pipeline.conversion_rate@1
+#
+# The window was POLICY_REQUIRED in the previous slice and is now ruled:
+#   event   first payment received
+#   window  30 calendar days from the party's OWN first enquiry
+#   basis   ENQUIRY COHORT
+#
+# The tests that matter most here are the ones about what the metric REFUSES
+# to say: a cohort whose window is still open, and a cohort that predates the
+# conversion event entirely. Both are cases where an easy number exists and is
+# wrong.
+# ══════════════════════════════════════════════════════════════════════════
+
+from datetime import timezone                                  # noqa: E402
+from bic import conversion_evidence as ce                      # noqa: E402
+
+CONV_PRED = "biz.pipeline.conversion_rate@1"
+SEED_RATE = os.path.join(MIG, "20260907000027_bic_seed_conversion_rate.sql")
+
+
+def ts(s):
+    return datetime.fromisoformat(s)
+
+
+def cohort(enquiries, payments=None, now="2026-11-01T00:00:00+05:30",
+           at="2026-08-15T00:00:00+05:30",
+           epoch="2026-07-01T00:00:00+00:00"):
+    """Drive the REAL producer over a synthetic claim store."""
+    payments = payments or {}
+
+    def reader(tenant, pred, subjects=None, window_start=None, window_end=None):
+        if "first_seen" in pred:
+            src = dict(enquiries)
+            if window_start is not None:
+                src = {k: v for k, v in src.items()
+                       if window_start <= ts(v).astimezone(timezone.utc)
+                       < window_end}
+            return src
+        return {k: v for k, v in payments.items()
+                if subjects is None or k in subjects}
+
+    with mock.patch.object(ce.claims, "valid_from_by_subject", reader), \
+         mock.patch.object(ce.registry, "lookup_ref",
+                           lambda r: {"activated_at": epoch} if epoch else None), \
+         mock.patch.object(ce.config, "DEFAULT_TENANT_ID", TENANT):
+        return ce.cohort(TENANT, at=ts(at), now=ts(now))
+
+
+AUG = {"p1": "2026-08-02T10:00:00+05:30", "p2": "2026-08-10T10:00:00+05:30",
+       "p3": "2026-08-20T10:00:00+05:30", "p4": "2026-08-28T10:00:00+05:30"}
+
+
+class TheThirtyDayWindow(unittest.TestCase):
+
+    def test_17_a_payment_within_30_days_counts(self):
+        c = cohort(AUG, {"p1": "2026-08-05T10:00:00+05:30"})
+        self.assertEqual(c["numerator"], 1)
+        self.assertIn("p1", c["numerator_evidence"])
+
+    def test_18_a_payment_exactly_on_day_30_counts(self):
+        """INCLUSIVE. `<` and `<=` are one character apart and the difference
+        silently drops every day-30 conversion."""
+        c = cohort({"p2": AUG["p2"]}, {"p2": "2026-09-09T10:00:00+05:30"})
+        self.assertEqual(c["numerator"], 1)
+
+    def test_19_a_payment_on_day_31_does_not_count(self):
+        c = cohort({"p2": AUG["p2"]}, {"p2": "2026-09-09T10:00:01+05:30"})
+        self.assertEqual(c["numerator"], 0)
+        self.assertEqual(c["rate"], 0.0)
+
+    def test_20_a_payment_before_the_first_enquiry_cannot_count(self):
+        """A pre-existing client. Counting it would credit an enquiry that
+        caused nothing."""
+        c = cohort({"p1": AUG["p1"]}, {"p1": "2026-07-01T10:00:00+05:30"})
+        self.assertEqual(c["numerator"], 0)
+        self.assertEqual(c["numerator_evidence"], [])
+
+    def test_the_window_is_thirty_days_exactly(self):
+        self.assertEqual(ce.WINDOW_DAYS, 30)
+        seen = ts("2026-08-01T00:00:00+05:30")
+        self.assertEqual(ce.window_end_for(seen),
+                         ts("2026-08-31T00:00:00+05:30"))
+
+    def test_the_window_runs_from_each_partys_own_enquiry(self):
+        """Not from a cohort-wide boundary — that would be wrong for everyone
+        but the first enquirer."""
+        c = cohort(AUG, {"p4": "2026-09-25T10:00:00+05:30"})
+        self.assertEqual(c["numerator"], 1, "p4 enquired 28 Aug; 25 Sep is day 28")
+
+
+class CohortStateIsHonest(unittest.TestCase):
+
+    def test_23_an_incomplete_cohort_is_provisional(self):
+        c = cohort(AUG, {"p1": "2026-08-05T10:00:00+05:30"},
+                   now="2026-09-10T00:00:00+05:30")
+        self.assertEqual(c["state"], ce.PROVISIONAL)
+
+    def test_24_a_closed_cohort_becomes_final(self):
+        c = cohort(AUG, {"p1": "2026-08-05T10:00:00+05:30"},
+                   now="2026-10-01T00:00:00+05:30")
+        self.assertEqual(c["state"], ce.FINAL)
+
+    def test_a_september_cohort_is_not_final_on_october_1(self):
+        """The example named in the ruling."""
+        sept = {"s1": "2026-09-25T10:00:00+05:30"}
+        c = cohort(sept, at="2026-09-15T00:00:00+05:30",
+                   now="2026-10-01T00:00:00+05:30")
+        self.assertEqual(c["state"], ce.PROVISIONAL)
+        self.assertEqual(c["window_closes_at"], ts("2026-10-25T10:00:00+05:30"))
+
+    def test_a_provisional_cohort_still_reports_what_it_observed(self):
+        """Real and useful — just never labelled final."""
+        c = cohort(AUG, {"p1": "2026-08-05T10:00:00+05:30"},
+                   now="2026-09-10T00:00:00+05:30")
+        self.assertEqual(c["numerator"], 1)
+        self.assertEqual(c["rate"], 0.25)
+        self.assertEqual(c["state"], ce.PROVISIONAL)
+
+    def test_only_a_final_cohort_is_ever_asserted(self):
+        writes = []
+        with mock.patch.object(ce.claims, "assert_claim",
+                               lambda *a, **k: writes.append((a, k))), \
+             mock.patch.object(ce, "business_subject", lambda t: "org"), \
+             mock.patch.object(ce.claims, "current", lambda *a, **k: {"claims": []}):
+            for now, expect in (("2026-09-10T00:00:00+05:30", 0),
+                                ("2026-10-01T00:00:00+05:30", 1)):
+                writes.clear()
+                def reader(tenant, pred, subjects=None, window_start=None,
+                           window_end=None):
+                    if "first_seen" in pred:
+                        return dict(AUG)
+                    return {"p1": "2026-08-05T10:00:00+05:30"}
+                with mock.patch.object(ce.claims, "valid_from_by_subject", reader), \
+                     mock.patch.object(ce.registry, "lookup_ref",
+                                       lambda r: {"activated_at": "2026-07-01T00:00:00+00:00"}), \
+                     mock.patch.object(ce.config, "DEFAULT_TENANT_ID", TENANT):
+                    ce.record(TENANT, at=ts("2026-08-15T00:00:00+05:30"),
+                              observed_at=ts(now))
+                self.assertEqual(len(writes), expect, now)
+
+
+class MissingIsNeverZero(unittest.TestCase):
+
+    def test_21_22_a_cohort_predating_the_event_is_not_measurable(self):
+        """0 recorded conversions before the epoch means 'we were not
+        recording', not 'nobody paid'."""
+        c = cohort(AUG, {}, epoch="2026-09-07T00:00:00+00:00")
+        self.assertFalse(c["measurable"])
+        self.assertIsNone(c["numerator"])
+        self.assertIsNone(c["rate"])
+        self.assertIn("did not exist", c["reason"])
+
+    def test_22b_an_unregistered_event_makes_nothing_measurable(self):
+        c = cohort(AUG, {}, epoch=None)
+        self.assertFalse(c["measurable"])
+        self.assertIsNone(c["rate"])
+
+    def test_the_epoch_is_read_from_the_registry_not_hardcoded(self):
+        src = executable_only(ce.capability_epoch)
+        self.assertIn("lookup_ref", src)
+        code = module_code("bic/conversion_evidence.py")
+        self.assertNotIn("2026-09-07", code, "a hardcoded epoch would drift")
+
+    def test_27_28_no_division_by_zero_and_no_invented_rate(self):
+        c = cohort({}, {})
+        self.assertEqual(c["denominator"], 0)
+        self.assertIsNone(c["rate"], "an empty month has no rate, not 0%")
+        self.assertIn("no enquiries", c["reason"])
+
+    def test_a_measured_zero_is_still_a_real_zero(self):
+        """Distinct from unknown: the window closed, we WERE recording, and
+        nobody paid. That is evidence."""
+        c = cohort(AUG, {})
+        self.assertTrue(c["measurable"])
+        self.assertEqual(c["numerator"], 0)
+        self.assertEqual(c["rate"], 0.0)
+
+
+class CohortMembership(unittest.TestCase):
+
+    def test_15_16_the_denominator_is_distinct_parties(self):
+        c = cohort(AUG, {})
+        self.assertEqual(c["denominator"], 4)
+        self.assertEqual(len(set(c["denominator_evidence"])), 4)
+
+    def test_16b_repeat_enquiries_cannot_inflate_the_denominator(self):
+        """Guaranteed upstream: first_seen_at is `single` cardinality, and the
+        reader takes the EARLIEST claim per subject."""
+        self.assertIn("'single'", io.open(
+            os.path.join(MIG, "20260816000012_bic_seed_first_seen_at.sql"),
+            encoding="utf-8").read())
+        src = module_code("bic/claims.py")
+        self.assertIn("setdefault", src)
+
+    def test_a_payment_from_outside_the_cohort_is_ignored(self):
+        c = cohort({"p1": AUG["p1"]},
+                   {"p1": "2026-08-05T10:00:00+05:30",
+                    "stranger": "2026-08-06T10:00:00+05:30"})
+        self.assertEqual(c["numerator"], 1)
+        self.assertNotIn("stranger", c["numerator_evidence"])
+
+    def test_25_26_both_sides_preserve_their_evidence(self):
+        c = cohort(AUG, {"p1": "2026-08-05T10:00:00+05:30"})
+        self.assertEqual(c["denominator_evidence"], ["p1", "p2", "p3", "p4"])
+        self.assertEqual(c["numerator_evidence"], ["p1"])
+        self.assertIsNotNone(c["window_closes_at"])
+
+
+class TheMetricRegistration(unittest.TestCase):
+
+    def test_the_rate_is_bounded_zero_to_one(self):
+        sql = io.open(SEED_RATE, encoding="utf-8").read()
+        self.assertIn("'min', 0", sql)
+        self.assertIn("'max', 1", sql)
+        self.assertIn("'ratio'", sql)
+        self.assertIn("'QUANTITATIVE'", sql)
+        self.assertIn("'single'", sql)
+
+    def test_it_is_tier_3_derived_never_stronger_than_its_evidence(self):
+        self.assertEqual(ce.PROVENANCE_TIER, 3)
+        sql = io.open(SEED_RATE, encoding="utf-8").read()
+        self.assertIn("ORGANIZATION", sql)
+
+    def test_the_migration_is_registry_only(self):
+        for f in ("20260907000025_bic_seed_became_client_at.sql",
+                  "20260907000026_bic_first_payment_tool.sql",
+                  "20260907000027_bic_seed_conversion_rate.sql"):
+            sql = io.open(os.path.join(MIG, f), encoding="utf-8").read().upper()
+            for banned in ("CREATE TABLE", "ALTER TABLE", "DROP ", "GRANT ",
+                           "CREATE POLICY", "ROW LEVEL SECURITY"):
+                self.assertNotIn(banned, sql, f"{f}: {banned}")
+
+    def test_31_the_enquiry_metric_is_untouched(self):
+        import bic.pipeline_evidence as pe
+        self.assertEqual(pe.PREDICATE, "biz.pipeline.new_enquiries_per_month@1")
+        self.assertEqual(pe.PROVENANCE_TIER, 3)
+
+    def test_30_reasoning_consumes_it_generically(self):
+        code = module_code("bic/reasoning.py").lower()
+        for bad in ("conversion", "became_client", "cohort", "provisional"):
+            self.assertNotIn(bad, code, f"hardcoded {bad} in reasoning")
+
+    def test_29_the_review_slot_points_at_this_predicate(self):
+        self.assertEqual(gl.CONVERSION_RATE, CONV_PRED)
+        self.assertEqual(ce.PREDICATE, CONV_PRED)
+
+    def test_35_no_financial_payload_in_the_producer(self):
+        code = module_code("bic/conversion_evidence.py").lower()
+        for banned in ("amount", "currency", "invoice", "transaction",
+                       "card", "bank", "upi"):
+            self.assertNotIn(banned, code, banned)
+
+    def test_34_the_producer_reads_no_pii(self):
+        code = module_code("bic/conversion_evidence.py").lower()
+        for banned in ("phone", "name", "email", "wamid", "whatsapp_messages"):
+            self.assertNotIn(banned, code, banned)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# claims.valid_from_by_subject — the new store read, driven for real
+#
+# Every test above mocks this function, which meant its OWN guards were never
+# exercised: two mutations (retracted claims counted, tenant check removed)
+# survived the entire suite. These drive the real function over a stubbed
+# `select` so those guards are held by something.
+# ══════════════════════════════════════════════════════════════════════════
+
+from bic import claims as cl                                   # noqa: E402
+
+
+class ValidFromBySubject(unittest.TestCase):
+
+    def drive(self, rows, retracted=(), **kw):
+        captured = {}
+
+        def fake_select(table, params, timeout=None):
+            captured.setdefault("calls", []).append((table, params))
+            if table == cl.RETRACTIONS_TABLE:
+                return [{"claim_id": c} for c in retracted]
+            return rows
+
+        with mock.patch.object(cl, "select", fake_select), \
+             mock.patch.object(cl.registry, "parse_ref",
+                               lambda ref: ("core.party", "first_seen_at", 1)):
+            out = cl.valid_from_by_subject(TENANT, "core.party.first_seen_at@1",
+                                           **kw)
+        return out, captured
+
+    def test_the_earliest_claim_wins_per_subject(self):
+        """Both predicates this serves are `single` and permanent. Taking the
+        later claim would move a party's window and could push a real
+        conversion outside it."""
+        out, _ = self.drive([
+            {"claim_id": "c1", "subject": "p1", "valid_from": "2026-08-01T00:00:00+00:00"},
+            {"claim_id": "c2", "subject": "p1", "valid_from": "2026-08-09T00:00:00+00:00"},
+        ])
+        self.assertEqual(out, {"p1": "2026-08-01T00:00:00+00:00"})
+
+    def test_a_retracted_claim_is_not_evidence(self):
+        out, _ = self.drive([
+            {"claim_id": "c1", "subject": "p1", "valid_from": "2026-08-01T00:00:00+00:00"},
+            {"claim_id": "c2", "subject": "p2", "valid_from": "2026-08-02T00:00:00+00:00"},
+        ], retracted=("c1",))
+        self.assertEqual(list(out), ["p2"])
+
+    def test_a_retraction_falls_through_to_the_next_live_claim(self):
+        out, _ = self.drive([
+            {"claim_id": "c1", "subject": "p1", "valid_from": "2026-08-01T00:00:00+00:00"},
+            {"claim_id": "c2", "subject": "p1", "valid_from": "2026-08-09T00:00:00+00:00"},
+        ], retracted=("c1",))
+        self.assertEqual(out, {"p1": "2026-08-09T00:00:00+00:00"})
+
+    def test_a_tenant_is_required(self):
+        with self.assertRaises(cl.ClaimError):
+            cl.valid_from_by_subject("", "core.party.first_seen_at@1")
+
+    def test_the_tenant_is_actually_sent_to_the_store(self):
+        _, cap = self.drive([])
+        table, params = cap["calls"][0]
+        self.assertEqual(params["tenant_id"], f"eq.{TENANT}")
+
+    def test_the_window_is_half_open(self):
+        """An event at exactly window_end belongs to the NEXT window, so
+        consecutive cohorts partition time with no double-count and no gap."""
+        rows = [{"claim_id": "c1", "subject": "p1",
+                 "valid_from": "2026-09-01T00:00:00+00:00"}]
+        out, _ = self.drive(rows,
+                            window_start=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                            window_end=datetime(2026, 9, 1, tzinfo=timezone.utc))
+        self.assertEqual(out, {}, "an event at window_end is the next window's")
+
+    def test_an_empty_subject_list_short_circuits(self):
+        with mock.patch.object(cl, "select",
+                               lambda *a, **k: self.fail("must not query")):
+            self.assertEqual(
+                cl.valid_from_by_subject(TENANT, "core.party.first_seen_at@1",
+                                         subjects=[]), {})
+
+    def test_the_subject_filter_is_sent_when_given(self):
+        _, cap = self.drive([], subjects=["p1", "p2"])
+        _, params = cap["calls"][0]
+        self.assertIn("subject", params)
+        self.assertIn("p1", params["subject"])
+        self.assertTrue(params["subject"].startswith("in."))
+
+
+class NumeratorMembershipIsEnforcedByTheLoop(unittest.TestCase):
+
+    def test_only_cohort_members_can_convert(self):
+        """The `subjects=` query filter is an optimisation; the correctness
+        boundary is iterating the DENOMINATOR and looking payments up, never
+        the reverse. A mutation that dropped the filter changed nothing, which
+        is how this was found."""
+        import ast, inspect
+        tree = ast.parse(inspect.getsource(ce.cohort).lstrip())
+        loops = [n for n in ast.walk(tree) if isinstance(n, ast.For)]
+        targets = []
+        for lp in loops:
+            it = lp.iter
+            if isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute):
+                targets.append((getattr(it.func.value, "id", ""), it.func.attr))
+        self.assertIn(("enquired", "items"), targets,
+                      "the numerator must iterate the cohort, not the payments")

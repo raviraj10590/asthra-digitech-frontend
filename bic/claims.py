@@ -316,6 +316,59 @@ def distinct_subjects_in_window(tenant_id: str, predicate_ref: str,
     return sorted({r["subject"] for r in rows if r["claim_id"] not in dead})
 
 
+def valid_from_by_subject(tenant_id: str, predicate_ref: str,
+                          subjects: List[str] = None,
+                          window_start=None, window_end=None) -> dict:
+    """{subject: EARLIEST live valid_from} for a predicate.
+
+    distinct_subjects_in_window answers "who", which is all a count needs. A
+    COHORT needs "who, and when for each of them": every party's conversion
+    window runs 30 days from THAT party's own first contact, so a single
+    cohort-wide boundary would be wrong for everyone but the first enquirer.
+
+    EARLIEST, not latest. Both predicates this serves are `single` and
+    permanent — a first contact and a first payment. If two live claims exist
+    the earlier one is the first occurrence by definition, and taking the
+    later would silently move a party's window and could push a real
+    conversion outside it.
+
+    Half-open window and retraction handling are identical to
+    distinct_subjects_in_window, and for the same reasons.
+    """
+    if not tenant_id:
+        raise ClaimError("valid_from_by_subject needs a tenant")
+    if subjects is not None and not subjects:
+        return {}
+    ns, concept, _version = registry.parse_ref(predicate_ref)
+    params = {
+        "tenant_id": f"eq.{tenant_id}",
+        "predicate_ns": f"eq.{ns}",
+        "predicate_concept": f"eq.{concept}",
+        "select": "claim_id,subject,valid_from",
+        "order": "valid_from.asc",
+    }
+    if window_start is not None:
+        params["valid_from"] = f"gte.{_iso(window_start)}"
+    if subjects is not None:
+        params["subject"] = "in.({})".format(
+            ",".join('"%s"' % s.replace('"', '') for s in subjects))
+    rows = select(TABLE, params, timeout=5)
+    if window_end is not None:
+        end = _iso(window_end)
+        rows = [r for r in rows if str(r.get("valid_from") or "") < end]
+    if not rows:
+        return {}
+    dead = _retracted_ids(tenant_id, [r["claim_id"] for r in rows])
+    out = {}
+    for r in rows:
+        if r["claim_id"] in dead:
+            continue
+        # rows arrive valid_from.asc, so the first seen per subject is the
+        # earliest. setdefault keeps it and ignores anything later.
+        out.setdefault(r["subject"], r["valid_from"])
+    return out
+
+
 def _retracted_ids(tenant_id: str, claim_ids: List[str]) -> set:
     if not claim_ids:
         return set()

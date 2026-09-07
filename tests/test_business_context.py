@@ -603,10 +603,17 @@ class FocusRecommendationGoal(unittest.TestCase):
         preds = [s["predicate"] for s in self.goal()["required_slots"]]
         self.assertIn(gl.NEW_ENQUIRIES, preds)
 
-    def test_the_four_predicates_are_deliberately_unregistered(self):
+    def test_the_remaining_predicates_are_deliberately_unregistered(self):
         """Naming a predicate does not create it — 2A registration is a
         separate, deliberate act that freezes a meaning forever. This pins
-        that none of the four was smuggled into a migration.
+        that none of them was smuggled into a migration.
+
+        WAS "the four". CONVERSION_RATE is now legitimately registered: the
+        owner ruled the conversion window (first payment, 30 days, enquiry
+        cohort) on 2026-09-07, which is precisely the deliberate act this test
+        exists to require. It is asserted as REGISTERED below rather than
+        dropped from the test, so the change stays visible and a future
+        accidental registration of the other three still fails.
 
         PRECISE, not a substring scan: it looks only inside `insert into
         bic_concepts` statements and requires the namespace and concept to
@@ -631,8 +638,11 @@ class FocusRecommendationGoal(unittest.TestCase):
         # The control: the one predicate that IS registered must be found,
         # otherwise this test would pass by finding nothing at all.
         self.assertIn("biz.pipeline.new_enquiries_per_month", registered)
-        for ref in (gl.CONVERSION_RATE, gl.PIPELINE_VALUE,
-                    gl.CHANNEL_ATTRIBUTION, gl.CAPACITY):
+        # Registered by owner ruling, with its window written into the seed.
+        self.assertIn(gl.CONVERSION_RATE.split("@")[0], registered)
+        self.assertIn("core.party.became_client_at", registered)
+        # Still unregistered, and each still needs its own business decision.
+        for ref in (gl.PIPELINE_VALUE, gl.CHANNEL_ATTRIBUTION, gl.CAPACITY):
             self.assertNotIn(ref.split("@")[0], registered, ref)
 
     def test_the_description_states_what_it_requires(self):
