@@ -19,6 +19,7 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from bic import (commitment as bic_commitment, config as bic_config,
+                     conversion_evidence as bic_conversion_evidence,
                      outcome_producers as bic_outcome_producers,
                      pipeline_evidence as bic_pipeline_evidence)
     BIC_AVAILABLE = True
@@ -245,6 +246,48 @@ class handler(BaseHTTPRequestHandler):
                           f"valid_until={claim['valid_until']}")
             except Exception as e:
                 print(f"bic pipeline evidence failed (ignored): "
+                      f"{type(e).__name__}")
+
+        # ── 5 · CONVERSION COHORT FINALIZATION ────────────────────────────
+        #
+        # THE BRAIN OWNS THE MEASUREMENT LIFECYCLE. A cohort closes 30 days
+        # after its LAST enquirer's first contact, which is a different date
+        # for every month and is nobody's job to remember. Without this block
+        # the conversion metric would exist, be correct, and never be written.
+        #
+        # RIDES THE EXISTING SCHEDULER, like the four blocks above. Vercel
+        # Hobby caps at 2 crons and both are in use, so this is a fifth
+        # best-effort block on the daily job rather than a third cron.
+        #
+        # SAFE TO RUN EVERY DAY. finalize() is idempotent per COHORT, not
+        # merely per run: a cohort that already carries a claim is never asked
+        # again, so the daily job writes nothing on the vast majority of days
+        # and exactly one claim on the day a cohort closes.
+        #
+        # SELF-HEALING. The months it considers run from the registry epoch to
+        # now, derived from evidence rather than from when this last ran — so
+        # an outage of any length is repaired on the next successful run
+        # instead of leaving a permanent hole.
+        #
+        # A FAILURE MUST NOT FABRICATE A RATE. finalize() records nothing it
+        # could not measure, and an unmeasurable or open cohort is reported,
+        # never written as a zero.
+        if BIC_AVAILABLE:
+            try:
+                fin = bic_conversion_evidence.finalize(
+                    bic_config.DEFAULT_TENANT_ID)
+                # Cohort labels and counts only. No party ids, no subject list.
+                print(f"bic conversion evidence: considered={fin['considered']} "
+                      f"recorded={[r['cohort'] for r in fin['recorded']]} "
+                      f"provisional={fin['provisional']} "
+                      f"unmeasurable={len(fin['unmeasurable'])} "
+                      f"already_final={len(fin['already_final'])}")
+                for r in fin["recorded"]:
+                    print(f"bic conversion evidence: FINALIZED {r['cohort']} "
+                          f"rate={r['rate']} "
+                          f"n={r['numerator']}/{r['denominator']}")
+            except Exception as e:
+                print(f"bic conversion evidence failed (ignored): "
                       f"{type(e).__name__}")
 
         self.send_response(200)

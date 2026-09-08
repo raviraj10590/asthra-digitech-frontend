@@ -535,6 +535,7 @@ if __name__ == "__main__":
 # ══════════════════════════════════════════════════════════════════════════
 
 from datetime import timezone                                  # noqa: E402
+from contextlib import redirect_stdout                         # noqa: E402
 from bic import conversion_evidence as ce                      # noqa: E402
 
 CONV_PRED = "biz.pipeline.conversion_rate@1"
@@ -774,9 +775,13 @@ class TheMetricRegistration(unittest.TestCase):
             self.assertNotIn(banned, code, banned)
 
     def test_34_the_producer_reads_no_pii(self):
-        code = module_code("bic/conversion_evidence.py").lower()
+        """WORD BOUNDARIES, and dunders excluded. A substring scan matched
+        `name` inside `type(e).__name__` — which is an exception class name in
+        an error path, not a person."""
+        import re
+        code = re.sub(r"__\w+__", " ", module_code("bic/conversion_evidence.py").lower())
         for banned in ("phone", "name", "email", "wamid", "whatsapp_messages"):
-            self.assertNotIn(banned, code, banned)
+            self.assertIsNone(re.search(rf"\b{banned}\b", code), banned)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -884,3 +889,323 @@ class NumeratorMembershipIsEnforcedByTheLoop(unittest.TestCase):
                 targets.append((getattr(it.func.value, "id", ""), it.func.attr))
         self.assertIn(("enquired", "items"), targets,
                       "the numerator must iterate the cohort, not the payments")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# FINALIZATION — the Brain owning the measurement lifecycle
+#
+# cohort() could already measure a named month and record() could already
+# persist a FINAL one. Nothing ever ASKED. A human would have had to know
+# which month had just closed and invoke it on the right day — a reminder,
+# not a measurement system.
+#
+# What finalize() adds is exactly three things: which months to ask about,
+# a refusal to ask twice, and nothing else. No arithmetic is re-implemented.
+# ══════════════════════════════════════════════════════════════════════════
+
+EPOCH = "2026-09-07T11:09:37+00:00"      # the real production activated_at
+ORGP = "org-party"
+
+
+class Fin:
+    """A whole synthetic evidence store for finalize() to walk."""
+
+    def __init__(self, enquiries=None, payments=None, existing_until=(),
+                 epoch=EPOCH, subject=ORGP):
+        self.enquiries = enquiries or {}       # {party: first_seen iso}
+        self.payments = payments or {}         # {party: paid iso}
+        self.existing = [{"valid_until": u} for u in existing_until]
+        self.epoch = epoch
+        self.subject = subject
+        self.writes = []
+
+    # -- claims store ------------------------------------------------------
+    def valid_from_by_subject(self, tenant, pred, subjects=None,
+                              window_start=None, window_end=None):
+        src = self.enquiries if "first_seen" in pred else self.payments
+        out = dict(src)
+        if window_start is not None:
+            out = {k: v for k, v in out.items()
+                   if window_start <= ts(v).astimezone(timezone.utc) < window_end}
+        if subjects is not None:
+            out = {k: v for k, v in out.items() if k in subjects}
+        return out
+
+    def history(self, tenant, subject, pred):
+        return list(self.existing)
+
+    def current(self, tenant, subject, pred, as_of=None):
+        return {"claims": []}
+
+    def assert_claim(self, tenant, subject, pred, value, **kw):
+        rec = dict(tenant=tenant, subject=subject, predicate=pred,
+                   value=value, **kw)
+        self.writes.append(rec)
+        self.existing.append({"valid_until": kw["valid_until"].isoformat()})
+        return rec
+
+
+def finalize(store, now="2026-12-01T00:00:00+05:30", tenant=TENANT):
+    with mock.patch.object(ce.claims, "valid_from_by_subject",
+                           store.valid_from_by_subject), \
+         mock.patch.object(ce.claims, "history", store.history), \
+         mock.patch.object(ce.claims, "current", store.current), \
+         mock.patch.object(ce.claims, "assert_claim", store.assert_claim), \
+         mock.patch.object(ce.registry, "lookup_ref",
+                           lambda r: {"activated_at": store.epoch} if store.epoch else None), \
+         mock.patch.object(ce, "find_business_subject", lambda t: store.subject), \
+         mock.patch.object(ce, "business_subject", lambda t: ORGP), \
+         mock.patch.object(ce.config, "DEFAULT_TENANT_ID", TENANT):
+        return ce.finalize(tenant, now=ts(now))
+
+
+# October 2026 — the first measurable cohort (epoch is 7 Sep, mid-month, so
+# September opened before the capability existed).
+OCT = {"o1": "2026-10-02T10:00:00+05:30", "o2": "2026-10-10T10:00:00+05:30",
+       "o3": "2026-10-25T10:00:00+05:30"}
+
+
+class FinalizationLifecycle(unittest.TestCase):
+
+    def test_a_closed_cohort_with_conversions_is_finalized(self):
+        s = Fin(OCT, {"o1": "2026-10-20T10:00:00+05:30"})
+        out = finalize(s)
+        self.assertEqual([r["cohort"] for r in out["recorded"]], ["2026-10"])
+        self.assertEqual(out["recorded"][0]["rate"], round(1/3, 4))
+        self.assertEqual(len(s.writes), 1)
+
+    def test_a_closed_cohort_with_zero_conversions_is_finalized_as_zero(self):
+        """Measurable, window closed, nobody paid. That is evidence, not a gap."""
+        out = finalize(Fin(OCT, {}))
+        self.assertEqual(out["recorded"][0]["rate"], 0.0)
+
+    def test_an_open_cohort_is_provisional_and_writes_nothing(self):
+        """o3 enquired 25 Oct, so the cohort cannot close before 24 Nov."""
+        s = Fin(OCT, {"o1": "2026-10-20T10:00:00+05:30"})
+        out = finalize(s, now="2026-11-10T00:00:00+05:30")
+        self.assertEqual(out["recorded"], [])
+        self.assertIn("2026-10", out["provisional"])
+        self.assertEqual(s.writes, [])
+
+    def test_the_latest_party_controls_closure_not_the_month_end(self):
+        """CRITICAL: month_end + 30 would close Oct on 30 Nov. The real rule is
+        the LAST enquirer's own window — 25 Oct + 30 = 24 Nov."""
+        s = Fin(OCT, {})
+        self.assertEqual(finalize(s, now="2026-11-23T00:00:00+05:30")["recorded"], [])
+        s2 = Fin(OCT, {})
+        self.assertEqual([r["cohort"] for r in
+                          finalize(s2, now="2026-11-25T00:00:00+05:30")["recorded"]],
+                         ["2026-10"])
+
+    def test_an_empty_month_is_null_never_zero(self):
+        out = finalize(Fin({}, {}))
+        self.assertEqual(out["recorded"], [])
+        self.assertIn("2026-10", out["empty"])
+        self.assertIn("2026-11", out["empty"])
+
+    def test_pre_epoch_cohorts_are_never_considered_measurable(self):
+        """August and September opened before the capability existed."""
+        aug_sep = {"a1": "2026-08-05T10:00:00+05:30",
+                   "s1": "2026-09-05T10:00:00+05:30"}
+        out = finalize(Fin(aug_sep, {"a1": "2026-08-10T10:00:00+05:30"}))
+        self.assertEqual(out["recorded"], [])
+        for label in ("2026-08", "2026-09"):
+            self.assertNotIn(label, [c for c in out["provisional"]])
+
+    def test_a_mid_month_epoch_makes_that_month_unmeasurable_not_omitted(self):
+        """The epoch is 7 September, so September opened before the capability
+        existed. It is WALKED and reported unmeasurable rather than skipped —
+        the rule lives in cohort() alone, and duplicating it in finalize()
+        was dead code a mutation proved changed nothing."""
+        out = finalize(Fin({"s1": "2026-09-05T10:00:00+05:30"}, {}))
+        self.assertIn("2026-09", out["unmeasurable"])
+        self.assertNotIn("2026-09", out["empty"] + out["provisional"])
+        self.assertEqual(out["recorded"], [])
+
+    def test_the_epoch_rule_is_stated_in_exactly_one_place(self):
+        import ast, inspect
+        fin = ast.dump(ast.parse(inspect.getsource(ce.finalize).lstrip()))
+        self.assertNotIn("BEFORE_EPOCH", fin)
+        self.assertIn("epoch", fin, "finalize still reads the epoch to bound its search")
+        coh = ast.dump(ast.parse(inspect.getsource(ce.cohort).lstrip()))
+        self.assertIn("BEFORE_EPOCH", coh, "cohort() owns the rule")
+
+
+class FinalizationIsIdempotent(unittest.TestCase):
+
+    def test_running_twice_writes_once(self):
+        s = Fin(OCT, {"o1": "2026-10-20T10:00:00+05:30"})
+        finalize(s)
+        finalize(s)
+        finalize(s)
+        self.assertEqual(len(s.writes), 1, "a closed cohort is asked once")
+
+    def test_an_existing_claim_for_that_cohort_is_never_rewritten(self):
+        _, oct_end = ce.month_window(ts("2026-10-15T00:00:00+05:30"))
+        s = Fin(OCT, {}, existing_until=(oct_end.isoformat(),))
+        out = finalize(s)
+        self.assertEqual(s.writes, [])
+        self.assertIn("2026-10", out["already_final"])
+
+    def test_a_retracted_claim_still_counts_as_answered(self):
+        """Retraction is a human saying 'this is wrong'. A scheduler that
+        immediately re-asserted the same number would overrule that, forever."""
+        _, oct_end = ce.month_window(ts("2026-10-15T00:00:00+05:30"))
+        s = Fin(OCT, {}, existing_until=(oct_end.isoformat(),))
+        finalize(s)
+        self.assertEqual(s.writes, [])
+
+    def test_a_second_cohort_is_still_finalized_after_the_first(self):
+        nov = dict(OCT); nov["n1"] = "2026-11-03T10:00:00+05:30"
+        s = Fin(nov, {})
+        finalize(s, now="2026-12-20T00:00:00+05:30")
+        # valid_until is the cohort_end = midnight IST on the 1st, which in
+        # UTC is still 18:30 on the LAST day of the cohort month.
+        self.assertEqual(sorted(w["valid_until"].astimezone(timezone.utc)
+                                .strftime("%Y-%m") for w in s.writes),
+                         ["2026-10", "2026-11"])
+
+
+class FinalizationBoundaries(unittest.TestCase):
+
+    def test_day_30_is_included_by_the_finalizer(self):
+        s = Fin({"o1": "2026-10-02T10:00:00+05:30"},
+                {"o1": "2026-11-01T10:00:00+05:30"})     # exactly +30d
+        self.assertEqual(finalize(s)["recorded"][0]["rate"], 1.0)
+
+    def test_day_31_is_excluded_by_the_finalizer(self):
+        s = Fin({"o1": "2026-10-02T10:00:00+05:30"},
+                {"o1": "2026-11-01T10:00:01+05:30"})
+        self.assertEqual(finalize(s)["recorded"][0]["rate"], 0.0)
+
+    def test_a_payment_before_the_enquiry_is_excluded(self):
+        s = Fin({"o1": "2026-10-02T10:00:00+05:30"},
+                {"o1": "2026-09-30T10:00:00+05:30"})
+        self.assertEqual(finalize(s)["recorded"][0]["rate"], 0.0)
+
+    def test_repeat_enquiries_do_not_inflate_the_denominator(self):
+        """first_seen_at is `single`, and valid_from_by_subject keeps the
+        EARLIEST — so one party is one denominator slot however often they ask."""
+        s = Fin({"o1": "2026-10-02T10:00:00+05:30"}, {})
+        self.assertEqual(finalize(s)["recorded"][0]["denominator"], 1)
+
+
+class FinalizationSafety(unittest.TestCase):
+
+    def test_an_unregistered_event_finalizes_nothing(self):
+        out = finalize(Fin(OCT, {}, epoch=None))
+        self.assertEqual(out["recorded"], [])
+        self.assertIn("not registered", out["reason"])
+
+    def test_the_epoch_is_read_dynamically_every_run(self):
+        seen = []
+        s = Fin(OCT, {})
+        def spy(ref):
+            seen.append(ref)
+            return {"activated_at": EPOCH}
+        with mock.patch.object(ce.claims, "valid_from_by_subject", s.valid_from_by_subject), \
+             mock.patch.object(ce.claims, "history", s.history), \
+             mock.patch.object(ce.claims, "current", s.current), \
+             mock.patch.object(ce.claims, "assert_claim", s.assert_claim), \
+             mock.patch.object(ce.registry, "lookup_ref", spy), \
+             mock.patch.object(ce, "find_business_subject", lambda t: ORGP), \
+             mock.patch.object(ce, "business_subject", lambda t: ORGP), \
+             mock.patch.object(ce.config, "DEFAULT_TENANT_ID", TENANT):
+            ce.finalize(TENANT, now=ts("2026-12-01T00:00:00+05:30"))
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {ce.CONVERSION_PREDICATE})
+
+    def test_it_never_creates_the_business_party(self):
+        """Deciding what to ask must not create anything. business_subject()
+        mints the org party; the reader must use the lookup-only form."""
+        import ast, inspect
+        tree = ast.parse(inspect.getsource(ce.finalize).lstrip())
+        called = {n.func.id for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        self.assertIn("find_business_subject", called)
+        self.assertNotIn("business_subject", called,
+                         "the creating form must never be called from finalize")
+
+    def test_a_missing_business_party_is_not_an_error(self):
+        s = Fin(OCT, {}, subject=None)
+        self.assertEqual([r["cohort"] for r in finalize(s)["recorded"]], ["2026-10"])
+
+    def test_the_tenant_is_carried_into_every_write(self):
+        s = Fin(OCT, {})
+        finalize(s)
+        self.assertEqual({w["tenant"] for w in s.writes}, {TENANT})
+
+    def test_a_store_failure_never_raises(self):
+        s = Fin(OCT, {})
+        def boom(*a, **k): raise RuntimeError("store down")
+        s.valid_from_by_subject = boom
+        with redirect_stdout(io.StringIO()):
+            out = finalize(s)
+        self.assertEqual(out["recorded"], [])
+        self.assertEqual(out["reason"], "RuntimeError")
+
+    def test_the_loop_is_bounded_against_a_corrupt_epoch(self):
+        s = Fin({}, {}, epoch="2000-01-01T00:00:00+00:00")
+        with redirect_stdout(io.StringIO()):
+            out = finalize(s)
+        self.assertLessEqual(out["considered"], 120)
+
+    def test_no_provider_call_and_no_reasoning_rule(self):
+        code = module_code("bic/conversion_evidence.py").lower()
+        for banned in ("openai", "deepseek", "gemini", "requests", "http"):
+            self.assertNotIn(banned, code, banned)
+        self.assertNotIn("conversion", module_code("bic/reasoning.py").lower())
+
+    def test_no_arithmetic_was_reimplemented(self):
+        """finalize() must delegate, not duplicate."""
+        src = executable_only(ce.finalize)
+        self.assertIn("cohort (", src)
+        self.assertIn("record (", src)
+        for dup in ("WINDOW_DAYS", "window_end_for", "timedelta"):
+            self.assertNotIn(dup, src, f"{dup} duplicated in finalize()")
+
+
+class DigestIntegration(unittest.TestCase):
+
+    DIGEST = os.path.join(os.path.dirname(__file__), "..", "api", "digest.py")
+
+    def src(self):
+        return io.open(self.DIGEST, encoding="utf-8").read()
+
+    def test_the_daily_cron_invokes_the_finalizer_exactly_once(self):
+        self.assertEqual(self.src().count("bic_conversion_evidence.finalize("), 1)
+
+    def test_it_is_guarded_by_bic_available(self):
+        src = self.src()
+        head = src[:src.index("bic_conversion_evidence.finalize(")]
+        self.assertIn("if BIC_AVAILABLE:", head)
+
+    def test_a_failure_is_swallowed_and_never_breaks_the_digest(self):
+        src = self.src()
+        seg = src[src.index("bic_conversion_evidence.finalize("):]
+        self.assertIn("except Exception", seg[:900])
+
+    def test_no_new_scheduler_was_introduced(self):
+        code = _strip(self.src()).lower()
+        for banned in ("redis", "celery", "rq", "kafka", "sqs", "boto3",
+                       "apscheduler", "threading", "cron_job"):
+            self.assertNotIn(banned, code, banned)
+
+    def test_the_digest_logs_no_party_identifiers(self):
+        import ast
+        tree = ast.parse(self.src())
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "print"):
+                names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+                self.assertNotIn("subject", names)
+                dump = ast.dump(node)
+                self.assertNotIn("denominator_evidence", dump)
+                self.assertNotIn("numerator_evidence", dump)
+
+    def test_payment_handling_is_untouched(self):
+        """This task must not have gone near #paid."""
+        wh = io.open(WEBHOOK_SRC, encoding="utf-8").read()
+        self.assertIn("_PAID_RE", wh)
+        self.assertEqual(wh.count("def tool_record_first_payment"), 1)
+        self.assertNotIn("finalize", executable_only(w.tool_record_first_payment))

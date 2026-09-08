@@ -71,7 +71,8 @@ from typing import Optional
 
 from . import claims, config, registry
 from .db import DbError
-from .pipeline_evidence import IST, month_window, business_subject, _coerce
+from .pipeline_evidence import (IST, month_window, business_subject,
+                                find_business_subject, _coerce)
 
 # The metric and the two predicates it derives from. Version is part of the
 # identity: reading @1 with @2's meaning is what the registry exists to stop.
@@ -209,6 +210,140 @@ def cohort(tenant_id: str = None, *, at=None, now=None) -> dict:
     result["numerator_evidence"] = sorted(converted)
     result["rate"] = round(len(converted) / len(enquired), 4)
     return result
+
+
+def _next_month(start: datetime) -> datetime:
+    """The first instant of the following calendar month, in IST.
+
+    Stepping by construction rather than by adding 30/31 days, so long months,
+    short months, leap Februaries and year rollovers are all one code path —
+    the same reasoning month_window() already applies.
+    """
+    local = start.astimezone(IST)
+    if local.month == 12:
+        nxt = datetime(local.year + 1, 1, 1, tzinfo=IST)
+    else:
+        nxt = datetime(local.year, local.month + 1, 1, tzinfo=IST)
+    return nxt.astimezone(timezone.utc)
+
+
+def finalize(tenant_id: str = None, *, now=None) -> dict:
+    """Find every cohort that has CLOSED and not yet been recorded, and record it.
+
+    THE BRAIN OWNS THE MEASUREMENT LIFECYCLE. cohort() could already measure
+    one named month and record() could already persist a FINAL one, but nothing
+    ever ASKED. A human would have had to know which month had just closed and
+    invoke it on the right day — which is not a measurement system, it is a
+    reminder. This is the piece that makes the metric self-maintaining.
+
+    WHAT THIS DELIBERATELY DOES NOT DO
+    ----------------------------------
+    It re-implements no arithmetic. Denominator, numerator, the 30-day window,
+    closure, the epoch rule and NULL-vs-zero all stay in cohort(); persistence
+    stays in record(). This function only decides WHICH months to ask about,
+    and refuses to ask twice.
+
+    THE SEARCH RANGE IS THE EPOCH, NOT A LOOKBACK CONSTANT
+    ------------------------------------------------------
+    A cohort that opened before became_client_at existed is unmeasurable
+    forever, so there is no reason to consider one — and no reason to invent an
+    arbitrary "last 12 months" window that would silently drop a cohort if the
+    job stopped running for a while. The first candidate is the first calendar
+    month that STARTS on or after the registry epoch; the last is the current
+    month. The range is self-limiting and self-healing: an outage of any length
+    is repaired on the next run, because the range is derived from evidence
+    rather than from when this last ran.
+
+    IDEMPOTENT PER COHORT, NOT MERELY PER INSTANT
+    ---------------------------------------------
+    record() alone guards only against two writes at the SAME measurement
+    instant. Running daily, it would rewrite every closed cohort every day
+    forever — each superseding the last, each identical, burying the real
+    measurement in noise. A cohort is identified by its `valid_until`, which
+    pins which month a claim describes, so a cohort that already has a claim is
+    never asked again.
+
+    A RETRACTED CLAIM STILL COUNTS AS ANSWERED. Retraction is a human saying
+    "this is wrong"; a scheduler that immediately re-asserted the same number
+    would silently overrule that judgement, and if the underlying evidence had
+    not changed it would do so forever. Re-finalising after a retraction is a
+    deliberate human act, not an automatic one.
+
+    Never raises. Evidence production must not be able to break its caller.
+    """
+    tenant = tenant_id or config.DEFAULT_TENANT_ID
+    moment = _coerce(now) or _now()
+    out = {"tenant_id": tenant, "considered": 0, "recorded": [],
+           "provisional": [], "unmeasurable": [], "empty": [],
+           "already_final": [], "reason": None}
+    try:
+        epoch = capability_epoch()
+        if epoch is None:
+            # The conversion event is not registered. Nothing is measurable,
+            # and saying so is not the same as measuring zero cohorts.
+            out["reason"] = "conversion event predicate is not registered"
+            return out
+
+        # READER, NEVER A CREATOR. business_subject() mints the org party on
+        # first use, which is correct for record() — it is about to assert a
+        # fact and needs somewhere to put it. Deciding what to ask must not
+        # create anything, so this uses the lookup-only form. None simply means
+        # no conversion claim has ever been written.
+        subject = find_business_subject(tenant)
+        already = set()
+        if subject:
+            for claim in claims.history(tenant, subject, PREDICATE) or []:
+                if claim.get("valid_until"):
+                    already.add(str(claim["valid_until"]))
+
+        # The first candidate is the month CONTAINING the epoch, not the one
+        # after it. A mid-month epoch means that month opened before the
+        # capability existed — but the rule that decides this lives in
+        # cohort(), which already refuses any cohort whose start precedes the
+        # epoch. Re-deciding it here would put the same rule in two places, and
+        # a mutation that deleted the duplicate changed nothing, which is how
+        # the redundancy was found. The month is still WALKED so it is reported
+        # as unmeasurable rather than silently omitted.
+        start, _ = month_window(epoch)
+        current_start, _ = month_window(moment)
+
+        # Defensive bound. The loop is already bounded by the epoch, but a
+        # corrupt activated_at far in the past must not spin.
+        for _ in range(120):
+            if start > current_start:
+                break
+            out["considered"] += 1
+            _, cohort_end = month_window(start)
+            label = start.astimezone(IST).strftime("%Y-%m")
+
+            if str(cohort_end.isoformat()) in already or \
+                    cohort_end.isoformat() in already:
+                out["already_final"].append(label)
+                start = _next_month(start)
+                continue
+
+            measured = cohort(tenant, at=start, now=moment)
+            if not measured["measurable"]:
+                out["unmeasurable"].append(label)
+            elif measured["rate"] is None:
+                # No enquiries. NULL, not zero — nothing to assert.
+                out["empty"].append(label)
+            elif measured["state"] != FINAL:
+                out["provisional"].append(label)
+            else:
+                claim = record(tenant, at=start, observed_at=moment)
+                if claim is not None:
+                    out["recorded"].append(
+                        {"cohort": label, "rate": measured["rate"],
+                         "denominator": measured["denominator"],
+                         "numerator": measured["numerator"]})
+            start = _next_month(start)
+        return out
+    except Exception as e:
+        # Type only — a store error body can echo an identifier.
+        print(f"conversion_evidence: finalize failed (ignored): {type(e).__name__}")
+        out["reason"] = type(e).__name__
+        return out
 
 
 def record(tenant_id: str = None, *, at=None, observed_at=None) -> Optional[dict]:
