@@ -85,6 +85,8 @@ SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in V
 # _leads_write_headers for why that write cannot use the anon key above.
 # .strip() because a trailing newline in an env var silently corrupts the
 # Bearer header — the same normalisation bic/config.py already applies.
+import bairavi
+
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 BROCHURE_URL    = os.environ.get("BROCHURE_URL",    "")
 # Lead/alert recipients — comma-separated, so alerts can go to multiple people.
@@ -4892,6 +4894,48 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         send_welcome_menu(sender)
         save_messages([(sender, "user", user_text),
                        (sender, "assistant", "[ಮೆನು ಮರುಕಳಿಸಲಾಯಿತು]")])
+        return
+
+    # ── Bairavi transformer enquiry ────────────────────────────────
+    #
+    # PLACED BEFORE THE OFF-TOPIC GUARD, DELIBERATELY. A transformer message
+    # is off-topic FOR ASTHRA, and the guard would redirect it to "website,
+    # social media, ads or design" — a worse version of the same mistake that
+    # sent fifteen ad leads the services menu.
+    #
+    # SEGREGATED FROM ASTHRA'S EVIDENCE. This branch returns before
+    # record_first_seen(), so a transformer buyer never asserts
+    # core.party.first_seen_at@1 and never enters
+    # biz.pipeline.new_enquiries_per_month@1 or a conversion cohort. Measured
+    # on 2026-09-15: 15 of Asthra's 36 September "enquiries" were Bairavi
+    # transformer leads — about 42% of the headline number — and October's
+    # cohort is the first that can produce a durable FINAL conversion claim.
+    #
+    # The lead is still captured (leads row + owner alert), so segregation
+    # costs no information. It only stops one business's demand being counted
+    # as another's.
+    if bairavi.looks_like_transformer_enquiry(user_text):
+        if BIC_AVAILABLE:
+            bic_decision.mark_deterministic_branch(
+                bic_decision.BRANCH_BAIRAVI_TRANSFORMER)
+        parsed = bairavi.parse(user_text)
+        send_text(sender, bairavi.compose_reply(parsed))
+        # Verbatim first (AC-07): the parsed view never replaces what they
+        # actually wrote, and a parse failure must not lose the enquiry.
+        save_messages([(sender, "user", user_text),
+                       (sender, "assistant", "[Bairavi transformer reply]")])
+        # source marks these as Bairavi so they are separable later. `leads`
+        # feeds no Brain metric — new_enquiries comes from first_seen_at
+        # claims — so persisting here pollutes nothing.
+        upsert_lead(sender, {
+            "name": parsed["name"] or None,
+            "city": parsed["location"] or None,
+            "service_needed": (f"Transformer {parsed['capacity_kva']} kVA"
+                               if parsed["capacity_kva"] else "Transformer"),
+            "source": "bairavi-transformer",
+            "notes": bairavi.compose_owner_alert(sender, parsed),
+        })
+        notify_owner(bairavi.compose_owner_alert(sender, parsed))
         return
 
     # ── Off-topic guard: blatant non-business → polite redirect, no AI ──

@@ -76,9 +76,16 @@ BRANCH_OFF_TOPIC = "OFF_TOPIC"
 BRANCH_CHAT_PAUSED = "CHAT_PAUSED"
 BRANCH_BROCHURE_REQUEST = "BROCHURE_REQUEST"
 BRANCH_NEW_CONTACT = "NEW_CONTACT"
+# Its own id, NOT reused from OFF_TOPIC. A transformer enquiry is not
+# off-topic — it is a DIFFERENT BUSINESS (Bairavi Trans Solutions) reached on
+# a shared number. Labelling it OFF_TOPIC would send anyone reading the
+# decision record looking for a redirect rule when the answer is a routing
+# boundary, and would hide how much of the traffic is actually Bairavi's.
+BRANCH_BAIRAVI_TRANSFORMER = "BAIRAVI_TRANSFORMER"
 
 BRANCH_IDS = (BRANCH_MENU_REQUEST, BRANCH_OFF_TOPIC, BRANCH_CHAT_PAUSED,
-              BRANCH_BROCHURE_REQUEST, BRANCH_NEW_CONTACT)
+              BRANCH_BROCHURE_REQUEST, BRANCH_NEW_CONTACT,
+              BRANCH_BAIRAVI_TRANSFORMER)
 
 # Execution outcome (execution result ONLY — never business outcome, which is
 # 2I and lives outside the runtime).

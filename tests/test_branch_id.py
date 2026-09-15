@@ -52,10 +52,15 @@ class EachBranchRecordsItsId(Base):
             self.assertEqual(rec["branch_id"], branch)
             self.assertEqual(rec["decisive_rung"], d.RUNG_3_DETERMINISTIC)
 
-    def test_vocabulary_is_exactly_the_five_live_branches(self):
+    def test_vocabulary_is_exactly_the_six_live_branches(self):
+        """WAS FIVE. BAIRAVI_TRANSFORMER was added 2026-09-15 when transformer
+        enquiries stopped being answered as Asthra DigiTech. It is its own id,
+        not a reuse of OFF_TOPIC: a transformer enquiry is a different
+        BUSINESS, and calling it off-topic would make Bairavi's share of the
+        traffic unqueryable."""
         self.assertEqual(set(d.BRANCH_IDS), {
             "MENU_REQUEST", "OFF_TOPIC", "CHAT_PAUSED",
-            "BROCHURE_REQUEST", "NEW_CONTACT"})
+            "BROCHURE_REQUEST", "NEW_CONTACT", "BAIRAVI_TRANSFORMER"})
 
     def test_chat_paused_keeps_its_distinct_reason(self):
         d.open_turn(); d.mark_identity("CLIENT")
@@ -176,8 +181,32 @@ class HistoricalRowsRemainReadable(Base):
 class MigrationIsAdditive(Base):
 
     def _sql(self):
+        """The migration that INTRODUCED the column. Still the right file for
+        the additive-shape assertions below."""
         with open(MIGRATION, encoding="utf-8") as fh:
             return fh.read().lower()
+
+    def _effective_constraint_sql(self):
+        """The constraint as the database will actually hold it.
+
+        WAS a single hardcoded file, which broke the moment a second migration
+        widened the CHECK — and it broke by asserting the OLD vocabulary,
+        i.e. it would have kept passing while production rejected a branch the
+        code emits. The effective definition is the LAST migration that
+        redefines the constraint, so this now tracks reality instead of one
+        point in history.
+        """
+        mig = os.path.join(os.path.dirname(__file__), "..", "supabase",
+                           "migrations")
+        latest = None
+        for name in sorted(os.listdir(mig)):
+            if not name.endswith(".sql"):
+                continue
+            sql = open(os.path.join(mig, name), encoding="utf-8").read().lower()
+            if "add constraint bic_decision_branch_id_check" in sql:
+                latest = sql
+        assert latest, "no migration defines the branch_id check constraint"
+        return latest
 
     def test_uses_add_column_if_not_exists(self):
         self.assertIn("add column if not exists branch_id", self._sql())
@@ -195,13 +224,22 @@ class MigrationIsAdditive(Base):
         self.assertNotIn("pg_cron", sql)
 
     def test_check_constraint_permits_null(self):
-        self.assertIn("branch_id is null or branch_id in", self._sql())
+        self.assertIn("branch_id is null or branch_id in",
+                      self._effective_constraint_sql())
 
     def test_check_constraint_lists_exactly_the_code_vocabulary(self):
-        sql = self._sql()
+        sql = self._effective_constraint_sql()
         for branch in d.BRANCH_IDS:
             self.assertIn(f"'{branch.lower()}'", sql,
                           f"{branch} would be rejected by the database")
+
+    def test_the_widening_migration_touches_no_data(self):
+        """A CHECK widening must not rewrite a row or drop the column."""
+        sql = self._effective_constraint_sql()
+        for destructive in ("drop table", "create table", "truncate",
+                            "delete from", "update bic_decision_records",
+                            "drop column"):
+            self.assertNotIn(destructive, sql, f"{destructive!r} present")
 
 
 # ── 6 & 7 · Read path ──────────────────────────────────────────────────────
@@ -274,9 +312,13 @@ class BranchIdCannotCarryPii(Base):
 
 class NothingElseChanged(Base):
 
-    def test_all_five_production_sites_pass_a_branch_id(self):
+    def test_all_six_production_sites_pass_a_branch_id(self):
+        """WAS FIVE. The sixth is BAIRAVI_TRANSFORMER, added when transformer
+        enquiries stopped being answered as Asthra DigiTech. It carries its
+        own id rather than reusing OFF_TOPIC, so the decision record says
+        "different business" instead of "redirected"."""
         src = _inspect.getsource(w.run_client_pipeline)
-        self.assertEqual(src.count("mark_deterministic_branch"), 5)
+        self.assertEqual(src.count("mark_deterministic_branch"), 6)
         for branch in d.BRANCH_IDS:
             self.assertIn(f"BRANCH_{branch}", src,
                           f"no production site marks {branch}")
