@@ -545,3 +545,182 @@ class Structure(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 9 · CONVERSATION CONTINUITY — the bug three real customers hit
+#
+# 2026-09-15: all three got a correct OPENING reply. Two then answered it and
+# were told the bot is not a transformer company. The replies below are the
+# real ones, and these tests replay the real threads.
+#
+# Everything in sections 1-8 drove ONE message into a fresh context with
+# history=[]. That is exactly why 57 tests and 28 mutations missed this: the
+# defect only exists on the SECOND message, and the opening reply — which
+# asks two questions — guarantees there will be one.
+# ══════════════════════════════════════════════════════════════════════════
+
+class ConversationContinuity(unittest.TestCase):
+
+    def thread(self, *customer_messages):
+        """Drive a REAL multi-turn conversation, accumulating history exactly
+        as fetch_context would."""
+        history, sent, leads, owner, menu, first_seen = [], [], [], [], [], []
+        for text in customer_messages:
+            ctx = {"history": list(history), "recent_sys": [], "paused": False,
+                   "vip_alerted": False, "lead_alerted": False, "last_user": {}}
+            saved = []
+            with mock.patch.object(w, "fetch_memory", lambda s: {}), \
+                 mock.patch.object(w, "record_first_seen",
+                                   lambda *a, **k: first_seen.append(a)), \
+                 mock.patch.object(w, "send_text",
+                                   lambda to, t, **k: sent.append(t)), \
+                 mock.patch.object(w, "send_welcome_menu",
+                                   lambda to: menu.append(to)), \
+                 mock.patch.object(w, "upsert_lead",
+                                   lambda p, d: leads.append(d)), \
+                 mock.patch.object(w, "notify_owner",
+                                   lambda m, **k: owner.append(m)), \
+                 mock.patch.object(w, "save_messages",
+                                   lambda rows: saved.extend(rows)), \
+                 mock.patch.object(w, "save_message", lambda *a, **k: None), \
+                 mock.patch.object(w, "maybe_alert_vip", lambda *a, **k: None), \
+                 mock.patch.object(w, "generate_reply",
+                                   lambda *a, **k: "ASTHRA_AI_REPLY"), \
+                 mock.patch.object(w, "BIC_AVAILABLE", False):
+                w.run_client_pipeline("910000000000", text, ctx)
+            for _p, role, content in saved:
+                history.append({"role": role, "content": content})
+        return {"sent": sent, "leads": leads, "owner": owner,
+                "menu": menu, "first_seen": first_seen, "history": history}
+
+    # ── the two real threads, verbatim ────────────────────────────────────
+
+    def test_real_thread_0d460a_63kva_agricultural(self):
+        """Was: "ಕ್ಷಮಿಸಿ, ನಾವು Transformer ಕಂಪನಿ ಅಲ್ಲ" — we are NOT a
+        transformer company — to a customer answering our own question."""
+        r = self.thread(form(capacity="B. 63 kVA", location="savanoor  kadaba"),
+                        "1 unit\nAgricultural",
+                        "Rate")
+        self.assertEqual(len(r["sent"]), 3)
+        for i, reply in enumerate(r["sent"]):
+            self.assertNotIn("Asthra", reply, f"turn {i+1} answered as Asthra")
+            self.assertNotIn("ಕಂಪನಿ ಅಲ್ಲ", reply, f"turn {i+1} denied being us")
+        self.assertIn("Bairavi", r["sent"][0])
+        self.assertIn("Bairavi", r["sent"][2])
+        self.assertEqual(r["menu"], [])
+
+    def test_real_thread_59c8f8_25kva_needs_a_TC(self):
+        """Was: "transformer matters are outside our scope"."""
+        r = self.thread(form(capacity="A. 25 kVA", when="A.ತಕ್ಷಣ ಅಗತ್ಯವಿದೆ"),
+                        "ನಮ್ಮಲ್ಲಿ ಲಯನ್ ದೂರ ಇದೆ ಕಾರಣ ಟಿ ಸಿ ಬೇಕಾಗಿದೆ")
+        self.assertEqual(len(r["sent"]), 2)
+        for reply in r["sent"]:
+            self.assertNotIn("Asthra", reply)
+        self.assertEqual(r["menu"], [])
+
+    # ── the answers now land ──────────────────────────────────────────────
+
+    def test_the_followup_answers_are_captured_not_discarded(self):
+        r = self.thread(form(capacity="B. 63 kVA"), "1 unit\nAgricultural")
+        self.assertIn("1 unit", r["sent"][1])
+        self.assertIn("agriculture", r["sent"][1].lower())
+        self.assertTrue(any("Quantity: 1" in a for a in r["owner"]))
+        self.assertTrue(any("AGRICULTURE" in a for a in r["owner"]))
+
+    def test_a_price_question_is_answered_without_a_price(self):
+        r = self.thread(form(), "Rate")
+        reply = r["sent"][1]
+        self.assertIn("quotation", reply.lower())
+        for banned in ("₹", "68244", "rs.", "lakh"):
+            self.assertNotIn(banned, reply.lower())
+
+    def test_the_customers_words_reach_the_owner_verbatim(self):
+        """A site condition no parsed field would capture — and the reason
+        every follow-up is forwarded rather than only the ones that parse.
+
+        This assertion originally carried an `or not r["owner"]` escape, which
+        made it pass while the message was being dropped. Removing the escape
+        is what exposed it."""
+        words = "ನಮ್ಮಲ್ಲಿ ಲಯನ್ ದೂರ ಇದೆ ಕಾರಣ ಟಿ ಸಿ ಬೇಕಾಗಿದೆ"
+        r = self.thread(form(), words)
+        self.assertTrue(any(words in a for a in r["owner"]),
+                        "the customer's own words never reached the owner")
+
+    def test_every_followup_is_forwarded_even_when_nothing_parses(self):
+        r = self.thread(form(), "site ge road ide, crane bartte")
+        followups = [a for a in r["owner"] if "follow-up" in a]
+        self.assertEqual(len(followups), 1)
+        self.assertIn("site ge road ide", followups[0])
+        self.assertIn("Quantity: TBD", followups[0])
+
+    def test_a_followup_does_not_repeat_the_opening_greeting(self):
+        r = self.thread(form(), "1 unit\nAgricultural")
+        self.assertIn("ನಮಸ್ಕಾರ", r["sent"][0])
+        self.assertNotIn("ನಮಸ್ಕಾರ", r["sent"][1])
+        self.assertNotIn("manufacturing range", r["sent"][1])
+
+    # ── the flow is sticky, not a prison ──────────────────────────────────
+
+    def test_a_customer_who_wants_a_website_is_released(self):
+        r = self.thread(form(), "website beku for my company")
+        self.assertIn("Bairavi", r["sent"][0])
+        self.assertNotIn("Bairavi", r["sent"][1])
+
+    def test_a_menu_request_still_escapes(self):
+        r = self.thread(form(), "menu")
+        self.assertEqual(len(r["menu"]), 1)
+
+    def test_stickiness_needs_a_prior_bairavi_turn(self):
+        """It must not leak into an unrelated conversation."""
+        self.assertFalse(b.in_transformer_flow([]))
+        self.assertFalse(b.in_transformer_flow(
+            [{"role": "assistant", "content": "ಸ್ವಾಗತ + ಸೇವೆಗಳ ಮೆನು"}]))
+        self.assertTrue(b.in_transformer_flow(
+            [{"role": "assistant", "content": b.FLOW_MARKER}]))
+
+    def test_an_asthra_conversation_is_untouched_by_any_of_this(self):
+        r = self.thread("website beku", "how much?", "ok")
+        self.assertEqual(len(r["menu"]), 1)
+        self.assertEqual(len(r["first_seen"]), 1)
+        for reply in r["sent"]:
+            self.assertNotIn("Bairavi", reply)
+        self.assertEqual(r["leads"], [])
+
+    def test_segregation_holds_across_the_whole_thread(self):
+        r = self.thread(form(), "1 unit\nAgricultural", "Rate")
+        self.assertEqual(r["first_seen"], [])
+        self.assertEqual(r["menu"], [])
+
+    # ── follow-up parsing honesty ─────────────────────────────────────────
+
+    def test_a_kva_figure_is_never_read_as_a_quantity(self):
+        """"63 kVA" becoming 63 units is the most damaging misread here."""
+        self.assertIsNone(b.parse_followup("63 kVA")["quantity"])
+        self.assertIsNone(b.parse_followup("need 100 kva")["quantity"])
+
+    def test_quantity_and_application_are_read_when_present(self):
+        for text, qty, app in (("1 unit\nAgricultural", 1, "AGRICULTURE"),
+                               ("2 nos industrial", 2, "INDUSTRY"),
+                               ("3 units for construction", 3, "CONSTRUCTION"),
+                               ("tender ge 5 units", 5, "TENDER"),
+                               ("ಕೃಷಿ 1 ಯುನಿಟ್", 1, "AGRICULTURE")):
+            f = b.parse_followup(text)
+            self.assertEqual(f["quantity"], qty, text)
+            self.assertEqual(f["application"], app, text)
+
+    def test_an_unreadable_followup_stays_None(self):
+        f = b.parse_followup("ok thanks")
+        self.assertIsNone(f["quantity"])
+        self.assertIsNone(f["application"])
+        self.assertFalse(f["asked_price"])
+
+    def test_a_price_request_is_recognised_in_both_languages(self):
+        for t in ("Rate", "price eshtu", "ದರ ಎಷ್ಟು", "quotation beku", "cost?"):
+            self.assertTrue(b.parse_followup(t)["asked_price"], t)
+
+    def test_TC_is_recognised_as_a_transformer_subject(self):
+        """Trade vocabulary learned from a real customer."""
+        self.assertTrue(b.looks_like_transformer_enquiry("ಟಿ ಸಿ ಬೇಕಾಗಿದೆ"))
+        self.assertTrue(b.looks_like_transformer_enquiry("ಟಿಸಿ ಬೇಕು"))
+        self.assertFalse(b.looks_like_transformer_enquiry("website beku"))

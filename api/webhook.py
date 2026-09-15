@@ -4914,16 +4914,55 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
     # The lead is still captured (leads row + owner alert), so segregation
     # costs no information. It only stops one business's demand being counted
     # as another's.
-    if bairavi.looks_like_transformer_enquiry(user_text):
+    # STICKY, not per-message. Three real customers on 2026-09-15 got a correct
+    # Bairavi opening reply and were then told "we are NOT a transformer
+    # company" when they answered it — because "1 unit", "Agricultural" and
+    # "Rate" carry no transformer keyword and fell through to Asthra's
+    # off-topic guard. The opening reply ASKS two questions, so a keyword-free
+    # follow-up is not an edge case: it is the expected next message.
+    #
+    # wants_asthra_instead() is the release. A transformer buyer who later
+    # wants a website is a real customer, and `menu` already exits above.
+    _in_flow = bairavi.in_transformer_flow(ctx["history"])
+    if (bairavi.looks_like_transformer_enquiry(user_text)
+            or (_in_flow and not bairavi.wants_asthra_instead(user_text))):
         if BIC_AVAILABLE:
             bic_decision.mark_deterministic_branch(
                 bic_decision.BRANCH_BAIRAVI_TRANSFORMER)
+
+        # A CONTINUING conversation gets a continuation, not the opening
+        # greeting again. This is also where the answers the first reply asked
+        # for finally land instead of being discarded.
+        if _in_flow and not bairavi.is_lead_form(user_text):
+            followup = bairavi.parse_followup(user_text)
+            send_text(sender, bairavi.compose_followup_reply(followup))
+            save_messages([(sender, "user", user_text),
+                           (sender, "assistant", bairavi.FLOW_MARKER)])
+            # EVERY follow-up is forwarded, not only the ones that parse.
+            #
+            # The first rule here alerted only when quantity or application
+            # was read, and a test replaying the real thread showed what that
+            # costs: "ನಮ್ಮಲ್ಲಿ ಲಯನ್ ದೂರ ಇದೆ ಕಾರಣ ಟಿ ಸಿ ಬೇಕಾಗಿದೆ" — our line is
+            # far, so we need a TC — has neither field and is the single most
+            # useful sentence in that conversation. A parser deciding what the
+            # owner is allowed to see is the wrong shape; the owner reads the
+            # words and decides.
+            #
+            # Volume is not a concern at this scale: 16 leads over four days,
+            # a few messages each. An unread requirement costs a sale; an
+            # extra notification costs a glance.
+            alert = bairavi.compose_followup_alert(sender, followup, user_text)
+            upsert_lead(sender, {"source": "bairavi-transformer",
+                                 "notes": alert})
+            notify_owner(alert)
+            return
+
         parsed = bairavi.parse(user_text)
         send_text(sender, bairavi.compose_reply(parsed))
         # Verbatim first (AC-07): the parsed view never replaces what they
         # actually wrote, and a parse failure must not lose the enquiry.
         save_messages([(sender, "user", user_text),
-                       (sender, "assistant", "[Bairavi transformer reply]")])
+                       (sender, "assistant", bairavi.FLOW_MARKER)])
         # source marks these as Bairavi so they are separable later. `leads`
         # feeds no Brain metric — new_enquiries comes from first_seen_at
         # claims — so persisting here pollutes nothing.

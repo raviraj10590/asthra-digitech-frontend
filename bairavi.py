@@ -140,6 +140,10 @@ _LEAD_FORM_MARKERS = ("filled out your form", "filled in your form",
 _SUBJECT = (
     "transformer", "transfarmer", "tranformer", "transfomer",
     "ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್", "ಟ್ರಾನ್ಸ್ಫಾರ್ಮರ್", "ಪರಿವರ್ತಕ",
+    # TRADE VOCABULARY, learned from a real customer: "ಟಿ ಸಿ ಬೇಕಾಗಿದೆ" —
+    # TC is a transformer centre. Kannada forms only; a bare English "tc"
+    # is too short to match safely.
+    "ಟಿ ಸಿ", "ಟಿಸಿ",
 )
 _KVA_RE = re.compile(r"\b\d{1,4}\s*k\s*v\s*a\b", re.IGNORECASE)
 
@@ -301,6 +305,120 @@ def parse(text: str) -> dict:
     }
 
 
+# ── Conversation continuity ───────────────────────────────────────────────
+#
+# THE BUG THIS CLOSES, MEASURED ON THREE REAL CUSTOMERS (2026-09-15)
+# ------------------------------------------------------------------
+# The first reply was correct for all three. Then two of them answered it and
+# the bot contradicted itself:
+#
+#   BOT       (Bairavi) "…how many units? what purpose?"
+#   CUSTOMER  "1 unit / Agricultural"
+#   BOT       "ಕ್ಷಮಿಸಿ, ನಾವು Transformer ಕಂಪನಿ ಅಲ್ಲ" — we are NOT a transformer company
+#
+#   BOT       (Bairavi) "…"
+#   CUSTOMER  "ನಮ್ಮಲ್ಲಿ ಲಯನ್ ದೂರ ಇದೆ ಕಾರಣ ಟಿ ಸಿ ಬೇಕಾಗಿದೆ" — we need a TC
+#   BOT       "transformer matters are outside our scope"
+#
+# looks_like_transformer_enquiry() is evaluated PER MESSAGE. "1 unit",
+# "Agricultural" and "Rate" carry no subject word and no kVA figure, so they
+# fell past this branch into Asthra's off-topic guard.
+#
+# The reply itself causes it: it ends by asking two questions, which
+# guarantees the next message is a short answer with no keyword in it. The
+# design assumed every message is self-identifying, and that stops being true
+# the moment the bot asks anything.
+#
+# NO NEW STATE. The branch already writes FLOW_MARKER as the assistant row,
+# and fetch_context returns the last 20 turns including assistant messages —
+# so the conversation already remembers. A second store would be a second
+# truth that can disagree with the transcript.
+FLOW_MARKER = "[Bairavi transformer reply]"
+
+# Words that mean the customer has moved to Asthra's actual business. A
+# transformer buyer who later wants a website is a real case, and stickiness
+# must not trap them — the flow is sticky, not a prison.
+_ASTHRA_EXIT = (
+    "website", "web site", "social media", "instagram", "facebook page",
+    "election", "chatbot", "app develop", "mobile app", "seo", "logo",
+    "poster", "branding", "digital marketing", "ಜಾಹೀರಾತು", "ವೆಬ್‌ಸೈಟ್",
+)
+
+
+def wants_asthra_instead(text: str) -> bool:
+    """True when the message is plainly about Asthra's services, not a
+    transformer. Checked only to LEAVE the flow, never to enter it."""
+    low = (text or "").lower()
+    return any(w in low for w in _ASTHRA_EXIT)
+
+
+def in_transformer_flow(history) -> bool:
+    """True when an earlier turn in THIS conversation took the Bairavi branch.
+
+    Read from the transcript rather than a flag, so it cannot drift out of
+    step with what the customer was actually told. The window is whatever
+    history the context already carries — a natural bound, not an invented
+    timeout.
+    """
+    for msg in history or []:
+        if (msg.get("role") == "assistant"
+                and FLOW_MARKER in (msg.get("content") or "")):
+            return True
+    return False
+
+
+# ── Follow-up capture ─────────────────────────────────────────────────────
+# The two fields the ad form never carries and the first reply asks for. The
+# answers arrived and were thrown away; now they are read.
+
+_QTY_RE = re.compile(
+    r"\b(\d{1,3})\s*(?:units?|nos?|pcs?|pieces?|ಯುನಿಟ್|ನಗ)?\b", re.IGNORECASE)
+
+# Application vocabulary, English and Kannada. An allowlist: an unrecognised
+# purpose stays None rather than being guessed, because "what it is for"
+# drives qualification and a wrong value is worse than a blank one.
+_APPLICATIONS = (
+    ("agricultur", "AGRICULTURE"), ("agri", "AGRICULTURE"),
+    ("ಕೃಷಿ", "AGRICULTURE"), ("pump", "AGRICULTURE"),
+    ("industr", "INDUSTRY"), ("ಕೈಗಾರಿಕೆ", "INDUSTRY"), ("factory", "INDUSTRY"),
+    ("construct", "CONSTRUCTION"), ("ಕಟ್ಟಡ", "CONSTRUCTION"),
+    ("tender", "TENDER"), ("ಟೆಂಡರ್", "TENDER"),
+    ("domestic", "DOMESTIC"), ("house", "DOMESTIC"), ("ಮನೆ", "DOMESTIC"),
+    ("commercial", "COMMERCIAL"), ("shop", "COMMERCIAL"),
+)
+
+# A price request. Worth recognising so the reply answers the question that
+# was actually asked instead of repeating the intake prompt.
+_PRICE_ASK = ("rate", "price", "cost", "quotation", "quote", "ದರ", "ಬೆಲೆ",
+              "eshtu", "estu", "ಎಷ್ಟು")
+
+
+def parse_followup(text: str) -> dict:
+    """Quantity, application and whether a price was asked. None when unread.
+
+    Deliberately NOT a general extractor. It reads the two fields the first
+    reply asked for and nothing else; everything it cannot read confidently
+    stays None and the owner alert prints TBD.
+    """
+    low = (text or "").lower()
+    qty = None
+    m = _QTY_RE.search(low)
+    if m:
+        n = int(m.group(1))
+        # A kVA figure is not a quantity. "63 kVA" must never become 63 units,
+        # which is the single most damaging misread available here.
+        span = low[m.start():m.start() + len(m.group()) + 5]
+        if "kva" not in span and 0 < n <= 999:
+            qty = n
+    app = None
+    for needle, value in _APPLICATIONS:
+        if needle in low:
+            app = value
+            break
+    return {"quantity": qty, "application": app,
+            "asked_price": any(w in low for w in _PRICE_ASK)}
+
+
 # ── Reply composition ─────────────────────────────────────────────────────
 # Kannada-first with English technical terms, matching how these customers
 # actually write ("25kva or 63kva agriculture purpose"). Technical values are
@@ -377,6 +495,57 @@ def compose_reply(parsed: dict) -> str:
                  "2️⃣ ಯಾವ *ಉದ್ದೇಶ*? (agriculture / industry / "
                  "construction / tender)")
     return "\n".join(lines)
+
+
+def compose_followup_reply(followup: dict) -> str:
+    """The reply to a message inside an existing transformer conversation.
+
+    NOT the opening reply. Re-greeting someone mid-conversation and re-listing
+    the range reads as a bot that has forgotten them — and the previous
+    behaviour was worse still, telling them we are not a transformer company.
+    This confirms what they just said and gives the next step.
+    """
+    lines = []
+    got = []
+    if followup["quantity"] is not None:
+        got.append(f"{followup['quantity']} unit"
+                   + ("s" if followup["quantity"] != 1 else ""))
+    if followup["application"]:
+        got.append(followup["application"].lower())
+    if got:
+        lines.append("✅ ಧನ್ಯವಾದ — ದಾಖಲಿಸಿದ್ದೇವೆ: *" + ", ".join(got) + "*.")
+    else:
+        lines.append("✅ ಧನ್ಯವಾದ — ನಿಮ್ಮ ಸಂದೇಶ ದಾಖಲಿಸಿದ್ದೇವೆ.")
+
+    if followup["asked_price"]:
+        # The question they actually asked. Answered with a real next step,
+        # never a number — the evidence for one does not exist.
+        lines.append("\nದರದ ಬಗ್ಗೆ: ನಮ್ಮ engineer ನಿಮ್ಮ requirement "
+                     "(capacity, quantity, ಸ್ಥಳ) ನೋಡಿ ನಿಖರವಾದ quotation "
+                     "ಕೊಡುತ್ತಾರೆ — ಸಾಮಾನ್ಯ ದರ ಹೇಳುವುದು ತಪ್ಪಾಗುತ್ತದೆ.")
+    lines.append("\nನಮ್ಮ *Bairavi Trans Solutions* ತಂಡ ಶೀಘ್ರದಲ್ಲೇ "
+                 "ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಾರೆ 🙏")
+    return "\n".join(lines)
+
+
+def compose_followup_alert(phone: str, followup: dict, text: str) -> str:
+    """The owner's copy of a follow-up. Carries the customer's own words.
+
+    The verbatim line matters: "ನಮ್ಮಲ್ಲಿ ಲಯನ್ ದೂರ ಇದೆ ಕಾರಣ ಟಿ ಸಿ ಬೇಕಾಗಿದೆ"
+    is a site condition no parsed field would have captured, and it is the
+    most useful sentence in that conversation.
+    """
+    def val(v):
+        return v if v not in (None, "") else "TBD"
+    return (
+        "🔌 *BAIRAVI — follow-up*\n"
+        f"From: wa.me/{phone}\n"
+        f"Quantity: {val(followup['quantity'])}\n"
+        f"Application: {val(followup['application'])}\n"
+        f"Asked for price: {'YES' if followup['asked_price'] else 'no'}\n"
+        f"\nTheir words: {(text or '').strip()[:300]}\n"
+        "\nNo price, delivery date or certificate was quoted to the customer."
+    )
 
 
 def compose_owner_alert(phone: str, parsed: dict) -> str:
