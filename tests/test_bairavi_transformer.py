@@ -206,13 +206,48 @@ class Parsing(unittest.TestCase):
             self.assertIsNone(p["capacity_kva"], cap)
             self.assertIsNone(p["sku"])
 
-    def test_an_out_of_range_capacity_is_never_mapped_to_a_nearby_size(self):
+    def test_a_capacity_is_never_mapped_to_a_nearby_size(self):
         """AC-04 is a gate, not a filter. 500 must not become 250."""
         p = b.parse(form(capacity="D.500 kVA"))
         self.assertEqual(p["capacity_kva"], 500)
         self.assertIsNone(p["sku"])
         self.assertFalse(p["in_catalogue"])
-        self.assertEqual(p["sku_status"], b.NEEDS_CONFIRMATION)
+
+    def test_500_is_ROADMAP_not_an_error(self):
+        """The ad offers it on purpose — Bairavi plans to build it. Treating
+        it as out-of-range was the defect this replaced."""
+        p = b.parse(form(capacity="D.500 kVA"))
+        self.assertEqual(p["sku_status"], b.ROADMAP)
+        self.assertTrue(p["planned"])
+
+    def test_an_unrecognised_capacity_is_VERIFY_not_ROADMAP(self):
+        """The distinction that was missing: a planned capacity and a typo
+        got identical handling."""
+        p = b.parse(form(capacity="Z. 9999 kVA"))
+        self.assertEqual(p["sku_status"], b.VERIFY)
+        self.assertFalse(p["planned"])
+        self.assertFalse(p["in_catalogue"])
+
+    def test_planned_and_unrecognised_are_distinguishable(self):
+        planned = b.parse(form(capacity="D.500 kVA"))
+        junk = b.parse(form(capacity="Z. 9999 kVA"))
+        self.assertNotEqual(planned["sku_status"], junk["sku_status"])
+        self.assertNotEqual(b.compose_reply(planned), b.compose_reply(junk))
+
+    def test_the_status_vocabulary_is_ac04s_own(self):
+        """AC-04 declares SUPPORTED_PRODUCT / VERIFY / ROADMAP / NOT_OFFERED.
+        The first version invented a label that was actually AC-03's
+        family-level status — a different axis."""
+        self.assertEqual(b.SUPPORTED, "SUPPORTED_PRODUCT")
+        self.assertEqual(b.ROADMAP, "ROADMAP")
+        self.assertEqual(b.VERIFY, "VERIFY")
+
+    def test_planned_is_not_in_the_manufactured_catalogue(self):
+        """Adding 500 to CATALOGUE_KVA would advertise a transformer that
+        cannot be delivered."""
+        self.assertEqual(b.PLANNED_KVA, (500,))
+        for kva in b.PLANNED_KVA:
+            self.assertNotIn(kva, b.CATALOGUE_KVA)
 
     def test_catalogue_sizes_pass_the_status_gate(self):
         for kva in b.CATALOGUE_KVA:
@@ -318,12 +353,22 @@ class ReplyQuality(unittest.TestCase):
         txt = b.compose_reply(b.parse(form(location="")))
         self.assertNotIn("📍", txt)
 
-    def test_an_out_of_range_reply_is_honest_and_still_keeps_the_lead(self):
+    def test_a_planned_capacity_reply_says_BOTH_halves_of_the_truth(self):
+        """Planned, AND not manufactured today. Either half alone is a lie:
+        one promises an undeliverable unit, the other rejects a real lead."""
         txt = b.compose_reply(b.parse(form(capacity="D.500 kVA")))
         self.assertIn("500 kVA", txt)
-        self.assertIn("25 kVA", txt)      # the real range is stated
-        self.assertIn("250 kVA", txt)
-        self.assertNotIn("ಕ್ಷಮಿಸಿ", txt)  # not a refusal
+        self.assertIn("ಮುಂದಿನ ಯೋಜನೆ", txt)        # it is planned
+        self.assertIn("ಸದ್ಯಕ್ಕೆ ತಯಾರಿಸುತ್ತಿಲ್ಲ", txt)   # not made today
+        self.assertIn("engineering", txt.lower())  # routed for assessment
+        self.assertIn("250 kVA", txt)              # the real range is stated
+        self.assertNotIn("ಕ್ಷಮಿಸಿ", txt)            # not a refusal
+
+    def test_a_planned_capacity_is_never_claimed_as_available(self):
+        txt = b.compose_reply(b.parse(form(capacity="D.500 kVA")))
+        # the ✅ "in our standard range" confirmation is for made sizes only
+        self.assertNotIn("✅", txt)
+        self.assertNotIn("standard range ನಲ್ಲಿದೆ", txt)
 
     def test_the_standard_range_never_advertises_an_unmade_size(self):
         txt = b.compose_reply(b.parse(form(capacity="")))
@@ -344,10 +389,18 @@ class OwnerAlert(unittest.TestCase):
         self.assertIn("Location: TBD", a)
         self.assertIn("Quantity: TBD", a)
 
-    def test_out_of_range_is_flagged_to_the_owner(self):
+    def test_a_planned_capacity_is_flagged_as_an_assessment_not_an_anomaly(self):
         a = b.compose_owner_alert("910000000000",
                                   b.parse(form(capacity="D.500 kVA")))
-        self.assertIn("OUT OF STANDARD RANGE", a)
+        self.assertIn("PLANNED CAPACITY", a)
+        self.assertIn("ROADMAP", a)
+        self.assertNotIn("NOT RECOGNISED", a)
+
+    def test_an_unrecognised_capacity_is_flagged_differently(self):
+        a = b.compose_owner_alert("910000000000",
+                                  b.parse(form(capacity="Z. 9999 kVA")))
+        self.assertIn("NOT RECOGNISED", a)
+        self.assertNotIn("PLANNED CAPACITY", a)
 
     def test_it_states_that_nothing_was_quoted(self):
         a = b.compose_owner_alert("910000000000", b.parse(form()))

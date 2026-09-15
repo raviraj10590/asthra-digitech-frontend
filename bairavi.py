@@ -38,13 +38,30 @@ cooling type, applications. Oil-immersed only — `DRY_TYPE` has no GTP, drawing
 or documentation anywhere (`C-13`), and no dry-type SKU may be created "not
 even as a placeholder to make the catalogue look complete" (`AC-03`).
 
-THE AD SELLS A CAPACITY BAIRAVI DOES NOT MAKE
----------------------------------------------
-The form offers 25 / 63 / 100 / 500 kVA. The catalogue is 25 / 63 / 100 / 250.
-So 500 kVA is outside it — two of the sixteen asked for it — and 250 kVA, which
-IS manufactured, is not offered. Out-of-catalogue enquiries are captured and
-routed for manual confirmation, never refused and never silently mapped to a
-nearby size: `AC-04`'s gate is "a gate, not a filter".
+CURRENT RANGE AND PLANNED RANGE ARE DIFFERENT FACTS
+---------------------------------------------------
+The ad form offers 25 / 63 / 100 / 500 kVA. Manufacturing today is
+25 / 63 / 100 / 250. Those are not the same list, and the difference is
+deliberate on both sides:
+
+  25 / 63 / 100 / 250   SUPPORTED_PRODUCT — made today
+  500                   ROADMAP — Bairavi intends to build it, and the form
+                        offers it on purpose. Two of the sixteen chose it.
+
+So 500 kVA is NOT an out-of-range error and must not be handled as one. The
+first version of this module did exactly that: it fell through the same branch
+as a typo, so a customer picking the capacity the ad advertised got the same
+reply as someone who typed 9999. A planned capacity and an unrecognised one
+are different facts and now carry different statuses.
+
+What a 500 kVA enquiry gets is both halves of the truth — it is planned, and
+it is not manufactured today — plus a route to sales and engineering.
+Promising it would be a transformer that cannot be delivered; refusing it
+would throw away a real enquiry for a product the business has decided to
+build.
+
+Anything outside both lists is VERIFY: captured, never refused, and never
+silently mapped to a nearby size. `AC-04`'s gate is "a gate, not a filter".
 
 EXTRACTION IS ALLOWED TO FAIL
 -----------------------------
@@ -71,9 +88,22 @@ import re
 # nothing below carries a price, a loss figure or a delivery time.
 CATALOGUE_KVA = (25, 63, 100, 250)
 
-# Offered by the ad form but NOT manufactured. Kept as data rather than as a
-# special case in the reply, so a form change is a one-line edit here.
-KNOWN_OUT_OF_CATALOGUE_KVA = (500,)
+# PLANNED, NOT CURRENT. 500 kVA is in the ad form deliberately — Bairavi
+# intends to manufacture it — so it is neither a mistake nor an out-of-range
+# error, and the form must keep offering it.
+#
+# It is still NOT manufactured today, and the distance between "planned" and
+# "available" is the whole reason this is a separate tuple rather than an
+# extra entry in CATALOGUE_KVA. Adding it there would make the bot advertise
+# a transformer that cannot be delivered, which is the one failure mode worse
+# than sending the wrong services menu.
+#
+# THIS REPLACED DEAD CODE. The first version declared a constant like this
+# and never read it, so 500 kVA fell through the same branch as a typo: a
+# customer choosing the capacity the ad offered got the same reply as someone
+# who typed 9999. Planned capacity and unrecognised capacity are different
+# facts and now have different statuses.
+PLANNED_KVA = (500,)
 
 FAMILY = "OIL_IMMERSED"
 
@@ -82,9 +112,19 @@ FAMILY = "OIL_IMMERSED"
 NEW_UNIT = "NEW_UNIT"
 REPAIR = "REPAIR"
 
-# SKU status · AC-04
+# SKU status · AC-04 declares exactly this vocabulary:
+#     sku_status ∈ { SUPPORTED_PRODUCT, VERIFY, ROADMAP, NOT_OFFERED }
+# The first version used FUTURE_OR_MANUAL_CONFIRMATION_PRODUCT here, which is
+# AC-03's FAMILY-level status — a different axis. Using the SKU vocabulary for
+# a SKU means ROADMAP already exists for exactly the 500 kVA case.
+#
+# AC-04's gate applies to all three non-supported values: they are blocked
+# from the automatic quotation path and routed for manual/technical
+# confirmation. "A gate, not a filter" — the enquiry stays captured, visible
+# and workable.
 SUPPORTED = "SUPPORTED_PRODUCT"
-NEEDS_CONFIRMATION = "FUTURE_OR_MANUAL_CONFIRMATION_PRODUCT"
+ROADMAP = "ROADMAP"        # declared future capacity — 500 kVA today
+VERIFY = "VERIFY"          # unrecognised capacity — a human confirms it
 
 # ── Detection ─────────────────────────────────────────────────────────────
 # The Meta Lead Ads handoff signature. Verified against all 16 production
@@ -200,15 +240,23 @@ def capacity_kva(text: str):
 
 
 def sku_status(kva) -> str:
-    """SUPPORTED_PRODUCT only for a catalogue capacity (AC-04).
+    """The AC-04 status for a capacity. Three outcomes, not two.
 
-    Everything else — unknown, or a size the ad offers but the factory does
-    not build — is routed for manual confirmation. Captured and workable, but
-    never inside the automatic path.
+    SUPPORTED_PRODUCT  currently manufactured (25/63/100/250)
+    ROADMAP            declared future capacity (500) — offered by the ad on
+                       purpose, and not claimed as available
+    VERIFY             anything else, including an unreadable capacity
+
+    All three of the non-supported values are gated out of automatic
+    quotation and routed for confirmation, so the practical handling is the
+    same; what differs is what the owner is told, and whether the customer is
+    left thinking a planned product is a stocked one.
     """
     if kva in CATALOGUE_KVA:
         return SUPPORTED
-    return NEEDS_CONFIRMATION
+    if kva in PLANNED_KVA:
+        return ROADMAP
+    return VERIFY
 
 
 def urgency(text: str):
@@ -241,7 +289,10 @@ def parse(text: str) -> dict:
         "capacity_kva": kva,
         "sku": f"BTS-{kva}" if kva in CATALOGUE_KVA else None,
         "sku_status": sku_status(kva),
+        # Two independent questions, deliberately not collapsed: is it made
+        # today, and is it a capacity we have declared at all?
         "in_catalogue": kva in CATALOGUE_KVA,
+        "planned": kva in PLANNED_KVA,
         "quantity": None,          # never present in the ad form — must be asked
         "location": _field(text, _FIELD_PATTERNS["location"]) or None,
         "name": _field(text, _FIELD_PATTERNS["name"]) or None,
@@ -292,14 +343,27 @@ def compose_reply(parsed: dict) -> str:
         # us, and being asked again is what lost the first fifteen.
         lines.append(f"\n✅ ನಿಮ್ಮ requirement: *{kva} kVA* "
                      "— ಇದು ನಮ್ಮ standard range ನಲ್ಲಿದೆ.")
+    elif parsed["planned"]:
+        # A CAPACITY THE AD OFFERS ON PURPOSE. It must not read as a mistake
+        # and it must not read as available. Both halves are said plainly:
+        # planned, and not manufactured today. Saying only the first would
+        # promise a transformer that cannot be delivered; saying only the
+        # second would turn a real enquiry into a rejection.
+        lines.append(f"\nℹ️ ನೀವು *{kva} kVA* ಕೇಳಿದ್ದೀರಿ. ಇದು ನಮ್ಮ "
+                     "*ಮುಂದಿನ ಯೋಜನೆ*ಯಲ್ಲಿರುವ capacity — "
+                     "ಸದ್ಯಕ್ಕೆ ತಯಾರಿಸುತ್ತಿಲ್ಲ.\n"
+                     f"ಸದ್ಯದ manufacturing range: *{_RANGE}*.\n"
+                     "ನಿಮ್ಮ requirement ನಮ್ಮ sales ಮತ್ತು engineering team ಗೆ "
+                     "ಕಳಿಸಿದ್ದೇವೆ — ಅವರು ಪರಿಶೀಲಿಸಿ ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
     elif kva is not None:
-        # Honest, and it keeps the lead. AC-04: a gate, not a filter — and
-        # never silently mapped to a nearby size.
-        lines.append(f"\nℹ️ ನೀವು *{kva} kVA* ಕೇಳಿದ್ದೀರಿ. ನಮ್ಮ standard "
-                     f"range *{_RANGE}*. ನಿಮ್ಮ requirement ನಮ್ಮ technical "
-                     "team ಗೆ ಕಳಿಸಿದ್ದೇವೆ — ಅವರು ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
+        # An unrecognised capacity. Never silently mapped to a nearby size
+        # (AC-04 is a gate, not a filter), and never refused.
+        lines.append(f"\nℹ️ ನೀವು *{kva} kVA* ಕೇಳಿದ್ದೀರಿ. ಸದ್ಯದ "
+                     f"manufacturing range *{_RANGE}*. ನಿಮ್ಮ requirement ನಮ್ಮ "
+                     "technical team ಗೆ ಕಳಿಸಿದ್ದೇವೆ — ಅವರು ಖಚಿತವಾಗಿ "
+                     "ತಿಳಿಸುತ್ತಾರೆ.")
     else:
-        lines.append(f"\nನಮ್ಮ standard range: *{_RANGE}*.")
+        lines.append(f"\nಸದ್ಯದ manufacturing range: *{_RANGE}*.")
 
     if parsed["location"]:
         lines.append(f"📍 ಸ್ಥಳ: {parsed['location']}")
@@ -328,7 +392,15 @@ def compose_owner_alert(phone: str, parsed: dict) -> str:
             if parsed["requirement"] == NEW_UNIT
             else "🛠 *BAIRAVI SERVICE CALL*")
     src = "Meta ad form" if parsed["from_lead_form"] else "WhatsApp message"
-    flag = "" if parsed["in_catalogue"] else "  ⚠️ OUT OF STANDARD RANGE"
+    # THREE OUTCOMES, NOT TWO. "out of range" on a planned capacity reads as
+    # an anomaly to chase; it is a real enquiry for a product the business has
+    # decided to build, and the owner needs to see that difference.
+    if parsed["in_catalogue"]:
+        flag = ""
+    elif parsed["planned"]:
+        flag = "  📋 PLANNED CAPACITY — sales + engineering to assess"
+    else:
+        flag = "  ⚠️ CAPACITY NOT RECOGNISED — confirm with the customer"
 
     return (
         f"{head}\n"
