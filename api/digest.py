@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+import health
+
 # IDD-2I: the daily cron is the only scheduler on this plan (Vercel Hobby
 # caps at 2 crons, both already in use — see the rollup/prune blocks below),
 # so the customer_reply timeout sweep rides here rather than adding a third.
@@ -78,6 +80,106 @@ def build_digest() -> str:
         lines += ["", "Active chats:"]
         lines += [f"• wa.me/{p}" for p in phones[:10]]
     return "\n".join(lines)
+
+
+def probe_whatsapp() -> tuple:
+    """(probe_state, expires_at) — READ-ONLY. Sends no message to anyone.
+
+    Liveness is a GET on the phone-number object: a 401/403 here is the exact
+    signature of the 2026-09-08 outage. Probing by SENDING would make the
+    health check itself into traffic, and a daily "still alive" message is
+    spam the owner would mute within a week.
+
+    expires_at comes from debug_token and answers the question the owner keeps
+    asking — will this happen again? 0 means a permanent System User token.
+    """
+    if not (WHATSAPP_TOKEN and PHONE_NUMBER_ID):
+        return health.UNKNOWN, None
+    probe = health.UNKNOWN
+    try:
+        r = requests.get(
+            f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}",
+            params={"fields": "id"},
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+            timeout=10,
+        )
+        probe = health.classify_probe(r.status_code, r.ok)
+        # STATUS ONLY. r.text can echo account identifiers, and a health line
+        # is not a place for them.
+        print(f"health: whatsapp probe {r.status_code} -> {probe}")
+    except Exception as e:
+        print(f"health: whatsapp probe failed ({type(e).__name__}) -> UNKNOWN")
+
+    expires_at = None
+    try:
+        d = requests.get(
+            "https://graph.facebook.com/v19.0/debug_token",
+            params={"input_token": WHATSAPP_TOKEN,
+                    "access_token": WHATSAPP_TOKEN},
+            timeout=10,
+        )
+        if d.ok:
+            expires_at = ((d.json().get("data") or {}).get("expires_at"))
+    except Exception as e:
+        print(f"health: debug_token failed ({type(e).__name__})")
+    return probe, expires_at
+
+
+def last_inbound_at():
+    """When a customer last messaged us, or None. Timestamp only — no phone,
+    no content."""
+    rows = _supa_get("whatsapp_messages",
+                     {"role": "eq.user", "order": "created_at.desc",
+                      "limit": "1", "select": "created_at"})
+    if not rows:
+        return None
+    try:
+        return datetime.fromisoformat(
+            str(rows[0]["created_at"]).replace("Z", "+00:00"))
+    except (ValueError, KeyError):
+        return None
+
+
+def record_health(value: str) -> bool:
+    """Persist the verdict to app_settings — the part that outlives the logs.
+
+    Vercel keeps runtime logs for roughly an hour, which is why the 2026-09-08
+    outage left no evidence of when it began. This row is the answer to "since
+    when?", and it is an UPSERT on one key rather than an append, so it cannot
+    grow without bound and needs no retention rule.
+
+    NO TOKEN, NO PHONE, NO CUSTOMER DATA — see health.compose_record. This
+    table already holds a plaintext credential for another project; it must
+    not gain one from here.
+    """
+    # SERVICE ROLE, NOT ANON — and this was verified against the live
+    # database, not assumed. app_settings has RLS ENABLED WITH ZERO POLICIES,
+    # so the anon key this module uses for reads is denied every write. Using
+    # it here would reproduce the exact silent 401 that left `leads` empty for
+    # weeks: PostgREST maps insufficient_privilege to 401, requests.post does
+    # not raise on it, and the failure would look identical to success.
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not key:
+        # Fail loudly rather than fall back to anon, which cannot work.
+        print("health: record SKIPPED — no service-role credential")
+        return False
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/app_settings",
+            headers={"apikey": key, "Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json",
+                     "Prefer": "resolution=merge-duplicates"},
+            json={"key": "bot_health_last_check", "value": value,
+                  "updated_at": datetime.now(timezone.utc).isoformat()},
+            timeout=5,
+        )
+        # CHECKED. The one discipline this codebase learned the hard way.
+        if not r.ok:
+            print(f"health: record failed {r.status_code}")
+        return r.ok
+    except Exception as e:
+        print(f"health: record failed ({type(e).__name__})")
+        return False
 
 
 def send_to_owner(text: str):
@@ -289,6 +391,36 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 print(f"bic conversion evidence failed (ignored): "
                       f"{type(e).__name__}")
+
+        # ── Bot health ────────────────────────────────────────────────
+        # SIXTH best-effort block on the same daily cron. Vercel Hobby caps at
+        # 2 crons and both are in use, so this rides the existing job exactly
+        # as the rollup, retention, sweep, pipeline-evidence and conversion
+        # blocks above do.
+        #
+        # LAST, deliberately. It reports on the transport the digest itself
+        # needs, so running it after the send means the probe describes the
+        # same credential state the send just exercised.
+        #
+        # THE CIRCULARITY IS ACCEPTED, NOT HIDDEN: if the token is dead this
+        # alert cannot be delivered either. That is why the verdict is written
+        # to app_settings first — a durable row survives the ~1h log retention
+        # and answers "since when?", which is the question nobody could answer
+        # on 2026-09-08.
+        try:
+            probe, expires_at = probe_whatsapp()
+            expiry = health.classify_expiry(expires_at)
+            silence = health.classify_silence(last_inbound_at())
+            record_health(health.compose_record(probe, expiry, silence))
+            line = health.compose_health_line(probe, expiry, silence)
+            print(f"health: {line}")
+            # Only escalate a real problem. A daily "all fine" message is how
+            # an alert channel becomes noise the owner filters out.
+            if (probe == health.DEAD or silence[0]
+                    or expiry[0] in (health.EXPIRED, health.EXPIRING)):
+                send_to_owner(line)
+        except Exception as e:
+            print(f"health check failed (ignored): {type(e).__name__}")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
