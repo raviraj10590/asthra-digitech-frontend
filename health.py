@@ -165,8 +165,43 @@ def classify_silence(last_inbound, now=None) -> tuple:
     return quiet >= SILENCE_ALARM_HOURS, quiet
 
 
+# ── Ads access — what liveness alone does NOT prove ──────────────────────
+# The CRM's Meta dashboard went blind on 2026-04-08 and was found on
+# 2026-09-16, five months later, by someone opening the page. The token had
+# expired; nothing watched it.
+#
+# A LIVE TOKEN IS NOT AN ADS-CAPABLE TOKEN. The dashboard calls
+# /me/adaccounts, which returns only accounts the token's owner can actually
+# reach. A token can pass a liveness check and still return an empty list
+# because `ads_read` was never granted, or because the ad account was never
+# attached to that system user as an asset. Those are different problems with
+# different fixes, so they get different states.
+ADS_OK = "ADS_OK"
+ADS_NO_ACCOUNTS = "ADS_NO_ACCOUNTS"
+ADS_FORBIDDEN = "ADS_FORBIDDEN"
+
+
+def classify_ads_access(status_code, ok: bool, account_count) -> str:
+    """What a read-only GET on /me/adaccounts means.
+
+    An empty list on a 200 is the case that matters and the one a naive check
+    misses: Meta answered, the token is fine, and there is still nothing to
+    report on. Treating that as healthy is how a dashboard shows zeros for
+    five months without anyone being told.
+    """
+    if not ok:
+        if status_code in (401, 403):
+            return DEAD
+        if status_code in (200, 10):
+            return ADS_FORBIDDEN
+        return UNKNOWN
+    if account_count is None:
+        return UNKNOWN
+    return ADS_OK if account_count > 0 else ADS_NO_ACCOUNTS
+
+
 def compose_health_line(probe: str, expiry: tuple, silence: tuple,
-                        last_inbound=None) -> str:
+                        last_inbound=None, ads: str = None) -> str:
     """One line for the daily digest. Healthy is boring on purpose.
 
     A health report the owner skims past is worthless, so the OK case is a
@@ -202,10 +237,25 @@ def compose_health_line(probe: str, expiry: tuple, silence: tuple,
     elif last_inbound is not None:
         bits.append(f"last enquiry {quiet}h of daytime ago")
 
+    # Reported only when actually checked, so a missing ads token reads as
+    # "not checked" rather than silently as "fine".
+    if ads == ADS_OK:
+        bits.append("Meta ads ✅")
+    elif ads == ADS_NO_ACCOUNTS:
+        bits.append("🚨 Meta ads: token valid but NO ad account visible — "
+                    "attach the ad account to this token's system user")
+    elif ads == ADS_FORBIDDEN:
+        bits.append("🚨 Meta ads: permission denied — grant ads_read")
+    elif ads == DEAD:
+        bits.append("🚨 Meta ads token REJECTED — the CRM dashboard is blind")
+    elif ads == UNKNOWN:
+        bits.append("Meta ads ⚠️ unverified")
+
     return "🩺 " + " · ".join(bits)
 
 
-def compose_record(probe: str, expiry: tuple, silence: tuple, now=None) -> str:
+def compose_record(probe: str, expiry: tuple, silence: tuple, now=None,
+                   ads: str = None) -> str:
     """The durable value written to app_settings.
 
     Deliberately a flat, greppable string rather than JSON: its only reader is
@@ -218,4 +268,5 @@ def compose_record(probe: str, expiry: tuple, silence: tuple, now=None) -> str:
     moment = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     return (f"at={moment} probe={probe} token={state}"
             f"{'' if days is None else f' days_left={days}'}"
-            f" quiet_daytime_hours={quiet} silence_alarm={abnormal}")
+            f" quiet_daytime_hours={quiet} silence_alarm={abnormal}"
+            f"{'' if ads is None else f' ads={ads}'}")

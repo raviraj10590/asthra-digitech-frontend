@@ -125,6 +125,53 @@ def probe_whatsapp() -> tuple:
     return probe, expires_at
 
 
+def probe_meta_ads() -> str:
+    """Can this token actually READ an ad account? READ-ONLY, sends nothing.
+
+    WHY THIS IS SEPARATE FROM probe_whatsapp(). The CRM's Meta dashboard was
+    blind from 2026-04-08 to 2026-09-16 — five months — because its token had
+    expired and nothing watched it. Liveness alone would not have been enough
+    either: the dashboard calls /me/adaccounts, and a perfectly live token
+    returns an empty list when `ads_read` was never granted or the ad account
+    was never attached to its system user as an asset.
+
+    WHICH COPY THIS CHECKS. The dashboard's token lives in the CRM project's
+    edge-function secrets, which this process cannot read. Expiry, however, is
+    a property of the TOKEN rather than of where it is stored, so probing the
+    copy available here answers the question for every copy of the same value.
+    The health line says "bot-side copy" rather than claiming to have checked
+    the CRM's, because the two can silently diverge if only one is rotated.
+
+    Falls back to WHATSAPP_TOKEN when FACEBOOK_ACCESS_TOKEN is unset, since
+    they are currently the same value; returns None when neither exists so the
+    line reads "not checked" instead of "fine".
+    """
+    token = (os.environ.get("FACEBOOK_ACCESS_TOKEN", "").strip()
+             or WHATSAPP_TOKEN)
+    if not token:
+        return None
+    try:
+        r = requests.get(
+            "https://graph.facebook.com/v19.0/me/adaccounts",
+            params={"fields": "id", "limit": "1"},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        count = None
+        if r.ok:
+            try:
+                count = len(r.json().get("data") or [])
+            except ValueError:
+                count = None
+        state = health.classify_ads_access(r.status_code, r.ok, count)
+        # COUNT AND STATE ONLY — never r.text, which carries account ids.
+        print(f"health: meta ads probe {r.status_code} accounts={count} -> {state}")
+        return state
+    except Exception as e:
+        print(f"health: meta ads probe failed ({type(e).__name__}) -> UNKNOWN")
+        return health.UNKNOWN
+
+
 def last_inbound_at():
     """When a customer last messaged us, or None. Timestamp only — no phone,
     no content."""
@@ -411,13 +458,16 @@ class handler(BaseHTTPRequestHandler):
             probe, expires_at = probe_whatsapp()
             expiry = health.classify_expiry(expires_at)
             silence = health.classify_silence(last_inbound_at())
-            record_health(health.compose_record(probe, expiry, silence))
-            line = health.compose_health_line(probe, expiry, silence)
+            ads = probe_meta_ads()
+            record_health(health.compose_record(probe, expiry, silence, ads=ads))
+            line = health.compose_health_line(probe, expiry, silence, ads=ads)
             print(f"health: {line}")
             # Only escalate a real problem. A daily "all fine" message is how
             # an alert channel becomes noise the owner filters out.
             if (probe == health.DEAD or silence[0]
-                    or expiry[0] in (health.EXPIRED, health.EXPIRING)):
+                    or expiry[0] in (health.EXPIRED, health.EXPIRING)
+                    or ads in (health.DEAD, health.ADS_NO_ACCOUNTS,
+                               health.ADS_FORBIDDEN)):
                 send_to_owner(line)
         except Exception as e:
             print(f"health check failed (ignored): {type(e).__name__}")

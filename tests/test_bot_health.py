@@ -260,6 +260,99 @@ class TheMessage(unittest.TestCase):
             self.assertIn(state, known, rec)
 
 
+class AdsAccess(unittest.TestCase):
+    """The CRM's Meta dashboard was blind 2026-04-08 -> 2026-09-16. Five
+    months, found by a human opening the page. This is the check that would
+    have caught it on day one."""
+
+    def test_a_working_token_with_an_ad_account_is_ADS_OK(self):
+        self.assertEqual(h.classify_ads_access(200, True, 1), h.ADS_OK)
+        self.assertEqual(h.classify_ads_access(200, True, 7), h.ADS_OK)
+
+    def test_an_EMPTY_account_list_is_not_healthy(self):
+        """THE CASE A NAIVE CHECK MISSES. Meta answered 200, the token is
+        live, and there is still nothing to report on — because `ads_read` was
+        never granted or the ad account was never attached to the token's
+        system user. Calling that healthy is how zeros show for five months."""
+        self.assertEqual(h.classify_ads_access(200, True, 0), h.ADS_NO_ACCOUNTS)
+
+    def test_an_expired_token_is_DEAD_not_merely_unverified(self):
+        """code 190 — the actual 2026-04-08 failure."""
+        self.assertEqual(h.classify_ads_access(401, False, None), h.DEAD)
+        self.assertEqual(h.classify_ads_access(403, False, None), h.DEAD)
+
+    def test_a_permission_error_is_distinguished_from_expiry(self):
+        """Different fix: grant ads_read vs rotate the token."""
+        self.assertEqual(h.classify_ads_access(200, False, None),
+                         h.ADS_FORBIDDEN)
+
+    def test_a_server_error_is_UNKNOWN(self):
+        for code in (500, 502, 429):
+            self.assertEqual(h.classify_ads_access(code, False, None),
+                             h.UNKNOWN, code)
+
+    def test_an_unparseable_body_is_UNKNOWN_not_healthy(self):
+        self.assertEqual(h.classify_ads_access(200, True, None), h.UNKNOWN)
+
+    def test_each_state_produces_a_distinct_actionable_line(self):
+        seen = set()
+        for st in (h.ADS_OK, h.ADS_NO_ACCOUNTS, h.ADS_FORBIDDEN,
+                   h.DEAD, h.UNKNOWN):
+            line = h.compose_health_line(h.OK, (h.PERMANENT, None),
+                                         (False, 1), ads=st)
+            self.assertNotIn(line, seen, f"{st} line is not distinct")
+            seen.add(line)
+        # each problem names its own fix
+        self.assertIn("attach the ad account", h.compose_health_line(
+            h.OK, (h.PERMANENT, None), (False, 1), ads=h.ADS_NO_ACCOUNTS))
+        self.assertIn("ads_read", h.compose_health_line(
+            h.OK, (h.PERMANENT, None), (False, 1), ads=h.ADS_FORBIDDEN))
+
+    def test_not_checked_is_not_reported_as_fine(self):
+        """ads=None means no token was available. It must be silent, never a
+        tick — a tick for an unchecked thing is the lie this whole file
+        exists to prevent."""
+        line = h.compose_health_line(h.OK, (h.PERMANENT, None), (False, 1),
+                                     ads=None)
+        self.assertNotIn("Meta ads", line)
+        self.assertNotIn("ads=", h.compose_record(h.OK, (h.PERMANENT, None),
+                                                  (False, 1)))
+
+    def test_the_record_carries_the_ads_state_when_checked(self):
+        rec = h.compose_record(h.OK, (h.PERMANENT, None), (False, 1),
+                               ads=h.ADS_NO_ACCOUNTS)
+        self.assertIn("ads=ADS_NO_ACCOUNTS", rec)
+
+    def test_an_ads_problem_escalates_to_the_owner(self):
+        src = io.open(DIGEST, encoding="utf-8").read()
+        i = src.index("line = health.compose_health_line")
+        block = src[i:i + 700]
+        for st in ("health.DEAD", "health.ADS_NO_ACCOUNTS",
+                   "health.ADS_FORBIDDEN"):
+            self.assertIn(st, block, f"{st} does not escalate")
+
+    def test_the_ads_probe_is_read_only(self):
+        """Comments stripped before scanning. The first version matched
+        `r.text` inside this function's own comment warning against it — the
+        same false positive this repo keeps hitting when prose is scanned as
+        if it were code."""
+        src = io.open(DIGEST, encoding="utf-8").read()
+        block = src[src.index("def probe_meta_ads"):src.index("def last_inbound_at")]
+        code = "\n".join(l for l in block.splitlines()
+                         if not l.strip().startswith("#"))
+        self.assertIn("requests.get", code)
+        self.assertNotIn("requests.post", code)
+        self.assertIn("/me/adaccounts", code)
+        self.assertNotIn("r.text", code, "response body carries account ids")
+
+    def test_it_falls_back_to_the_whatsapp_token_but_never_invents_one(self):
+        src = io.open(DIGEST, encoding="utf-8").read()
+        block = src[src.index("def probe_meta_ads"):src.index("def last_inbound_at")]
+        self.assertIn("FACEBOOK_ACCESS_TOKEN", block)
+        self.assertIn("or WHATSAPP_TOKEN", block)
+        self.assertIn("if not token:\n        return None", block)
+
+
 class TheDurableRecord(unittest.TestCase):
 
     def test_it_is_greppable_and_carries_the_verdict(self):
