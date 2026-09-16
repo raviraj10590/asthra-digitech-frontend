@@ -678,6 +678,13 @@ def fetch_context(phone: str) -> dict:
     Replaces the 5-7 separate queries v2.2 made per message."""
     ctx = {"history": [], "last_user": {}, "paused": False,
            "vip_alerted": False, "lead_alerted": False, "recent_sys": [],
+           # DEGRADED means "we could not read the history", which is NOT the
+           # same fact as "this customer has no history". Before this flag
+           # existed the two were indistinguishable: a Supabase blip made a
+           # mid-conversation customer look brand new, so they were handed the
+           # welcome menu and lost their Bairavi flow. Callers must branch on
+           # this rather than on an empty history.
+           "degraded": False,
            # Total rows stored for this chat, independent of the 45-row
            # window below. None when unknown. See the count=exact note.
            "stored_messages": None}
@@ -706,8 +713,18 @@ def fetch_context(phone: str) -> dict:
         if r.ok:
             ctx["stored_messages"] = _content_range_total(
                 r.headers.get("Content-Range"))
+        else:
+            # A rejected read is a failed read. Falling through with rows=[]
+            # is what made an outage look like a new customer.
+            print(f"FETCH_CONTEXT_FAILED status={r.status_code} "
+                  f"phone=...{phone[-4:]}")
+            ctx["degraded"] = True
+            return ctx
     except Exception as e:
-        print(f"fetch_context error: {e}")
+        # TYPE ONLY — the exception can carry the URL and the response body.
+        print(f"FETCH_CONTEXT_FAILED type={type(e).__name__} "
+              f"phone=...{phone[-4:]}")
+        ctx["degraded"] = True
         return ctx
 
     pause_seen = False
@@ -735,22 +752,87 @@ def fetch_context(phone: str) -> dict:
                       for r in reversed(convo)][-20:]
     return ctx
 
-def save_message(phone: str, role: str, content: str):
-    save_messages([(phone, role, content)])
+def warn_if_transcript_lost(phone: str, outcome: str, what: str) -> None:
+    """Tell the owner when a turn failed to persist. Observability, not repair.
 
-def save_messages(items: list):
-    """Bulk insert — one POST for the whole exchange instead of one per row."""
-    if not items:
+    WHY THIS IS NOT A FIX. Conversation history is the only shared memory the
+    Brain has; when the write is rejected, the FLOW_MARKER genuinely does not
+    exist, and no logic at the NEXT message can recover it without inventing a
+    second store. So this does the one honest thing available: it makes the
+    gap visible to a human while the customer is still in the conversation,
+    rather than letting the next follow-up be answered by the wrong company
+    with nobody aware.
+    
+    Deliberately NOT called from inside save_messages(). Every branch writes a
+    transcript, so alerting there would produce one message per turn during an
+    outage and train the owner to ignore them. It is called where losing the
+    write changes ROUTING — which is the Bairavi flow, whose stickiness is
+    read back out of history.
+    """
+    if outcome == SAVE_OK:
         return
+    notify_owner(
+        f"⚠️ *Transcript not saved* ({outcome})\n"
+        f"Chat: wa.me/{phone}\n"
+        f"Stage: {what}\n\n"
+        "The customer WAS answered. But this turn is missing from history, so "
+        "their next short reply may lose its business context. Worth taking "
+        "this chat over manually."
+    )
+
+
+def save_message(phone: str, role: str, content: str) -> str:
+    return save_messages([(phone, role, content)])
+
+# Transcript-write outcomes. Three states, not two, because the remedies
+# differ: a 4xx is our schema or credential being wrong and will keep failing;
+# a network error is transient and the next turn may well succeed.
+SAVE_OK = "SUCCESS"
+SAVE_PERSISTENCE_FAILURE = "PERSISTENCE_FAILURE"
+SAVE_NETWORK_FAILURE = "NETWORK_FAILURE"
+
+
+def save_messages(items: list) -> str:
+    """Bulk insert — one POST for the whole exchange instead of one per row.
+
+    THE RESPONSE IS CHECKED, and this is not a theoretical concern. The same
+    omission in upsert_lead ran in production 17 times and stored 0 rows while
+    logging success every time, because requests.post() does NOT raise on
+    4xx/5xx — it returns a Response nobody looked at. That lesson was applied
+    to `leads` and not, until now, to the transcript.
+
+    WHY THE TRANSCRIPT IS THE WORST PLACE TO LOSE A WRITE. Conversation
+    history IS the Brain's memory: fetch_context reads it back, is_new_contact
+    is derived from it, and bairavi.in_transformer_flow() looks for
+    FLOW_MARKER inside it. A silently dropped row therefore does not merely
+    lose a log line — it erases the fact that a customer is mid-conversation,
+    and the next short follow-up ("1 unit", "Rate") loses its business
+    context and is answered by the wrong company.
+
+    Returns the outcome so callers can act on it. It still NEVER raises:
+    failing to record a turn must not stop us answering the customer.
+    """
+    if not items:
+        return SAVE_OK
     try:
-        requests.post(
+        r = requests.post(
             f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
             headers=_supa_headers(),
             json=[{"phone": p, "role": r, "content": c} for p, r, c in items],
             timeout=5,
         )
+        if not r.ok:
+            # ROWS AND STATUS ONLY. r.text echoes the rejected payload, which
+            # is the customer's own message text.
+            print(f"SAVE_MESSAGES_FAILED status={r.status_code} "
+                  f"rows={len(items)} phone=...{items[0][0][-4:]}")
+            return SAVE_PERSISTENCE_FAILURE
+        return SAVE_OK
     except Exception as e:
-        print(f"save_messages error: {e}")
+        # TYPE ONLY — a requests exception can carry the full URL and body.
+        print(f"SAVE_MESSAGES_NETWORK_FAILED type={type(e).__name__} "
+              f"rows={len(items)} phone=...{items[0][0][-4:]}")
+        return SAVE_NETWORK_FAILURE
 
 # The `tool` value for the durable lead-write record. NOT a registered tool
 # and deliberately not registered: nothing invokes it, and adding a
@@ -1849,11 +1931,20 @@ def notify_owner(message: str):
     window, so when OWNER_ALERT_TEMPLATE is configured (an approved template
     with a single {{1}} body parameter) we send that instead — templates
     deliver at any time. Falls back to free-form when the template is unset
-    or its send fails, and logs every outcome so silent loss is impossible."""
+    or its send fails, and logs every outcome so silent loss is impossible.
+
+    RETURNS the number of recipients actually reached (0 = nobody was told).
+    Additive: every existing caller ignores it. Added because the free-form
+    fallback — the LAST delivery attempt available — discarded send_text's
+    result, so a failed alert was indistinguishable from a delivered one. This
+    function is only ever called when something already needs a human, which
+    is precisely when the channel is most likely to be the broken part."""
     template = os.environ.get("OWNER_ALERT_TEMPLATE", "").strip()
     # Meta rejects template parameters containing newlines/tabs.
     flat = " | ".join(part.strip() for part in message.splitlines() if part.strip())
+    attempted = delivered = 0
     for phone in staff_and_owner_numbers():
+        attempted += 1
         try:
             if template:
                 r = _wa_post({
@@ -1871,11 +1962,35 @@ def notify_owner(message: str):
                 })
                 if r.ok:
                     print(f"owner alert -> {phone}: template ok")
+                    delivered += 1
                     continue
                 print(f"owner alert -> {phone}: template FAILED, falling back to text")
-            send_text(phone, message)
+            # send_text RETURNS the channel result precisely so it can be
+            # observed, and this — the last delivery attempt there is — was
+            # the one place still discarding it. A 401 or a closed 24h window
+            # printed "WA API 4xx" from _wa_post and the alert then reported
+            # nothing, so "we tried to tell the owner" was indistinguishable
+            # from "the owner was told".
+            res = send_text(phone, message)
+            if res is None or getattr(res, "ok", False):
+                # None == the test/offline path, not a failure signal.
+                delivered += 1
+            else:
+                print(f"owner alert -> {phone}: text FAILED "
+                      f"status={getattr(res, 'status_code', '?')}")
         except Exception as e:
             print(f"notify_owner error ({phone}): {e}")
+    if attempted and not delivered:
+        # THE ALERT OF LAST RESORT FAILED. Every caller of this function is
+        # already handling something the automation could not — a lost
+        # transcript, unreadable history, a VIP. Those are exactly the
+        # moments when WhatsApp itself is the broken thing, so this line is
+        # the difference between a silent double failure and one greppable
+        # fact. It cannot be escalated further: WhatsApp is the only channel
+        # (see health.py — "the circularity, stated plainly").
+        print(f"OWNER_ALERT_UNDELIVERED recipients={attempted} "
+              "reason=all_sends_rejected")
+    return delivered
 
 def send_brochure(to: str, timeout: float = None, **_) -> bool:
     """Send company profile PDF as a document message.
@@ -4881,7 +4996,10 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         except Exception as e:
             print(f"outcome_producers.observe_customer_reply failed (ignored): {e}")
 
-    is_new_contact = not ctx["history"]
+    # DEGRADED IS NOT NEW. An unreadable history and an empty history produce
+    # the same `history == []`, and conflating them is what handed a
+    # mid-conversation customer the welcome menu during a Supabase blip.
+    is_new_contact = not ctx["history"] and not ctx.get("degraded")
 
     # ── Menu escape hatch: reset any stuck chat to the services menu ──
     if is_menu_request(user_text) and not is_new_contact:
@@ -4894,6 +5012,29 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         send_welcome_menu(sender)
         save_messages([(sender, "user", user_text),
                        (sender, "assistant", "[ಮೆನು ಮರುಕಳಿಸಲಾಯಿತು]")])
+        return
+
+    # ── Human handoff: owner paused this chat ─────────────────────
+    #
+    # MOVED ABOVE BUSINESS ROUTING (2026-09-16). It used to sit BELOW the
+    # Bairavi branch, which meant a transformer conversation the owner had
+    # deliberately taken over with #stop still received bot replies —
+    # verified: replies=1 while paused=True, where an Asthra message in the
+    # same state correctly stayed silent.
+    #
+    # A pause is an OWNER INSTRUCTION, not a topic rule. It therefore
+    # outranks every business branch, and the only thing above it is the
+    # menu escape hatch, which is the customer's own way to reset a stuck
+    # chat. Nothing a customer says may override a human takeover.
+    if ctx["paused"]:
+        # Its own reason: a paused chat is a deliberate human handoff, not the
+        # same fact as a rule matching the customer's words.
+        if BIC_AVAILABLE:
+            bic_decision.mark_deterministic_branch(
+                bic_decision.BRANCH_CHAT_PAUSED,
+                bic_decision.NOT_CONSULTED_CHAT_PAUSED)
+        save_message(sender, "user", user_text)  # keep the record
+        print(f"⏸️ bot paused for {sender} — staying silent")
         return
 
     # ── Bairavi transformer enquiry ────────────────────────────────
@@ -4936,8 +5077,9 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         if _in_flow and not bairavi.is_lead_form(user_text):
             followup = bairavi.parse_followup(user_text)
             send_text(sender, bairavi.compose_followup_reply(followup))
-            save_messages([(sender, "user", user_text),
-                           (sender, "assistant", bairavi.FLOW_MARKER)])
+            _saved = save_messages([(sender, "user", user_text),
+                                    (sender, "assistant", bairavi.FLOW_MARKER)])
+            warn_if_transcript_lost(sender, _saved, "Bairavi follow-up reply")
             # EVERY follow-up is forwarded, not only the ones that parse.
             #
             # The first rule here alerted only when quantity or application
@@ -4961,8 +5103,9 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         send_text(sender, bairavi.compose_reply(parsed))
         # Verbatim first (AC-07): the parsed view never replaces what they
         # actually wrote, and a parse failure must not lose the enquiry.
-        save_messages([(sender, "user", user_text),
-                       (sender, "assistant", bairavi.FLOW_MARKER)])
+        _saved = save_messages([(sender, "user", user_text),
+                                (sender, "assistant", bairavi.FLOW_MARKER)])
+        warn_if_transcript_lost(sender, _saved, "Bairavi opening reply")
         # source marks these as Bairavi so they are separable later. `leads`
         # feeds no Brain metric — new_enquiries comes from first_seen_at
         # claims — so persisting here pollutes nothing.
@@ -4975,6 +5118,48 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             "notes": bairavi.compose_owner_alert(sender, parsed),
         })
         notify_owner(bairavi.compose_owner_alert(sender, parsed))
+        return
+
+    # ── Degraded context: we could not read the history ──────────
+    #
+    # Placed AFTER business routing and BEFORE everything else, deliberately.
+    # A Meta lead form or an explicit "100 kVA transformer" is SELF-
+    # IDENTIFYING: it carries its own context, so it routes correctly with no
+    # history at all and has already been handled above. A short follow-up
+    # ("1 unit", "Rate", "Yes") carries nothing, and every branch below this
+    # point would guess — off-topic would redirect a transformer buyer to
+    # "website, social media, ads", is_new_contact would greet a returning
+    # customer with the services menu, and the AI would answer with no idea
+    # what was being discussed.
+    #
+    # So: route on what the message itself says, and refuse to guess when it
+    # says nothing. The customer gets a holding reply rather than a confident
+    # wrong one, and the owner is told while the conversation is still live.
+    #
+    # NO NEW BRANCH ID. The branch vocabulary is enforced by a CHECK
+    # constraint and this task forbids schema changes, so this turn records
+    # no deterministic branch; the decision record still flushes from
+    # do_POST's `finally` with ai_consulted=false. A CONTEXT_DEGRADED branch
+    # id needs a migration and is recommended for the next phase.
+    if ctx.get("degraded"):
+        print(f"CONTEXT_DEGRADED_HOLDING phone=...{sender[-4:]} "
+              "reason=history_unreadable")
+        send_text(sender,
+            "ಒಂದು ನಿಮಿಷ 🙏 ನಿಮ್ಮ ಸಂದೇಶ ಸಿಕ್ಕಿದೆ. "
+            "ನಮ್ಮ ತಂಡ ಈಗಲೇ ನೋಡಿ ಉತ್ತರಿಸುತ್ತಾರೆ."
+        )
+        notify_owner(
+            f"⚠️ *Conversation history unreadable*\n"
+            f"Chat: wa.me/{sender}\n\n"
+            "A customer messaged and the Brain could not load the thread, so "
+            "it did NOT guess a reply — they were given a holding message. "
+            "Please open this chat and answer manually."
+        )
+        # The turn is still recorded, so the thread is not lost once reads
+        # recover. Its own outcome is checked for the same reason as above.
+        _saved = save_messages([(sender, "user", user_text),
+                                (sender, "assistant", "[holding — context unreadable]")])
+        warn_if_transcript_lost(sender, _saved, "degraded-context holding reply")
         return
 
     # ── Off-topic guard: blatant non-business → polite redirect, no AI ──
@@ -4993,18 +5178,6 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
 
     # ── VIP / election detection → instant owner alert ────────────
     maybe_alert_vip(sender, user_text, ctx["vip_alerted"], message_id)
-
-    # ── Human handoff: owner paused this chat ─────────────────────
-    if ctx["paused"]:
-        # Its own reason: a paused chat is a deliberate human handoff, not the
-        # same fact as a rule matching the customer's words.
-        if BIC_AVAILABLE:
-            bic_decision.mark_deterministic_branch(
-                bic_decision.BRANCH_CHAT_PAUSED,
-                bic_decision.NOT_CONSULTED_CHAT_PAUSED)
-        save_message(sender, "user", user_text)  # keep the record
-        print(f"⏸️ bot paused for {sender} — staying silent")
-        return
 
     # ── Brochure request? ─────────────────────────────────────────
     if is_brochure_request(user_text):

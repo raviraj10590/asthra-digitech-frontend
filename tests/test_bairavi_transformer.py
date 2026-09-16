@@ -439,8 +439,9 @@ class Segregation(unittest.TestCase):
              mock.patch.object(w, "notify_owner",
                                lambda m, **k: calls["owner"].append(m)), \
              mock.patch.object(w, "save_messages",
-                               lambda rows: calls["saved"].extend(rows)), \
-             mock.patch.object(w, "save_message", lambda *a, **k: None), \
+                               lambda rows: (calls["saved"].extend(rows),
+                                             w.SAVE_OK)[1]), \
+             mock.patch.object(w, "save_message", lambda *a, **k: w.SAVE_OK), \
              mock.patch.object(w, "maybe_alert_vip", lambda *a, **k: None), \
              mock.patch.object(w, "BIC_AVAILABLE", False):
             w.run_client_pipeline("910000000000", text, ctx)
@@ -582,8 +583,10 @@ class ConversationContinuity(unittest.TestCase):
                  mock.patch.object(w, "notify_owner",
                                    lambda m, **k: owner.append(m)), \
                  mock.patch.object(w, "save_messages",
-                                   lambda rows: saved.extend(rows)), \
-                 mock.patch.object(w, "save_message", lambda *a, **k: None), \
+                                   lambda rows: (saved.extend(rows),
+                                                 w.SAVE_OK)[1]), \
+                 mock.patch.object(w, "save_message",
+                                   lambda *a, **k: w.SAVE_OK), \
                  mock.patch.object(w, "maybe_alert_vip", lambda *a, **k: None), \
                  mock.patch.object(w, "generate_reply",
                                    lambda *a, **k: "ASTHRA_AI_REPLY"), \
