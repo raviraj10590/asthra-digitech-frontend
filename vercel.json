@@ -21,6 +21,10 @@
     {
       "src": "api/lead.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/nudge.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
@@ -43,6 +47,10 @@
     {
       "src": "/api/lead",
       "dest": "api/lead.py"
+    },
+    {
+      "src": "/api/nudge",
+      "dest": "api/nudge.py"
     }
   ],
   "crons": [
