@@ -252,20 +252,28 @@ class TheMirrorCarriesTheMessagesOwnId(unittest.TestCase):
         s = self.mirror("wamid.ABC123")
         self.assertEqual(s["json"]["wa_message_id"], "wamid.ABC123")
 
-    def test_it_is_idempotent_on_that_id(self):
-        """idx_wa_messages_wa_id is a UNIQUE partial index, so a retried
-        mirror would fail on conflict without this."""
-        s = self.mirror("wamid.ABC123")
-        self.assertEqual(s["params"].get("on_conflict"), "wa_message_id")
-        self.assertIn("resolution=merge-duplicates", s["prefer"])
+    def test_it_NEVER_asks_postgrest_to_resolve_the_conflict(self):
+        """THE REGRESSION THIS CAUSED IN PRODUCTION.
 
-    def test_without_an_id_it_does_not_claim_idempotency(self):
-        """A null wa_message_id cannot conflict — the index is partial — so
-        asking for a merge on it would be a lie."""
+        Asking for on_conflict=wa_message_id broke every mirror write:
+        idx_wa_messages_wa_id is a PARTIAL unique index
+        (WHERE wa_message_id IS NOT NULL), and Postgres rejects a partial
+        index as an ON CONFLICT inference target unless the statement repeats
+        the predicate — which the PostgREST parameter cannot express. Inserts
+        failed with 42P10, replies were sent and never recorded, and Meta's
+        receipts orphaned into the dead-letter queue.
+
+        Idempotency is still ENFORCED by the index; it is simply not absorbed.
+        """
+        for wamid in ("wamid.ABC123", None):
+            s = self.mirror(wamid)
+            self.assertEqual(s["params"], {}, wamid)
+            self.assertNotIn("merge-duplicates", s["prefer"], wamid)
+            self.assertNotIn("on_conflict", s["prefer"], wamid)
+
+    def test_without_an_id_the_field_is_omitted_entirely(self):
         s = self.mirror(None)
         self.assertNotIn("wa_message_id", s["json"])
-        self.assertEqual(s["params"], {})
-        self.assertNotIn("merge-duplicates", s["prefer"])
 
     def test_client_id_is_deliberately_NOT_sent(self):
         """The Brain does not know the CRM's ids; the CRM links it on insert.

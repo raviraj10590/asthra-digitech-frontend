@@ -1891,20 +1891,29 @@ def log_reply_to_crm(phone: str, body: str, wa_message_id: str = None):
         # CRM's ids, and the CRM links it itself on insert (see the CRM
         # migration 20260918100000). Fetching one here would add a round trip
         # to the reply path for a value the CRM derives for free.
-        params = {}
         if wa_message_id:
             row["wa_message_id"] = wa_message_id
-            # IDEMPOTENT. idx_wa_messages_wa_id is a unique partial index, so a
-            # retried mirror would otherwise fail on conflict. Merging makes a
-            # replay a no-op instead of an error.
-            params["on_conflict"] = "wa_message_id"
 
+        # NO on_conflict, AND THAT IS DELIBERATE.
+        #
+        # This asked PostgREST for on_conflict=wa_message_id with
+        # resolution=merge-duplicates, and it broke every mirror write in
+        # production. idx_wa_messages_wa_id is a PARTIAL unique index
+        # (WHERE wa_message_id IS NOT NULL), and Postgres will not accept a
+        # partial index as an ON CONFLICT inference target unless the
+        # statement repeats the predicate — which the PostgREST parameter
+        # cannot express. Every insert failed with 42P10, so replies were
+        # sent and never recorded, and Meta's delivery receipts orphaned into
+        # the dead-letter queue.
+        #
+        # Idempotency is not lost by removing it: the unique index still
+        # ENFORCES it. A replayed wa_message_id is rejected with a conflict
+        # and logged, rather than silently merged. That is the right trade at
+        # this call site — a replay here would mean send_text ran twice for
+        # one message, which is a bug worth seeing rather than absorbing.
         r = requests.post(
             f"{CRM_SUPABASE_URL}/rest/v1/whatsapp_messages",
-            headers={**_crm_headers(), "Prefer":
-                     "return=minimal,resolution=merge-duplicates"
-                     if wa_message_id else "return=minimal"},
-            params=params,
+            headers={**_crm_headers(), "Prefer": "return=minimal"},
             json=row,
             timeout=3,
         )
