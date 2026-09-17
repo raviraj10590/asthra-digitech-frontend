@@ -179,7 +179,10 @@ class OnlySendTextMayMirror(unittest.TestCase):
 
     def test_that_caller_is_send_text(self):
         import inspect
-        self.assertIn("log_reply_to_crm(to, message)",
+        # The mirror now also carries the id Meta assigned to this very
+        # message; `to, message` still leads, so what reaches the CRM is
+        # still the customer's own reply and nothing else.
+        self.assertIn("log_reply_to_crm(to, message, _wamid)",
                       inspect.getsource(w.send_text))
 
     def test_the_mirror_still_records_a_genuine_reply(self):
@@ -187,7 +190,8 @@ class OnlySendTextMayMirror(unittest.TestCase):
         sent = []
         with mock.patch.object(w, "_wa_post", lambda p: {"ok": True}), \
              mock.patch.object(w, "log_reply_to_crm",
-                               lambda phone, body: sent.append(body)), \
+                               lambda phone, body, wamid=None:
+                                   sent.append(body)), \
              mock.patch.object(w, "save_message", lambda *a, **k: None), \
              redirect_stdout(io.StringIO()):
             w.send_text(PHONE, "ನಮಸ್ಕಾರ 🙏")

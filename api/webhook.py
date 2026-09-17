@@ -213,6 +213,61 @@ CRM_SUPABASE_URL         = os.environ.get("CRM_SUPABASE_URL",         "")
 CRM_SUPABASE_SERVICE_KEY = os.environ.get("CRM_SUPABASE_SERVICE_KEY", "")
 CRM_OWNER_USER_ID        = os.environ.get("CRM_OWNER_USER_ID",        "")
 
+# BRAIN SOURCE → CRM BUSINESS SLUG.
+#
+# The Brain has no business_slug of its own; the smallest existing source of
+# business identity is the value it already writes to leads.source, set
+# explicitly by the Bairavi branch and defaulted to 'whatsapp' by the leads
+# table for everything else.
+#
+# SLUGS, NOT UUIDS. A CRM primary key in Brain configuration would be wrong in
+# every other environment and would need a redeploy to change. The slug is
+# stable, readable in a log, and the CRM resolves it.
+#
+# An UNKNOWN source sends no slug at all. The lead is then written with no
+# business, which is "unassigned and visible as such" — NOT a default tenant.
+# Guessing here is how a Bairavi lead would land in Asthra's book.
+CRM_BUSINESS_SLUG_BY_SOURCE = {
+    "bairavi-transformer": "bairavi-trans-solutions",
+    "whatsapp": "asthra-digitech",
+}
+
+
+def _crm_business_id(source: str):
+    """Resolve a Brain lead source to a CRM business id, or None.
+
+    The CRM does the resolving, over RPC, so no CRM uuid is ever configured
+    here. None means "do not claim a business" and is returned for an
+    unmapped source, a missing credential, or a CRM that rejected the slug —
+    all three of which must leave the lead unassigned rather than guessed.
+    """
+    slug = CRM_BUSINESS_SLUG_BY_SOURCE.get((source or "").strip())
+    if not slug:
+        if source:
+            print(f"CRM_BUSINESS_SLUG_UNMAPPED source={source} "
+                  "— lead will be written with no business")
+        return None
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY):
+        return None
+    try:
+        r = requests.post(
+            f"{CRM_SUPABASE_URL}/rest/v1/rpc/business_id_for_slug",
+            headers=_crm_headers(),
+            json={"p_slug": slug},
+            timeout=3,
+        )
+        if not r.ok:
+            # The CRM refused the slug. Status only — a PostgREST error body
+            # echoes the request.
+            print(f"CRM_BUSINESS_SLUG_REJECTED slug={slug} "
+                  f"status={r.status_code}")
+            return None
+        return r.json()
+    except Exception as e:
+        print(f"CRM_BUSINESS_SLUG_LOOKUP_FAILED slug={slug} "
+              f"type={type(e).__name__}")
+        return None
+
 IST = timezone(timedelta(hours=5, minutes=30))
 
 def get_openai():
@@ -1796,7 +1851,7 @@ def _crm_headers():
         "Content-Type": "application/json",
     }
 
-def log_reply_to_crm(phone: str, body: str):
+def log_reply_to_crm(phone: str, body: str, wa_message_id: str = None):
     """Mirror an outbound bot reply into the Asthra CRM's whatsapp_messages.
 
     ONE LEGITIMATE CALLER: send_text. This writes direction="outbound",
@@ -1818,22 +1873,48 @@ def log_reply_to_crm(phone: str, body: str):
     if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
         return
     try:
+        row = {
+            "user_id": CRM_OWNER_USER_ID,
+            "phone": phone,
+            "direction": "outbound",
+            "message_type": "text",
+            "body": body,
+            "status": "sent",
+            "metadata": {"source": "asthra_ai_bot"},
+        }
+        # THE MESSAGE'S OWN IDENTITY. Omitting it is why 1,149 delivery
+        # receipts became orphan_status dead letters: Meta reported on a
+        # wa_message_id the CRM had never stored. The value is already in the
+        # send response at the call site — it was simply discarded.
+        #
+        # client_id is deliberately NOT sent: the Brain does not know the
+        # CRM's ids, and the CRM links it itself on insert (see the CRM
+        # migration 20260918100000). Fetching one here would add a round trip
+        # to the reply path for a value the CRM derives for free.
+        params = {}
+        if wa_message_id:
+            row["wa_message_id"] = wa_message_id
+            # IDEMPOTENT. idx_wa_messages_wa_id is a unique partial index, so a
+            # retried mirror would otherwise fail on conflict. Merging makes a
+            # replay a no-op instead of an error.
+            params["on_conflict"] = "wa_message_id"
+
         r = requests.post(
             f"{CRM_SUPABASE_URL}/rest/v1/whatsapp_messages",
-            headers={**_crm_headers(), "Prefer": "return=minimal"},
-            json={
-                "user_id": CRM_OWNER_USER_ID,
-                "phone": phone,
-                "direction": "outbound",
-                "message_type": "text",
-                "body": body,
-                "status": "sent",
-                "metadata": {"source": "asthra_ai_bot"},
-            },
+            headers={**_crm_headers(), "Prefer":
+                     "return=minimal,resolution=merge-duplicates"
+                     if wa_message_id else "return=minimal"},
+            params=params,
+            json=row,
             timeout=3,
         )
         if not r.ok:
-            print(f"log_reply_to_crm failed: {r.status_code} {r.text}")
+            # STATUS ONLY, never r.text. A PostgREST error body echoes the
+            # rejected row, and for this table that row is the customer's own
+            # message. The same rule is already applied at upsert_lead and
+            # _record_lead_upsert; this call site had been missed.
+            print(f"CRM_MIRROR_FAILED status={r.status_code} "
+                  f"phone=...{str(phone)[-4:]}")
     except Exception as e:
         print(f"log_reply_to_crm error: {e}")
 
@@ -1857,14 +1938,20 @@ def sync_lead_to_crm(phone: str, data: dict):
             notes_parts.append(f"Company: {data['company']}")
         notes = " | ".join(notes_parts)
 
+        # Resolved once per sync, not per branch.
+        _lead_source = (data.get("source") or "").strip() or None
+        _business_id = _crm_business_id(_lead_source)
+
         existing = requests.get(
             f"{CRM_SUPABASE_URL}/rest/v1/clients",
             headers=_crm_headers(),
-            params={"phone": f"eq.{phone}", "user_id": f"eq.{CRM_OWNER_USER_ID}", "select": "id,notes"},
+            params={"phone": f"eq.{phone}", "user_id": f"eq.{CRM_OWNER_USER_ID}",
+                    "select": "id,notes,business_id"},
             timeout=3,
         )
         if not existing.ok:
-            print(f"sync_lead_to_crm lookup failed: {existing.status_code} {existing.text}")
+            print(f"CRM_LEAD_LOOKUP_FAILED status={existing.status_code} "
+                  f"phone=...{str(phone)[-4:]}")
             return
         rows = existing.json()
 
@@ -1872,6 +1959,13 @@ def sync_lead_to_crm(phone: str, data: dict):
             patch = {}
             if data.get("name"):
                 patch["name"] = data["name"]
+            # Backfill onto a lead that predates the bridge, but never
+            # overwrite a business the CRM already decided — a human may have
+            # assigned it, and the Brain's mapping does not outrank that.
+            if _lead_source:
+                patch["source"] = _lead_source
+            if _business_id and not rows[0].get("business_id"):
+                patch["business_id"] = _business_id
             if notes:
                 prior = rows[0].get("notes") or ""
                 patch["notes"] = f"{prior}\n{notes}".strip() if prior and notes not in prior else (prior or notes)
@@ -1884,7 +1978,8 @@ def sync_lead_to_crm(phone: str, data: dict):
                     timeout=3,
                 )
                 if not r.ok:
-                    print(f"sync_lead_to_crm update failed: {r.status_code} {r.text}")
+                    print(f"CRM_LEAD_UPDATE_FAILED status={r.status_code} "
+                          f"phone=...{str(phone)[-4:]}")
         else:
             r = requests.post(
                 f"{CRM_SUPABASE_URL}/rest/v1/clients",
@@ -1894,11 +1989,18 @@ def sync_lead_to_crm(phone: str, data: dict):
                     "name": data.get("name") or f"WhatsApp Lead {phone}",
                     "phone": phone,
                     "notes": notes or "Captured via WhatsApp AI bot",
+                    # The two fields the bridge used to drop. `source` is the
+                    # Brain's own value, mirrored; the business is resolved by
+                    # the CRM from its slug, and stays absent when the source
+                    # is unmapped rather than defaulting to a tenant.
+                    **({"source": _lead_source} if _lead_source else {}),
+                    **({"business_id": _business_id} if _business_id else {}),
                 },
                 timeout=3,
             )
             if not r.ok:
-                print(f"sync_lead_to_crm insert failed: {r.status_code} {r.text}")
+                print(f"CRM_LEAD_INSERT_FAILED status={r.status_code} "
+                      f"phone=...{str(phone)[-4:]}")
     except Exception as e:
         print(f"sync_lead_to_crm error: {e}")
 
@@ -1920,7 +2022,15 @@ def send_text(to: str, message: str):
     # mirror for them (role-based, not just the bootstrap list, so DB-added
     # staff numbers are excluded too).
     if get_role(to)[0] == "CLIENT":
-        log_reply_to_crm(to, message)
+        # The id Meta just assigned. Read defensively: a rejected send has no
+        # messages array, and the mirror must still record the attempt.
+        _wamid = None
+        try:
+            if _result is not None and _result.ok:
+                _wamid = (_result.json().get("messages") or [{}])[0].get("id")
+        except Exception:
+            _wamid = None
+        log_reply_to_crm(to, message, _wamid)
     return _result
 
 def notify_owner(message: str):
