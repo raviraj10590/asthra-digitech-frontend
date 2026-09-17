@@ -727,3 +727,253 @@ class ConversationContinuity(unittest.TestCase):
         self.assertTrue(b.looks_like_transformer_enquiry("ಟಿ ಸಿ ಬೇಕಾಗಿದೆ"))
         self.assertTrue(b.looks_like_transformer_enquiry("ಟಿಸಿ ಬೇಕು"))
         self.assertFalse(b.looks_like_transformer_enquiry("website beku"))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# THE 2026-09-17 ENQUIRY
+#
+# A Mangalore customer clicked a Bairavi Meta ad, submitted the form (100 kVA,
+# Mangalore), and was asked two things: how many units, and what purpose.
+#
+# They answered "Charging Station ⛽" and then "100kv".
+#
+# Both were read as nothing, and both replies were the same receipt: "we have
+# recorded your message, our team will contact you." The purpose was never
+# confirmed, the capacity never acknowledged, and the units the bot had asked
+# for were never asked again. The bot requested two things and captured
+# neither.
+# ══════════════════════════════════════════════════════════════════════════
+
+class CapacityWrittenAsKv(unittest.TestCase):
+    """"100kv" is how customers write 100 kVA."""
+
+    def test_the_real_message_is_now_read(self):
+        for text in ("100kv", "100 kv", "100KV", "100 KV"):
+            self.assertEqual(b.capacity_kva(text), 100, text)
+            self.assertEqual(b.sku_status(b.capacity_kva(text)),
+                             b.SUPPORTED, text)
+
+    def test_every_catalogue_and_planned_size_is_read_from_kv(self):
+        for kva in b.CATALOGUE_KVA + b.PLANNED_KVA:
+            self.assertEqual(b.capacity_kva(f"{kva}kv"), kva)
+
+    def test_a_distribution_VOLTAGE_is_never_read_as_a_capacity(self):
+        """THE TRAP THIS RULE EXISTS FOR.
+
+        11 kV, 22 kV and 33 kV are the standard Indian distribution voltages.
+        "11kv line ge TC beku" states the site's voltage; it is not a request
+        for an 11 kVA transformer. Reading it as one is the confidently-wrong
+        capacity AC-07 forbids, and a looser "accept kv" rule would do exactly
+        that.
+        """
+        for text in ("11kv", "22 kv", "33kv", "66kv", "110 kv", "132kv",
+                     "11kv line ge TC beku", "33 kv substation"):
+            self.assertIsNone(b.capacity_kva(text), text)
+
+    def test_kva_spelled_out_is_still_trusted_as_written(self):
+        """Including off-catalogue: the customer said it explicitly, so it is
+        recorded and the STATUS carries the judgement, not the parser."""
+        self.assertEqual(b.capacity_kva("11kva"), 11)
+        self.assertEqual(b.sku_status(11), b.VERIFY)
+        self.assertEqual(b.capacity_kva("200 kVA"), 200)
+        self.assertEqual(b.sku_status(200), b.VERIFY)
+
+    def test_500_kva_written_as_kv_is_still_ROADMAP(self):
+        """The planned-capacity distinction must survive the new spelling."""
+        self.assertEqual(b.capacity_kva("500kv"), 500)
+        self.assertEqual(b.sku_status(500), b.ROADMAP)
+
+    def test_a_bare_in_range_kv_figure_is_recognised_as_an_enquiry(self):
+        self.assertTrue(b.looks_like_transformer_enquiry("100kv"))
+        self.assertTrue(b.looks_like_transformer_enquiry("250 kv beku"))
+
+    def test_a_voltage_alone_does_not_start_a_transformer_flow(self):
+        self.assertFalse(b.looks_like_transformer_enquiry("11kv"))
+
+    def test_a_capacity_survives_the_word_that_follows_it(self):
+        """A (?!\\s*a) lookahead in the first version of _KV_RE silently ate
+        the capacity whenever the next word began with "a" — so the one
+        message that answered both questions at once lost half its content."""
+        for text, kva in (("100kv agriculture", 100), ("250kv agri", 250),
+                          ("100kv for a charging station", 100),
+                          ("63kv, 2 units", 63)):
+            self.assertEqual(b.capacity_kva(text), kva, text)
+
+
+class ACapacityIsNeverAQuantity(unittest.TestCase):
+    """The regression this change nearly introduced.
+
+    The quantity guard tested the span for "kva" only. The moment "kv" became
+    readable as a capacity, "100 kv" parsed as 100 UNITS — which the module
+    already called the single most damaging misread available here.
+    """
+
+    def test_a_kv_capacity_is_not_a_quantity(self):
+        for text in ("100 kv", "100kv", "63 kv", "250kv", "500 kv"):
+            self.assertIsNone(b.parse_followup(text)["quantity"], text)
+
+    def test_a_kva_capacity_is_not_a_quantity(self):
+        for text in ("100 kva", "63kva", "250 kVA"):
+            self.assertIsNone(b.parse_followup(text)["quantity"], text)
+
+    def test_a_real_quantity_beside_a_capacity_is_still_read(self):
+        """Scanning every candidate, not just the first: "250kv 3 units"
+        used to give up at 250 and report no quantity at all."""
+        for text, qty in (("250kv 3 units", 3), ("3 units 100 kva", 3),
+                          ("100 kv, 2 nos", 2)):
+            self.assertEqual(b.parse_followup(text)["quantity"], qty, text)
+
+    def test_a_plain_quantity_is_unaffected(self):
+        self.assertEqual(b.parse_followup("2 units")["quantity"], 2)
+        self.assertEqual(b.parse_followup("1 unit")["quantity"], 1)
+
+    def test_a_bare_figure_equal_to_the_capacity_is_not_a_quantity(self):
+        """"100kv 100" is someone restating the capacity, not ordering a
+        hundred transformers. The span test alone does not catch this — the
+        second "100" has no "kv" beside it — so the capacity-equality guard
+        is what makes it TBD.
+
+        It costs a genuine "100 kva, 100 units", which also reports TBD. That
+        is the right way round: the owner reads the verbatim text either way,
+        and a blank field beats a confidently wrong hundred."""
+        self.assertIsNone(b.parse_followup("100kv 100")["quantity"])
+        self.assertEqual(b.parse_followup("100kv 2")["quantity"], 2)
+
+    def test_a_voltage_yields_neither_capacity_nor_quantity(self):
+        f = b.parse_followup("11 kv")
+        self.assertIsNone(f["capacity_kva"])
+        self.assertIsNone(f["quantity"])
+
+
+class PurposesCustomersActuallyName(unittest.TestCase):
+
+    def test_the_real_answer_is_now_read(self):
+        for text in ("Charging Station ⛽", "charging station",
+                     "EV station", "ಚಾರ್ಜಿಂಗ್ ಸ್ಟೇಷನ್"):
+            self.assertEqual(b.parse_followup(text)["application"],
+                             "EV_CHARGING", text)
+
+    def test_solar_is_read(self):
+        for text in ("solar plant", "ಸೋಲಾರ್ ಪ್ರಾಜೆಕ್ಟ್"):
+            self.assertEqual(b.parse_followup(text)["application"],
+                             "SOLAR", text)
+
+    def test_a_solar_pump_is_still_agriculture(self):
+        """Order is load-bearing: a solar pump is a farm load, a solar plant
+        is its own segment."""
+        self.assertEqual(b.parse_followup("solar pump")["application"],
+                         "AGRICULTURE")
+
+    def test_the_original_purposes_are_untouched(self):
+        for text, want in (("agriculture", "AGRICULTURE"),
+                           ("ಕೃಷಿ", "AGRICULTURE"),
+                           ("industry", "INDUSTRY"),
+                           ("construction", "CONSTRUCTION"),
+                           ("tender", "TENDER"),
+                           ("house", "DOMESTIC"),
+                           ("shop", "COMMERCIAL")):
+            self.assertEqual(b.parse_followup(text)["application"], want, text)
+
+    def test_an_unrecognised_purpose_is_still_None(self):
+        """Widening the allowlist must not turn it into a guesser."""
+        for text in ("something else", "ಬೇರೆ", "xyz"):
+            self.assertIsNone(b.parse_followup(text)["application"], text)
+
+    def test_every_purpose_we_OFFER_is_a_purpose_we_can_READ(self):
+        """The 2026-09-17 failure in one assertion: the customer was shown
+        four options and answered with a fifth. Offering something the parser
+        cannot read recreates that, so the offered list is checked against the
+        vocabulary rather than trusted."""
+        offered = b._PURPOSE_OPTIONS.strip("()").split("/")
+        self.assertGreaterEqual(len(offered), 5)
+        for option in offered:
+            option = option.strip()
+            self.assertIsNotNone(
+                b.parse_followup(option)["application"],
+                f"offered {option!r} but the parser cannot read it")
+
+
+class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
+
+    def test_an_unreadable_message_still_re_asks_both_questions(self):
+        r = b.compose_followup_reply(b.parse_followup("hmm ok"))
+        self.assertIn("units", r)
+        self.assertIn("ಉದ್ದೇಶ", r)
+
+    def test_the_exact_2026_09_17_replies_now_carry_content(self):
+        first = b.compose_followup_reply(b.parse_followup("Charging Station ⛽"))
+        self.assertIn("ev charging", first)      # confirms what was said
+        self.assertIn("units", first)            # asks what is still missing
+        self.assertNotIn("ಉದ್ದೇಶ", first)        # does not re-ask what it has
+
+        second = b.compose_followup_reply(b.parse_followup("100kv"))
+        self.assertIn("100 kVA", second)
+        self.assertIn("units", second)
+
+    def test_the_re_ask_gives_a_reason_to_answer(self):
+        """A bare question is easy to ignore. The sentence that says why —
+        an exact quotation — is the part that converts it into an answer."""
+        r = b.compose_followup_reply(b.parse_followup("hmm ok"))
+        self.assertIn("engineer", r)
+        self.assertIn("quotation", r)
+
+    def test_it_never_claims_to_have_read_a_field_it_did_not(self):
+        r = b.compose_followup_reply(b.parse_followup("hmm ok"))
+        self.assertNotIn("ದಾಖಲಿಸಿದ್ದೇವೆ: *", r)
+
+    def test_nothing_is_re_asked_once_both_answers_are_in(self):
+        r = b.compose_followup_reply(b.parse_followup("3 units for industry"))
+        self.assertIn("3 units", r)
+        self.assertIn("industry", r)
+        self.assertNotIn("ಎಷ್ಟು *units* ಬೇಕು?", r)
+        self.assertIn("ಸಂಪರ್ಕಿಸುತ್ತಾರೆ", r)
+
+    def test_a_restated_capacity_is_acknowledged(self):
+        self.assertIn("100 kVA",
+                      b.compose_followup_reply(b.parse_followup("100 kv")))
+
+    def test_the_keycap_numerals_are_not_torn_in_half(self):
+        """Each keycap is three codepoints; slicing them by two produced
+        "1️" and "⃣2" on the customer's phone."""
+        r = b.compose_followup_reply(b.parse_followup("hmm ok"))
+        self.assertIn("1️⃣", r)
+        self.assertIn("2️⃣", r)
+
+    def test_a_price_question_still_gets_no_number(self):
+        r = b.compose_followup_reply(b.parse_followup("rate eshtu"))
+        self.assertIn("engineer", r)
+        self.assertNotIn("₹", r)
+        self.assertFalse(re.search(r"\d{3,}", r.replace("100", "")),
+                         "a figure reached the customer")
+
+    def test_the_reply_still_identifies_as_bairavi_and_never_as_asthra(self):
+        for msg in ("hmm ok", "Charging Station", "100kv", "3 units"):
+            r = b.compose_followup_reply(b.parse_followup(msg))
+            self.assertIn("Bairavi Trans Solutions", r)
+            self.assertNotIn("Asthra", r)
+
+    def test_no_delivery_date_or_certificate_is_ever_promised(self):
+        for msg in ("hmm ok", "when will it come", "iso certified?"):
+            r = b.compose_followup_reply(b.parse_followup(msg))
+            for claim in ("days", "week", "ISO", "BIS", "certified"):
+                self.assertNotIn(claim, r, msg)
+
+
+class TheOwnerSeesWhatWasRestated(unittest.TestCase):
+
+    def test_a_restated_capacity_reaches_the_owner_as_a_field(self):
+        a = b.compose_followup_alert("910000000000",
+                                     b.parse_followup("100kv"), "100kv")
+        self.assertIn("Capacity restated: 100 kVA", a)
+
+    def test_an_absent_capacity_reads_TBD_not_a_guess(self):
+        a = b.compose_followup_alert("910000000000",
+                                     b.parse_followup("Charging Station"),
+                                     "Charging Station")
+        self.assertIn("Capacity restated: TBD", a)
+        self.assertIn("Application: EV_CHARGING", a)
+
+    def test_the_verbatim_line_survives(self):
+        a = b.compose_followup_alert("910000000000",
+                                     b.parse_followup("100kv"), "100kv")
+        self.assertIn("Their words: 100kv", a)

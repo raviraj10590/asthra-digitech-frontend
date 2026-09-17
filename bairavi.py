@@ -145,7 +145,31 @@ _SUBJECT = (
     # is too short to match safely.
     "ಟಿ ಸಿ", "ಟಿಸಿ",
 )
-_KVA_RE = re.compile(r"\b\d{1,4}\s*k\s*v\s*a\b", re.IGNORECASE)
+_KVA_RE = re.compile(r"\b(\d{1,4})\s*k\s*v\s*a\b", re.IGNORECASE)
+
+# "100kv" — how a real customer wrote 100 kVA on 2026-09-17. The reply read it
+# as no capacity at all, so a product Bairavi actually makes was answered as
+# "needs verification".
+#
+# WHY THIS IS NOT SIMPLY ACCEPTING "kv". kV is a real and different unit, and
+# 11 kV / 22 kV / 33 kV are THE standard Indian distribution voltages — so
+# "11kv line ge TC beku" is a site SPEC, not a request for an 11 kVA
+# transformer. Reading that as a capacity is exactly the confidently-wrong
+# capacity AC-07 forbids.
+#
+# So a bare "kv" figure is trusted only when it is a capacity Bairavi actually
+# makes or plans. That cannot misread a voltage class — none of 25/63/100/250/
+# 500 is one — and it costs nothing elsewhere: an off-catalogue figure lands on
+# VERIFY whether it was read or not, so the only thing at stake for those is
+# whether the number reaches the owner as a field or as raw text, and the raw
+# text is forwarded either way.
+_KV_RE = re.compile(r"\b(\d{1,4})\s*k\s*v\b", re.IGNORECASE)
+# The trailing \b is what keeps this off "kva": between "v" and "a" there
+# is no word boundary, so "100kva" never matches here and is read by
+# _KVA_RE instead. An earlier version added a (?!\s*a) lookahead as well,
+# which looked harmless and silently broke "100kv agriculture" — the next
+# word began with "a", so the capacity was lost from exactly the message
+# that answered both questions at once.
 
 # Repair signals. Deliberately narrow: these decide REPAIR vs NEW_UNIT, and
 # a false REPAIR sends a buyer down a service conversation.
@@ -169,7 +193,7 @@ def looks_like_transformer_enquiry(text: str) -> bool:
         return False
     if any(s in low for s in _SUBJECT):
         return True
-    return bool(_KVA_RE.search(low))
+    return bool(_KVA_RE.search(low)) or _kv_as_kva(low) is not None
 
 
 def is_lead_form(text: str) -> bool:
@@ -229,6 +253,19 @@ def _field(text: str, keys) -> str:
     return ""
 
 
+def _kv_as_kva(text: str):
+    """A "kv" figure that is safe to read as kVA, or None.
+
+    Safe means: it is a capacity in the known product range. See _KV_RE for
+    why a looser rule would misread 11 kV as 11 kVA.
+    """
+    for m in _KV_RE.finditer(text or ""):
+        n = int(m.group(1))
+        if n in CATALOGUE_KVA or n in PLANNED_KVA:
+            return n
+    return None
+
+
 def capacity_kva(text: str):
     """The kVA figure, or None when it cannot be read confidently.
 
@@ -237,10 +274,10 @@ def capacity_kva(text: str):
     """
     answer = _field(text, _FIELD_PATTERNS["capacity"]) or (text or "")
     m = _KVA_RE.search(answer)
-    if not m:
-        return None
-    digits = re.search(r"\d{1,4}", m.group())
-    return int(digits.group()) if digits else None
+    if m:
+        return int(m.group(1))
+    # "kv" for kVA, accepted only inside the known product range.
+    return _kv_as_kva(answer)
 
 
 def sku_status(kva) -> str:
@@ -378,14 +415,34 @@ _QTY_RE = re.compile(
 # purpose stays None rather than being guessed, because "what it is for"
 # drives qualification and a wrong value is worse than a blank one.
 _APPLICATIONS = (
+    # EV charging first, and unambiguous. Added because a real customer
+    # answered "Charging Station ⛽" on 2026-09-17 and it read as no purpose at
+    # all — the list offered them agriculture/industry/construction/tender, so
+    # they went off-menu for a use case that was simply missing.
+    ("charging", "EV_CHARGING"), ("ಚಾರ್ಜಿಂಗ್", "EV_CHARGING"),
+    ("ev station", "EV_CHARGING"),
     ("agricultur", "AGRICULTURE"), ("agri", "AGRICULTURE"),
     ("ಕೃಷಿ", "AGRICULTURE"), ("pump", "AGRICULTURE"),
+    # After the agriculture needles on purpose: a "solar pump" is a farm
+    # load, while a "solar plant" is its own segment.
+    ("solar", "SOLAR"), ("ಸೋಲಾರ್", "SOLAR"),
     ("industr", "INDUSTRY"), ("ಕೈಗಾರಿಕೆ", "INDUSTRY"), ("factory", "INDUSTRY"),
     ("construct", "CONSTRUCTION"), ("ಕಟ್ಟಡ", "CONSTRUCTION"),
     ("tender", "TENDER"), ("ಟೆಂಡರ್", "TENDER"),
     ("domestic", "DOMESTIC"), ("house", "DOMESTIC"), ("ಮನೆ", "DOMESTIC"),
     ("commercial", "COMMERCIAL"), ("shop", "COMMERCIAL"),
 )
+
+# Offered to the customer verbatim. Kept next to _APPLICATIONS so the list we
+# SHOW can never drift from the list we can READ — the 2026-09-17 enquiry was
+# offered four options and answered with a fifth.
+_PURPOSE_OPTIONS = ("(agriculture / industry / construction / "
+                    "EV charging / solar / tender)")
+
+# WhatsApp keycap numerals, as whole strings. Each is three codepoints
+# (digit + VS16 + combining enclosing keycap), which is why they are listed
+# rather than sliced out of one string.
+_NUMERALS = ("1️⃣", "2️⃣")
 
 # A price request. Worth recognising so the reply answers the question that
 # was actually asked instead of repeating the intake prompt.
@@ -401,21 +458,31 @@ def parse_followup(text: str) -> dict:
     stays None and the owner alert prints TBD.
     """
     low = (text or "").lower()
+    cap = capacity_kva(text)
+
+    # A CAPACITY IS NOT A QUANTITY, and this guard had a hole. It tested the
+    # span for "kva" only, so once "kv" became readable as a capacity,
+    # "100 kv" parsed as 100 UNITS — the single most damaging misread
+    # available here, and one this change would have introduced. Testing for
+    # "kv" covers both spellings, and a figure that IS the capacity is
+    # excluded outright.
+    #
+    # Scanning every match rather than only the first also means "250kv 3
+    # units" now yields 3 instead of giving up at 250.
     qty = None
-    m = _QTY_RE.search(low)
-    if m:
+    for m in _QTY_RE.finditer(low):
         n = int(m.group(1))
-        # A kVA figure is not a quantity. "63 kVA" must never become 63 units,
-        # which is the single most damaging misread available here.
         span = low[m.start():m.start() + len(m.group()) + 5]
-        if "kva" not in span and 0 < n <= 999:
-            qty = n
+        if "kv" in span or not (0 < n <= 999) or n == cap:
+            continue
+        qty = n
+        break
     app = None
     for needle, value in _APPLICATIONS:
         if needle in low:
             app = value
             break
-    return {"quantity": qty, "application": app,
+    return {"quantity": qty, "application": app, "capacity_kva": cap,
             "asked_price": any(w in low for w in _PRICE_ASK)}
 
 
@@ -492,8 +559,7 @@ def compose_reply(parsed: dict) -> str:
     # application is §6.2's strongest early qualification signal.
     lines.append("\nಇನ್ನೆರಡು ವಿಷಯ ತಿಳಿಸಿದರೆ ಸಾಕು:\n"
                  "1️⃣ ಎಷ್ಟು *units* ಬೇಕು?\n"
-                 "2️⃣ ಯಾವ *ಉದ್ದೇಶ*? (agriculture / industry / "
-                 "construction / tender)")
+                 "2️⃣ ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS)
     return "\n".join(lines)
 
 
@@ -501,21 +567,43 @@ def compose_followup_reply(followup: dict) -> str:
     """The reply to a message inside an existing transformer conversation.
 
     NOT the opening reply. Re-greeting someone mid-conversation and re-listing
-    the range reads as a bot that has forgotten them — and the previous
+    the range reads as a bot that has forgotten them — and the original
     behaviour was worse still, telling them we are not a transformer company.
-    This confirms what they just said and gives the next step.
+
+    IT ALSO MUST NOT BE A RECEIPT. On 2026-09-17 a customer was asked two
+    questions, answered one of them ("Charging Station") and restated the
+    capacity ("100kv"), and was told twice: "we have recorded your message,
+    our team will contact you." Nothing was acknowledged, nothing confirmed,
+    and the units the reply had asked for were never asked again — so the
+    conversation ended with the bot having requested two things and captured
+    neither.
+
+    So this confirms what was actually read, and RE-ASKS whatever is still
+    outstanding, with a reason to answer. A question the customer can act on
+    beats a receipt they cannot.
+
+    Stateless by design, like the rest of this module: it sees one message and
+    re-asks from that alone. A customer who twice says something unreadable is
+    therefore asked twice — which is the right failure, because the
+    alternative is the silence that lost this enquiry.
     """
     lines = []
+
+    # What was genuinely read. Never a field that stayed None — a claim to
+    # have understood something we did not is worse than admitting we did not.
     got = []
+    if followup.get("capacity_kva") is not None:
+        got.append(f"{followup['capacity_kva']} kVA")
     if followup["quantity"] is not None:
         got.append(f"{followup['quantity']} unit"
                    + ("s" if followup["quantity"] != 1 else ""))
     if followup["application"]:
-        got.append(followup["application"].lower())
+        got.append(followup["application"].replace("_", " ").lower())
+
     if got:
         lines.append("✅ ಧನ್ಯವಾದ — ದಾಖಲಿಸಿದ್ದೇವೆ: *" + ", ".join(got) + "*.")
     else:
-        lines.append("✅ ಧನ್ಯವಾದ — ನಿಮ್ಮ ಸಂದೇಶ ದಾಖಲಿಸಿದ್ದೇವೆ.")
+        lines.append("✅ ಧನ್ಯವಾದ — ನಿಮ್ಮ ಸಂದೇಶ ಸಿಕ್ಕಿದೆ.")
 
     if followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
@@ -523,6 +611,28 @@ def compose_followup_reply(followup: dict) -> str:
         lines.append("\nದರದ ಬಗ್ಗೆ: ನಮ್ಮ engineer ನಿಮ್ಮ requirement "
                      "(capacity, quantity, ಸ್ಥಳ) ನೋಡಿ ನಿಖರವಾದ quotation "
                      "ಕೊಡುತ್ತಾರೆ — ಸಾಮಾನ್ಯ ದರ ಹೇಳುವುದು ತಪ್ಪಾಗುತ್ತದೆ.")
+
+    # Only what is still outstanding, and only the two things the opening
+    # reply asked for. The capacity is not re-asked: it comes from the ad form.
+    missing = []
+    if followup["quantity"] is None:
+        missing.append("ಎಷ್ಟು *units* ಬೇಕು?")
+    if not followup["application"]:
+        missing.append("ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS)
+
+    if missing:
+        lines.append("\nಇನ್ನೊಂದು ವಿಷಯ ತಿಳಿಸಿ:" if len(missing) == 1
+                     else "\nಇನ್ನೆರಡು ವಿಷಯ ತಿಳಿಸಿದರೆ ಸಾಕು:")
+        # A tuple, not a sliced string: each keycap is three codepoints
+        # (digit + VS16 + combining enclosing keycap), so slicing by 2 tore
+        # them in half and produced "1️" and "⃣2" on the customer's phone.
+        for numeral, q in zip(_NUMERALS, missing):
+            lines.append(f"{numeral} {q}")
+        # A reason to reply, not a demand. This is the sentence that turns an
+        # unanswered question into an answered one.
+        lines.append("\nಇದು ತಿಳಿದರೆ ನಮ್ಮ engineer ನಿಖರವಾದ quotation "
+                     "ಕೊಡಲು ಸಾಧ್ಯ.")
+
     lines.append("\nನಮ್ಮ *Bairavi Trans Solutions* ತಂಡ ಶೀಘ್ರದಲ್ಲೇ "
                  "ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಾರೆ 🙏")
     return "\n".join(lines)
@@ -540,7 +650,12 @@ def compose_followup_alert(phone: str, followup: dict, text: str) -> str:
     return (
         "🔌 *BAIRAVI — follow-up*\n"
         f"From: wa.me/{phone}\n"
-        f"Quantity: {val(followup['quantity'])}\n"
+        # Reported when a follow-up RESTATES it — "100kv" on 2026-09-17 was a
+        # capacity the owner alert had no line for, so it reached him only
+        # inside the verbatim text.
+        f"Capacity restated: {val(followup.get('capacity_kva'))}"
+        + (" kVA\n" if followup.get('capacity_kva') is not None else "\n")
+        + f"Quantity: {val(followup['quantity'])}\n"
         f"Application: {val(followup['application'])}\n"
         f"Asked for price: {'YES' if followup['asked_price'] else 'no'}\n"
         f"\nTheir words: {(text or '').strip()[:300]}\n"
