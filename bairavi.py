@@ -197,9 +197,33 @@ def looks_like_transformer_enquiry(text: str) -> bool:
 
 
 def is_lead_form(text: str) -> bool:
-    """True for a Meta Lead Ads handoff, whatever it is about."""
+    """True for a Meta Lead Ads handoff, whatever it is about.
+
+    The marker phrase comes from Meta's own template, so it is English even
+    when the form is Kannada — and it changes if the template changes. The
+    structural fallback recognises the handoff by its SHAPE instead: several
+    "label: answer" lines, of which at least two carry labels we know. That
+    does not depend on Meta's wording, and it is deliberately narrow — two
+    recognised labels is more than a customer types by accident.
+    """
     low = (text or "").lower()
-    return any(m in low for m in _LEAD_FORM_MARKERS)
+    if any(m in low for m in _LEAD_FORM_MARKERS):
+        return True
+    return _looks_structurally_like_a_form(low)
+
+
+def _looks_structurally_like_a_form(low: str) -> bool:
+    labelled = [l for l in low.splitlines() if ":" in l]
+    if len(labelled) < 3:
+        return False
+    hits = 0
+    for field, keys in _FIELD_PATTERNS.items():
+        for line in labelled:
+            label = line.partition(":")[0]
+            if any(_label_matches(label, k) for k in keys):
+                hits += 1
+                break
+    return hits >= 2
 
 
 def requirement_type(text: str) -> str:
@@ -220,24 +244,68 @@ def requirement_type(text: str) -> str:
 # The five labels present in all 16 production messages. Matched on a
 # distinctive Kannada substring rather than the whole question, so a reworded
 # form still parses.
+# THE FORM'S QUESTION LABELS, in both languages.
+#
+# Three of these five used to be matched in Kannada ONLY, so rebuilding the
+# Meta form in English would have left capacity, timing and location
+# unreadable — messages arriving normally while every useful field came
+# through blank. That is a worse failure than an outage, because it looks
+# like working software.
+#
+# Ordered most specific first: _field takes the FIRST line whose label
+# matches, so a bare "name" ahead of "full name" would happily return the
+# answer to "Company name".
 _FIELD_PATTERNS = {
-    "name": ("full name", "ಹೆಸರು"),
-    "phone": ("phone number", "ದೂರವಾಣಿ"),
-    "capacity": ("ಸಾಮರ್ಥ್ಯ",),
-    "timing": ("ಯಾವಾಗ",),
-    "location": ("ಸ್ಥಳ", "ಪ್ರಾಜೆಕ್ಟ್"),
+    "name": ("full name", "ಹೆಸರು", "your name", "customer name", "name"),
+    "phone": ("phone number", "ದೂರವಾಣಿ", "mobile number", "contact number",
+              "whatsapp number", "phone", "mobile"),
+    "capacity": ("ಸಾಮರ್ಥ್ಯ", "capacity", "kva", "rating", "transformer size",
+                 "size"),
+    "timing": ("ಯಾವಾಗ", "when do you", "when", "timeline", "how soon",
+               "required by", "urgency"),
+    "location": ("ಸ್ಥಳ", "ಪ್ರಾಜೆಕ್ಟ್", "location", "site", "city", "place",
+                 "district", "where"),
 }
 
 # Timing options, mapped to a coarse urgency the owner can triage on. The
 # labels are the customer's own choices; the mapping adds no judgement beyond
 # the ordering the form itself implies.
+# Longest / most specific first: "1-3 months" contains "3 month", and
+# matching the shorter one first would report the wrong window.
 _TIMING_URGENCY = (
     ("ತಕ್ಷಣ", "IMMEDIATE"),
-    ("1 ತಿಂಗಳ", "WITHIN_1_MONTH"),
+    ("immediate", "IMMEDIATE"),
+    ("urgent", "IMMEDIATE"),
     ("1–3 ತಿಂಗಳ", "WITHIN_3_MONTHS"),
     ("1-3 ತಿಂಗಳ", "WITHIN_3_MONTHS"),
+    ("1–3 month", "WITHIN_3_MONTHS"),
+    ("1-3 month", "WITHIN_3_MONTHS"),
+    ("3 month", "WITHIN_3_MONTHS"),
+    ("1 ತಿಂಗಳ", "WITHIN_1_MONTH"),
+    ("1 month", "WITHIN_1_MONTH"),
+    ("within a month", "WITHIN_1_MONTH"),
     ("ಮಾಹಿತಿ", "INFORMATION_ONLY"),
+    ("information", "INFORMATION_ONLY"),
+    ("price list", "INFORMATION_ONLY"),
+    ("quotation only", "INFORMATION_ONLY"),
+    ("just looking", "INFORMATION_ONLY"),
 )
+
+
+def _label_matches(label: str, key: str) -> bool:
+    """Does this question label carry this key?
+
+    WORD BOUNDARIES, NOT SUBSTRINGS, for ASCII keys. "city" is a substring of
+    "capacity", so plain containment read the answer to "Transformer capacity
+    required" as the project location — a wrong field, silently, on a form
+    that looked perfectly normal.
+
+    Kannada keys stay substring matches: the script has no ASCII word
+    boundaries to anchor on, and its labels do not collide.
+    """
+    if key.isascii():
+        return re.search(r"\b" + re.escape(key) + r"\b", label) is not None
+    return key in label
 
 
 def _field(text: str, keys) -> str:
@@ -248,7 +316,7 @@ def _field(text: str, keys) -> str:
             continue
         label, _, answer = line.partition(":")
         low = label.lower()
-        if any(k in low for k in keys):
+        if any(_label_matches(low, k) for k in keys):
             return answer.strip()
     return ""
 
@@ -309,8 +377,12 @@ def urgency(text: str):
     answer = _field(text, _FIELD_PATTERNS["timing"])
     if not answer:
         return None
+    # Case-folded: the Kannada options are caseless, so this comparison was
+    # never exercised until English options existed — and "Immediately" does
+    # not contain "immediate" until it is lowered.
+    low = answer.lower()
     for needle, value in _TIMING_URGENCY:
-        if needle in answer:
+        if needle in low:
             return value
     return None
 
@@ -322,9 +394,24 @@ def parse(text: str) -> dict:
     nothing the customer said is lost to a parse failure.
     """
     kva = capacity_kva(text)
+    is_form = is_lead_form(text)
+    loc = _field(text, _FIELD_PATTERNS["location"]) or None
+    urg = urgency(text)
+
+    # A FORM THAT PARSES NOTHING IS A CONFIGURATION CHANGE, NOT A SHY
+    # CUSTOMER. A Meta form always carries a capacity, a location and a
+    # timing answer — they are its questions. If all three come through blank,
+    # the form's labels have been rewritten, not left empty, and every
+    # downstream field will be TBD until somebody notices.
+    #
+    # On 2026-09-17 that class of failure cost a day of guessing. It now says
+    # so in the owner alert rather than presenting a page of blanks.
+    form_unreadable = bool(is_form) and kva is None and loc is None and urg is None
+
     return {
         "raw": text or "",
-        "from_lead_form": is_lead_form(text),
+        "from_lead_form": is_form,
+        "form_unreadable": form_unreadable,
         "requirement": requirement_type(text),
         "family": FAMILY,
         "capacity_kva": kva,
@@ -335,9 +422,9 @@ def parse(text: str) -> dict:
         "in_catalogue": kva in CATALOGUE_KVA,
         "planned": kva in PLANNED_KVA,
         "quantity": None,          # never present in the ad form — must be asked
-        "location": _field(text, _FIELD_PATTERNS["location"]) or None,
+        "location": loc,
         "name": _field(text, _FIELD_PATTERNS["name"]) or None,
-        "urgency": urgency(text),
+        "urgency": urg,
         "application": None,       # §6.2 field 6 — asked, strongest early signal
     }
 
@@ -723,7 +810,15 @@ def compose_owner_alert(phone: str, parsed: dict) -> str:
     # THREE OUTCOMES, NOT TWO. "out of range" on a planned capacity reads as
     # an anomaly to chase; it is a real enquiry for a product the business has
     # decided to build, and the owner needs to see that difference.
-    if parsed["in_catalogue"]:
+    if parsed.get("form_unreadable"):
+        # Above the capacity flag on purpose: if the form is unreadable then
+        # the capacity is unknown for a REASON, and that reason is the thing
+        # to act on.
+        flag = ("  🚨 FORM NOT READ — every field came through blank, which "
+                "means the Meta form's questions were changed. Fix the form "
+                "or send me the new labels; the customer's own words are "
+                "below and are unaffected.")
+    elif parsed["in_catalogue"]:
         flag = ""
     elif parsed["planned"]:
         flag = "  📋 PLANNED CAPACITY — sales + engineering to assess"

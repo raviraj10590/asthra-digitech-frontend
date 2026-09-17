@@ -1055,3 +1055,199 @@ class AnUnstatedQuantityIsOneUnit(unittest.TestCase):
         a = b.compose_owner_alert("910000000000", b.parse(form()))
         self.assertIn("Quantity: 1 (assumed", a)
         self.assertNotIn("Quantity: TBD", a)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# THE FORM IS NOT ALLOWED TO DICTATE ITS OWN WORDING
+#
+# On 2026-09-17 the ad reached 1,500 people and produced zero conversations,
+# and the operator's diagnosis was the Meta form itself. Rebuilding that form
+# was blocked by a hidden constraint: capacity, timing and location were
+# matched in KANNADA ONLY, so an English rebuild would have delivered
+# messages normally while every useful field came through blank — software
+# that looks like it is working.
+#
+# The form's labels are now read in either language, its shape is recognised
+# without Meta's English template sentence, and a form that parses nothing
+# says so instead of presenting a page of TBDs.
+# ══════════════════════════════════════════════════════════════════════════
+
+EN_FORM = """Hello! I filled out your form and would like to know more about your business.
+
+Transformer capacity required: C. 100 kVA
+Project location: Mangalore
+Full name: Test Person
+Phone number: +910000000000
+When do you need it?: E. For information and price list"""
+
+SHORT_EN_FORM = """Hello! I filled out your form.
+
+Capacity: 250 kVA
+City: Hassan
+Name: Test Person
+Mobile: +910000000000
+Timeline: Immediately"""
+
+
+class TheFormReadsInEitherLanguage(unittest.TestCase):
+
+    def test_the_original_kannada_form_is_unchanged(self):
+        """The regression that matters most: production runs on this one."""
+        p = b.parse(form())
+        self.assertEqual(p["capacity_kva"], 25)
+        self.assertEqual(p["location"], "Testpura")
+        self.assertEqual(p["name"], "Test Person")
+        # The fixture's default option is "E. ಮಾಹಿತಿ ಮತ್ತು ದರಪಟ್ಟಿಗಾಗಿ".
+        self.assertEqual(p["urgency"], "INFORMATION_ONLY")
+        self.assertFalse(p["form_unreadable"])
+
+    def test_every_live_kannada_timing_option_still_maps(self):
+        """These are the exact option strings the production form emits."""
+        for when, want in zip(WHEN_OPTIONS,
+                              ("IMMEDIATE", "WITHIN_1_MONTH",
+                               "WITHIN_3_MONTHS", "INFORMATION_ONLY")):
+            self.assertEqual(b.urgency(form(when=when)), want, when)
+
+    def test_every_live_capacity_option_still_maps(self):
+        for cap, kva in zip(CAP_OPTIONS, (25, 63, 100, 500)):
+            self.assertEqual(b.parse(form(capacity=cap))["capacity_kva"], kva)
+
+    def test_an_english_rebuild_reads_every_field(self):
+        p = b.parse(EN_FORM)
+        self.assertTrue(p["from_lead_form"])
+        self.assertEqual(p["capacity_kva"], 100)
+        self.assertEqual(p["sku_status"], b.SUPPORTED)
+        self.assertEqual(p["location"], "Mangalore")
+        self.assertEqual(p["urgency"], "INFORMATION_ONLY")
+        self.assertEqual(p["name"], "Test Person")
+        self.assertFalse(p["form_unreadable"])
+
+    def test_short_english_labels_read_too(self):
+        p = b.parse(SHORT_EN_FORM)
+        self.assertEqual(p["capacity_kva"], 250)
+        self.assertEqual(p["location"], "Hassan")
+        self.assertEqual(p["urgency"], "IMMEDIATE")
+
+    def test_capacity_does_not_masquerade_as_location(self):
+        """"city" is a substring of "capacity", so plain containment read the
+        answer to "Transformer capacity required" as the project location —
+        a wrong field, silently, on a form that looked perfectly normal."""
+        p = b.parse(EN_FORM)
+        self.assertEqual(p["location"], "Mangalore")
+        self.assertNotIn("kVA", p["location"])
+
+    def test_urgency_is_case_folded(self):
+        """The Kannada options are caseless, so this comparison was never
+        exercised until English options existed — and "Immediately" does not
+        contain "immediate" until it is lowered."""
+        def with_timing(t):
+            return f"Hello! I filled out your form.\nCapacity: 100 kVA\nCity: X\nName: Y\nTimeline: {t}"
+        for text, want in (("Immediately", "IMMEDIATE"),
+                           ("IMMEDIATE", "IMMEDIATE"),
+                           ("Urgent", "IMMEDIATE"),
+                           ("Within 1 month", "WITHIN_1_MONTH"),
+                           ("1-3 months", "WITHIN_3_MONTHS"),
+                           ("For information and price list", "INFORMATION_ONLY")):
+            self.assertEqual(b.urgency(with_timing(text)), want, text)
+
+    def test_a_longer_window_is_not_read_as_a_shorter_one(self):
+        """"1-3 months" contains "3 month"; ordering decides which wins."""
+        def with_timing(t):
+            return f"Hello! I filled out your form.\nCapacity: 100 kVA\nCity: X\nName: Y\nTimeline: {t}"
+        self.assertEqual(b.urgency(with_timing("1-3 months")), "WITHIN_3_MONTHS")
+        self.assertEqual(b.urgency(with_timing("1 month")), "WITHIN_1_MONTH")
+
+    def test_an_unknown_timing_answer_is_None_not_a_guess(self):
+        def with_timing(t):
+            return f"Hello! I filled out your form.\nCapacity: 100 kVA\nCity: X\nName: Y\nTimeline: {t}"
+        self.assertIsNone(b.urgency(with_timing("next year")))
+        self.assertIsNone(b.urgency(with_timing("")))
+
+
+class AFormIsRecognisedByShapeNotByMetasSentence(unittest.TestCase):
+
+    def test_a_form_without_the_marker_phrase_is_still_a_form(self):
+        """The marker comes from Meta's own template and changes when the
+        template changes. Two known labels across several answered lines is
+        more than a customer types by accident."""
+        body = "\n".join(EN_FORM.splitlines()[2:])
+        self.assertNotIn("filled out your form", body)
+        self.assertTrue(b.is_lead_form(body))
+        self.assertEqual(b.capacity_kva(body), 100)
+
+    def test_ordinary_messages_are_not_mistaken_for_forms(self):
+        for text in ("100 kva beku", "rate: eshtu", "hello: hi",
+                     "ಟಿ ಸಿ ಬೇಕಾಗಿದೆ", "Charging Station", "100kv"):
+            self.assertFalse(b.is_lead_form(text), text)
+
+    def test_two_labelled_lines_are_not_enough(self):
+        """Deliberately narrow: three answered lines AND two known labels."""
+        self.assertFalse(b.is_lead_form("Capacity: 100 kVA\nCity: Hassan"))
+
+    def test_one_known_label_is_not_enough_either(self):
+        """A customer writing a tidy multi-line message is not a form
+        handoff. One recognised label is something a person types; two is
+        not. Lowering the threshold to one would relabel this as a Meta form
+        and mark it NEW_UNIT on the owner's alert."""
+        tidy = ("Name: Ravi\n"
+                "Address: Jayanagar\n"
+                "Message: I want to know about your services")
+        self.assertEqual(len([l for l in tidy.splitlines() if ":" in l]), 3)
+        self.assertFalse(b.is_lead_form(tidy))
+
+    def test_two_known_labels_across_three_lines_IS_a_form(self):
+        """The other side of the same threshold, so the test is not merely
+        asserting that nothing is ever a form."""
+        shaped = ("Capacity: 100 kVA\n"
+                  "City: Hassan\n"
+                  "Message: need a quote")
+        self.assertTrue(b.is_lead_form(shaped))
+
+
+class AnUnreadableFormSaysSo(unittest.TestCase):
+
+    BLIND = """Hello! I filled out your form and would like to know more about your business.
+
+Kitna chahiye: Option C
+Kaha par: Mangalore
+Aapka naam: Test Person
+Phone number: +910000000000"""
+
+    def test_a_form_that_parses_nothing_is_flagged(self):
+        p = b.parse(self.BLIND)
+        self.assertTrue(p["from_lead_form"])
+        self.assertTrue(p["form_unreadable"])
+
+    def test_the_owner_is_told_the_form_changed_not_just_shown_blanks(self):
+        a = b.compose_owner_alert("910000000000", b.parse(self.BLIND))
+        self.assertIn("FORM NOT READ", a)
+        self.assertIn("questions were changed", a)
+
+    def test_a_readable_form_is_never_flagged(self):
+        for f in (form(), EN_FORM, SHORT_EN_FORM):
+            self.assertFalse(b.parse(f)["form_unreadable"])
+
+    def test_a_non_form_message_is_never_flagged(self):
+        for text in ("100 kva beku", "Charging Station", ""):
+            self.assertFalse(b.parse(text)["form_unreadable"], text)
+
+    def test_a_partially_readable_form_is_not_flagged(self):
+        """Recovering the capacity from the raw text IS reading something.
+        Flagging that would cry wolf on a form that still works."""
+        partial = self.BLIND.replace("Option C", "100 kVA")
+        p = b.parse(partial)
+        self.assertEqual(p["capacity_kva"], 100)
+        self.assertFalse(p["form_unreadable"])
+
+    def test_the_customer_still_gets_a_correct_reply(self):
+        """An unreadable form must degrade the OWNER's view, never the
+        customer's experience — they still asked a real question."""
+        r = b.compose_reply(b.parse(self.BLIND))
+        self.assertIn("Bairavi Trans Solutions", r)
+        self.assertNotIn("Asthra", r)
+        self.assertNotIn("₹", r)
+        self.assertIn("units", r)
+
+    def test_the_verbatim_text_survives_an_unreadable_form(self):
+        p = b.parse(self.BLIND)
+        self.assertIn("Kitna chahiye", p["raw"])
