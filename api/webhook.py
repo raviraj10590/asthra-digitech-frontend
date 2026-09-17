@@ -5076,7 +5076,13 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         # for finally land instead of being discarded.
         if _in_flow and not bairavi.is_lead_form(user_text):
             followup = bairavi.parse_followup(user_text)
-            send_text(sender, bairavi.compose_followup_reply(followup))
+            # WHAT THE FORM ALREADY ANSWERED, recovered from the transcript.
+            # Without it the follow-up is stateless and would ask again for a
+            # delivery place the customer gave in their first message — the
+            # same discourtesy that lost the first fifteen leads.
+            known = bairavi.established_from_history(ctx["history"])
+            send_text(sender,
+                      bairavi.compose_followup_reply(followup, known))
             _saved = save_messages([(sender, "user", user_text),
                                     (sender, "assistant", bairavi.FLOW_MARKER)])
             warn_if_transcript_lost(sender, _saved, "Bairavi follow-up reply")
@@ -5093,7 +5099,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # Volume is not a concern at this scale: 16 leads over four days,
             # a few messages each. An unread requirement costs a sale; an
             # extra notification costs a glance.
-            alert = bairavi.compose_followup_alert(sender, followup, user_text)
+            alert = bairavi.compose_followup_alert(sender, followup,
+                                                   user_text, known)
             upsert_lead(sender, {"source": "bairavi-transformer",
                                  "notes": alert})
             notify_owner(alert)

@@ -265,6 +265,17 @@ _FIELD_PATTERNS = {
                "required by", "urgency"),
     "location": ("ಸ್ಥಳ", "ಪ್ರಾಜೆಕ್ಟ್", "location", "site", "city", "place",
                  "district", "where"),
+    # WHERE THE TRANSFORMER ACTUALLY GOES — owner's ruling, 2026-09-17:
+    # "our brain ask place actually to delivery tc this is important."
+    #
+    # Distinct from `location`, which answers "where is your project". For a
+    # distribution transformer the delivery site is what decides transport
+    # cost and whether a crane can reach it, and it is not always the project
+    # address. Listed before `location` in the delivery lookup so a form that
+    # asks BOTH does not return the project address for the delivery field.
+    "delivery": ("ಡೆಲಿವರಿ", "ತಲುಪಿಸ", "delivery location", "delivery place",
+                 "delivery address", "delivery point", "deliver to",
+                 "delivery site", "unloading", "delivery"),
 }
 
 # Timing options, mapped to a coarse urgency the owner can triage on. The
@@ -396,6 +407,7 @@ def parse(text: str) -> dict:
     kva = capacity_kva(text)
     is_form = is_lead_form(text)
     loc = _field(text, _FIELD_PATTERNS["location"]) or None
+    delivery = _field(text, _FIELD_PATTERNS["delivery"]) or None
     urg = urgency(text)
 
     # A FORM THAT PARSES NOTHING IS A CONFIGURATION CHANGE, NOT A SHY
@@ -423,6 +435,9 @@ def parse(text: str) -> dict:
         "planned": kva in PLANNED_KVA,
         "quantity": None,          # never present in the ad form — must be asked
         "location": loc,
+        # None when the form does not ask. The reply then asks, because the
+        # project address is not a safe stand-in for the delivery address.
+        "delivery_location": delivery,
         "name": _field(text, _FIELD_PATTERNS["name"]) or None,
         "urgency": urg,
         "application": None,       # §6.2 field 6 — asked, strongest early signal
@@ -546,7 +561,33 @@ _PURPOSE_OPTIONS = ("(agriculture / industry / construction / "
 # WhatsApp keycap numerals, as whole strings. Each is three codepoints
 # (digit + VS16 + combining enclosing keycap), which is why they are listed
 # rather than sliced out of one string.
-_NUMERALS = ("1️⃣", "2️⃣")
+# Three, because the delivery question made the opening ask three items.
+# zip() against a shorter tuple silently DROPS the extra question rather than
+# erroring, which is exactly how the units ask disappeared once.
+_NUMERALS = ("1️⃣", "2️⃣", "3️⃣")
+
+# A DELIVERY PLACE IS EXTRACTED ONLY FROM AN UNAMBIGUOUS SHAPE.
+#
+# Kannada puts the place BEFORE the verb — "Puttur ge deliver madi" means
+# "deliver to Puttur" — so capturing whatever follows the delivery word read
+# the place as "madi", the verb "do". A lorry sent to "madi" is precisely the
+# confidently-wrong field AC-07 forbids, so extraction now requires either a
+# colon (a form-style answer) or an explicit English preposition.
+_DELIVERY_STRICT_RE = re.compile(
+    r"(?:deliver(?:y)?|ಡೆಲಿವರಿ)\s*(?::|-)\s*(.{2,60})"
+    r"|deliver(?:y)?\s+(?:to|at)\s+(.{2,60})", re.IGNORECASE)
+
+# Anything that merely MENTIONS delivery. Enough to stop asking — the
+# customer answered — but never enough to name a place. The owner reads their
+# verbatim words, which the alert already carries.
+_DELIVERY_MENTION_RE = re.compile(
+    r"deliver|ಡೆಲಿವರಿ|ತಲುಪಿಸ|ಕಳಿಸ", re.IGNORECASE)
+
+# "Same place", said in reply to "is the delivery address the same?". Only
+# meaningful as a confirmation — it carries no place of its own, so the owner
+# reads it against the project location the form already captured.
+_SAME_PLACE = ("same place", "same address", "same location", "same",
+               "ಅದೇ ಸ್ಥಳ", "ಅದೇ", "ಹೌದು", "yes same", "same only")
 
 # A price request. Worth recognising so the reply answers the question that
 # was actually asked instead of repeating the intake prompt.
@@ -586,7 +627,27 @@ def parse_followup(text: str) -> dict:
         if needle in low:
             app = value
             break
+    # WHERE TO DELIVER. An explicit delivery word is required: a bare place
+    # name in a follow-up cannot be told apart from an application, a company
+    # or a person, and a guessed delivery address is a lorry sent to the wrong
+    # district.
+    dl = None
+    m = _DELIVERY_STRICT_RE.search(text or "")
+    if m:
+        candidate = (m.group(1) or m.group(2) or "").strip(" :-.,\n")
+        if candidate and not any(w == candidate.lower() for w in _SAME_PLACE) \
+                and re.search(r"[^\W\d_]", candidate):
+            dl = candidate
+    mentioned = bool(_DELIVERY_MENTION_RE.search(text or ""))
+
+    # "Same place" answers the question without naming anywhere: it points at
+    # the project location the form already captured, so it is recorded as a
+    # confirmation rather than as an address.
+    same = any(w in low for w in _SAME_PLACE) if not dl else False
+
     return {"quantity": qty, "application": app, "capacity_kva": cap,
+            "delivery_location": dl, "delivery_same": same,
+            "delivery_mentioned": mentioned,
             "asked_price": any(w in low for w in _PRICE_ASK)}
 
 
@@ -661,10 +722,53 @@ def compose_reply(parsed: dict) -> str:
 
     # Only what is genuinely missing. Quantity is never in the ad form, and
     # application is §6.2's strongest early qualification signal.
-    lines.append("\nಇನ್ನೆರಡು ವಿಷಯ ತಿಳಿಸಿದರೆ ಸಾಕು:\n"
-                 "1️⃣ ಎಷ್ಟು *units* ಬೇಕು?\n"
-                 "2️⃣ ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS)
+    # Ordered by what it costs us not to know. The delivery place decides
+    # transport and site access; purpose is the qualification signal; quantity
+    # defaults to one and is asked once, last, because the owner ruled it is
+    # not important.
+    asks = []
+    if parsed.get("delivery_location"):
+        # The form already told us. Confirm rather than ask again — being
+        # asked twice for something already given is what lost the first
+        # fifteen leads.
+        lines.append(f"🚚 ಡೆಲಿವರಿ ಸ್ಥಳ: {parsed['delivery_location']}")
+    elif parsed["location"]:
+        # A project address is not a delivery address, but it is the obvious
+        # candidate — so this confirms instead of asking cold, which is one
+        # word to answer instead of a sentence.
+        asks.append(f"🚚 TC *ಡೆಲಿವರಿ* ಇದೇ ಸ್ಥಳಕ್ಕೆ ಆ — *{parsed['location']}*? "
+                    "ಬೇರೆ ಆದರೆ ಆ ಸ್ಥಳ ತಿಳಿಸಿ.")
+    else:
+        asks.append("🚚 TC *ಡೆಲಿವರಿ* ಯಾವ ಸ್ಥಳಕ್ಕೆ ಬೇಕು?")
+
+    asks.append("ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS)
+    asks.append("ಎಷ್ಟು *units* ಬೇಕು?")
+
+    lines.append("\nಇಷ್ಟು ತಿಳಿಸಿದರೆ ಸಾಕು:")
+    assert len(asks) <= len(_NUMERALS), "an ask would be silently dropped"
+    for numeral, ask in zip(_NUMERALS, asks):
+        lines.append(f"{numeral} {ask}")
     return "\n".join(lines)
+
+
+def established_from_history(history) -> dict:
+    """What the ad form in this conversation already told us.
+
+    The follow-up composer is otherwise stateless and would re-ask for
+    something the customer gave in their first message — which is the exact
+    discourtesy that lost the first fifteen leads. The transcript keeps the
+    customer's own form text, so the answer is recoverable without new
+    storage.
+    """
+    for msg in reversed(list(history or [])):
+        if msg.get("role") != "user":
+            continue
+        text = msg.get("content") or ""
+        if is_lead_form(text):
+            p = parse(text)
+            return {"location": p["location"],
+                    "delivery_location": p["delivery_location"]}
+    return {"location": None, "delivery_location": None}
 
 
 def effective_quantity(followup: dict) -> tuple:
@@ -681,7 +785,7 @@ def effective_quantity(followup: dict) -> tuple:
     return DEFAULT_QUANTITY, True
 
 
-def compose_followup_reply(followup: dict) -> str:
+def compose_followup_reply(followup: dict, known: dict = None) -> str:
     """The reply to a message inside an existing transformer conversation.
 
     NOT the opening reply. Re-greeting someone mid-conversation and re-listing
@@ -717,6 +821,10 @@ def compose_followup_reply(followup: dict) -> str:
                    + ("s" if followup["quantity"] != 1 else ""))
     if followup["application"]:
         got.append(followup["application"].replace("_", " ").lower())
+    if followup.get("delivery_location"):
+        got.append(f"ಡೆಲಿವರಿ {followup['delivery_location']}")
+    elif followup.get("delivery_same"):
+        got.append("ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳ")
 
     if got:
         lines.append("✅ ಧನ್ಯವಾದ — ದಾಖಲಿಸಿದ್ದೇವೆ: *" + ", ".join(got) + "*.")
@@ -737,13 +845,27 @@ def compose_followup_reply(followup: dict) -> str:
     # answer does not change what happens next is how a customer learns to
     # stop replying — and purpose, which does change what happens next, is
     # the one worth pressing.
+    known = known or {}
+    delivery_settled = bool(
+        followup.get("delivery_location") or followup.get("delivery_same")
+        or followup.get("delivery_mentioned") or known.get("delivery_location"))
+
     missing = []
+    # The delivery place leads, because not knowing it is what stops a
+    # quotation: transport and site access are priced from it.
+    if not delivery_settled:
+        if known.get("location"):
+            missing.append(f"🚚 TC *ಡೆಲಿವರಿ* ಇದೇ ಸ್ಥಳಕ್ಕೆ ಆ — "
+                           f"*{known['location']}*?")
+        else:
+            missing.append("🚚 TC *ಡೆಲಿವರಿ* ಯಾವ ಸ್ಥಳಕ್ಕೆ ಬೇಕು?")
     if not followup["application"]:
         missing.append("ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS)
 
     if missing:
         lines.append("\nಇನ್ನೊಂದು ವಿಷಯ ತಿಳಿಸಿ:" if len(missing) == 1
-                     else "\nಇನ್ನೆರಡು ವಿಷಯ ತಿಳಿಸಿದರೆ ಸಾಕು:")
+                     else "\nಇಷ್ಟು ತಿಳಿಸಿದರೆ ಸಾಕು:")
+        assert len(missing) <= len(_NUMERALS), "a question would be dropped"
         # A tuple, not a sliced string: each keycap is three codepoints
         # (digit + VS16 + combining enclosing keycap), so slicing by 2 tore
         # them in half and produced "1️" and "⃣2" on the customer's phone.
@@ -769,7 +891,26 @@ def _quantity_line(followup: dict) -> str:
     return f"{qty} (assumed — not stated)" if assumed else str(qty)
 
 
-def compose_followup_alert(phone: str, followup: dict, text: str) -> str:
+def delivery_line(followup: dict, known: dict = None) -> str:
+    """Where the transformer goes, or why we do not know yet."""
+    known = known or {}
+    if followup.get("delivery_location"):
+        return followup["delivery_location"]
+    if followup.get("delivery_same"):
+        loc = known.get("location")
+        return (f"same as project location ({loc}) — confirmed" if loc
+                else "same as project location — confirmed")
+    if known.get("delivery_location"):
+        return f"{known['delivery_location']} (from the form)"
+    if followup.get("delivery_mentioned"):
+        # They named somewhere, in a word order this cannot safely parse.
+        # Their exact words are in the alert below — read those.
+        return "stated in their own words below — not parsed, please read it"
+    return "TBD — asked, not yet answered"
+
+
+def compose_followup_alert(phone: str, followup: dict, text: str,
+                           known: dict = None) -> str:
     """The owner's copy of a follow-up. Carries the customer's own words.
 
     The verbatim line matters: "ನಮ್ಮಲ್ಲಿ ಲಯನ್ ದೂರ ಇದೆ ಕಾರಣ ಟಿ ಸಿ ಬೇಕಾಗಿದೆ"
@@ -786,6 +927,7 @@ def compose_followup_alert(phone: str, followup: dict, text: str) -> str:
         # inside the verbatim text.
         f"Capacity restated: {val(followup.get('capacity_kva'))}"
         + (" kVA\n" if followup.get('capacity_kva') is not None else "\n")
+        + f"Delivery to: {delivery_line(followup, known)}\n"
         + f"Quantity: {_quantity_line(followup)}\n"
         f"Application: {val(followup['application'])}\n"
         f"Asked for price: {'YES' if followup['asked_price'] else 'no'}\n"
@@ -834,6 +976,7 @@ def compose_owner_alert(phone: str, parsed: dict) -> str:
         f"{flag}\n"
         f"SKU: {val(parsed['sku'])} ({parsed['sku_status']})\n"
         f"Location: {val(parsed['location'])}\n"
+        f"Delivery to: {val(parsed.get('delivery_location')) if parsed.get('delivery_location') else 'TBD — asked in the reply'}\n"
         f"Urgency: {val(parsed['urgency'])}\n"
         f"Quantity: {DEFAULT_QUANTITY} (assumed — the ad form does not ask, "
         f"and the customer has not said)\n"

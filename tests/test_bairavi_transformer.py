@@ -914,8 +914,10 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         first = b.compose_followup_reply(b.parse_followup("Charging Station ⛽"))
         self.assertIn("ev charging", first)      # confirms what was said
         self.assertNotIn("ಉದ್ದೇಶ", first)        # does not re-ask what it has
-        # Nothing is outstanding once the purpose is in: quantity defaults.
-        self.assertNotIn("ತಿಳಿಸಿ:", first)
+        # The delivery place is now outstanding and IS asked — quantity is
+        # not, because it defaults.
+        self.assertIn("ಡೆಲಿವರಿ", first)
+        self.assertNotIn("ಎಷ್ಟು *units* ಬೇಕು?", first)
 
         second = b.compose_followup_reply(b.parse_followup("100kv"))
         self.assertIn("100 kVA", second)
@@ -1251,3 +1253,143 @@ Phone number: +910000000000"""
     def test_the_verbatim_text_survives_an_unreadable_form(self):
         p = b.parse(self.BLIND)
         self.assertIn("Kitna chahiye", p["raw"])
+
+
+class WhereTheTransformerActuallyGoes(unittest.TestCase):
+    """Owner's ruling, 2026-09-17: "our brain ask place actually to delivery
+    tc this is important."
+
+    The form asks where the PROJECT is. For a distribution transformer the
+    delivery site is what decides transport cost and whether a crane can
+    reach it, and it is not always the project address.
+    """
+
+    KNOWN = {"location": "Mangalore", "delivery_location": None}
+
+    def test_the_opening_reply_asks_for_it(self):
+        r = b.compose_reply(b.parse(form()))
+        self.assertIn("ಡೆಲಿವರಿ", r)
+
+    def test_it_confirms_the_project_location_rather_than_asking_cold(self):
+        """One word to answer instead of a sentence — and it captures the
+        exception, which is the case worth knowing."""
+        r = b.compose_reply(b.parse(form(location="Mangalore")))
+        self.assertIn("Mangalore", r)
+        self.assertIn("ಇದೇ ಸ್ಥಳಕ್ಕೆ", r)
+
+    def test_it_asks_outright_when_the_form_gave_no_location(self):
+        bare = ("Hello! I filled out your form.\n"
+                "ಸಾಮರ್ಥ್ಯ: 100 kVA\nFull name: X\nPhone number: 910000000000")
+        r = b.compose_reply(b.parse(bare))
+        self.assertIn("ಯಾವ ಸ್ಥಳಕ್ಕೆ ಬೇಕು", r)
+
+    def test_a_form_that_asks_delivery_is_confirmed_not_re_asked(self):
+        p = b.parse(form() + "\nDelivery location: Puttur")
+        self.assertEqual(p["delivery_location"], "Puttur")
+        r = b.compose_reply(p)
+        self.assertIn("Puttur", r)
+        self.assertNotIn("ಇದೇ ಸ್ಥಳಕ್ಕೆ", r)
+
+    def test_no_ask_is_ever_silently_dropped(self):
+        """zip() against a shorter numeral tuple discards the extra question
+        without erroring, which is how the units ask disappeared once."""
+        for f in (form(), form(location=""), form() + "\nDelivery: Puttur"):
+            r = b.compose_reply(b.parse(f))
+            asked = r.count("\u20e3")          # keycap numerals rendered
+            listed = r.count("*ಉದ್ದೇಶ*") + r.count("*units*") + r.count("*ಡೆಲಿವರಿ*")
+            self.assertGreaterEqual(asked, 2, r)
+            self.assertGreaterEqual(listed, 2, r)
+
+    # ── reading the answer ────────────────────────────────────────────
+    def test_an_unambiguous_delivery_answer_is_captured(self):
+        for text, place in (("delivery: Bantwal", "Bantwal"),
+                            ("Delivery - Mangalore", "Mangalore"),
+                            ("deliver to Sullia", "Sullia"),
+                            ("delivery at Puttur", "Puttur")):
+            self.assertEqual(
+                b.parse_followup(text)["delivery_location"], place, text)
+
+    def test_kannada_word_order_is_NOT_guessed_at(self):
+        """THE TRAP. Kannada puts the place before the verb — "Puttur ge
+        deliver madi" means "deliver to Puttur" — so capturing whatever
+        follows the delivery word read the place as "madi", the verb "do".
+        A lorry sent to "madi" is the confidently-wrong field AC-07 forbids.
+        """
+        for text in ("Puttur ge deliver madi", "ಮಂಗಳೂರಿಗೆ ಕಳಿಸಿ",
+                     "Sullia ge tallupisi"):
+            f = b.parse_followup(text)
+            self.assertIsNone(f["delivery_location"], text)
+
+    def test_a_mention_still_stops_the_asking(self):
+        """They answered. Asking again because we could not parse it would
+        punish them for our limitation."""
+        f = b.parse_followup("Puttur ge deliver madi")
+        self.assertTrue(f["delivery_mentioned"])
+        r = b.compose_followup_reply(f, self.KNOWN)
+        self.assertNotIn("ಡೆಲಿವರಿ", r.split("ತಿಳಿಸಿ")[-1] if "ತಿಳಿಸಿ" in r else "")
+
+    def test_an_unparsed_mention_points_the_owner_at_the_words(self):
+        f = b.parse_followup("Puttur ge deliver madi")
+        line = b.delivery_line(f, self.KNOWN)
+        self.assertIn("own words", line)
+        a = b.compose_followup_alert("910000000000", f,
+                                     "Puttur ge deliver madi", self.KNOWN)
+        self.assertIn("Puttur ge deliver madi", a)
+
+    def test_same_place_is_a_confirmation_not_an_address(self):
+        for text in ("same place", "ಹೌದು", "ಅದೇ ಸ್ಥಳ", "same only"):
+            f = b.parse_followup(text)
+            self.assertTrue(f["delivery_same"], text)
+            self.assertIsNone(f["delivery_location"], text)
+            self.assertIn("Mangalore", b.delivery_line(f, self.KNOWN))
+            self.assertIn("confirmed", b.delivery_line(f, self.KNOWN))
+
+    def test_an_ordinary_answer_is_not_mistaken_for_a_delivery(self):
+        for text in ("Charging Station", "Agriculture", "3 units", "100kv"):
+            f = b.parse_followup(text)
+            self.assertIsNone(f["delivery_location"], text)
+            self.assertFalse(f["delivery_mentioned"], text)
+
+    def test_it_is_chased_until_answered(self):
+        f = b.parse_followup("Agriculture")
+        r = b.compose_followup_reply(f, self.KNOWN)
+        self.assertIn("ಡೆಲಿವರಿ", r)
+        self.assertIn("Mangalore", r)
+
+    def test_it_is_not_chased_once_the_form_supplied_it(self):
+        f = b.parse_followup("Agriculture")
+        r = b.compose_followup_reply(
+            f, {"location": "Mangalore", "delivery_location": "Puttur"})
+        self.assertNotIn("TC *ಡೆಲಿವರಿ*", r)
+
+    def test_the_owner_alert_always_says_where_it_goes(self):
+        a = b.compose_owner_alert("910000000000", b.parse(form()))
+        self.assertIn("Delivery to:", a)
+        f = b.compose_followup_alert("910000000000",
+                                     b.parse_followup("Agriculture"),
+                                     "Agriculture", self.KNOWN)
+        self.assertIn("Delivery to: TBD", f)
+
+    # ── recovering what the form said, from the transcript ────────────
+    def test_the_form_is_recovered_from_history(self):
+        history = [{"role": "user", "content": form(location="Mangalore")},
+                   {"role": "assistant", "content": b.FLOW_MARKER},
+                   {"role": "user", "content": "Agriculture"}]
+        known = b.established_from_history(history)
+        self.assertEqual(known["location"], "Mangalore")
+
+    def test_history_without_a_form_establishes_nothing(self):
+        known = b.established_from_history(
+            [{"role": "user", "content": "100 kva beku"}])
+        self.assertIsNone(known["location"])
+        self.assertIsNone(known["delivery_location"])
+
+    def test_empty_history_is_safe(self):
+        for h in (None, [], [{"role": "assistant", "content": b.FLOW_MARKER}]):
+            self.assertIsNone(b.established_from_history(h)["location"])
+
+    def test_the_most_recent_form_wins(self):
+        history = [{"role": "user", "content": form(location="Hassan")},
+                   {"role": "user", "content": form(location="Mangalore")}]
+        self.assertEqual(
+            b.established_from_history(history)["location"], "Mangalore")
