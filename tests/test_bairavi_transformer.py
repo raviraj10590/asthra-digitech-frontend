@@ -387,7 +387,9 @@ class OwnerAlert(unittest.TestCase):
                                   b.parse(form(capacity="", location="")))
         self.assertIn("Capacity: TBD", a)
         self.assertIn("Location: TBD", a)
-        self.assertIn("Quantity: TBD", a)
+        # Quantity is the one field that is NOT TBD: the owner ruled on
+        # 2026-09-17 that an unstated quantity is one unit. It still says so.
+        self.assertIn(f"Quantity: {b.DEFAULT_QUANTITY} (assumed", a)
 
     def test_a_planned_capacity_is_flagged_as_an_assessment_not_an_anomaly(self):
         a = b.compose_owner_alert("910000000000",
@@ -655,7 +657,7 @@ class ConversationContinuity(unittest.TestCase):
         followups = [a for a in r["owner"] if "follow-up" in a]
         self.assertEqual(len(followups), 1)
         self.assertIn("site ge road ide", followups[0])
-        self.assertIn("Quantity: TBD", followups[0])
+        self.assertIn("Quantity: 1 (assumed — not stated)", followups[0])
 
     def test_a_followup_does_not_repeat_the_opening_greeting(self):
         r = self.thread(form(), "1 unit\nAgricultural")
@@ -895,20 +897,29 @@ class PurposesCustomersActuallyName(unittest.TestCase):
 
 class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
 
-    def test_an_unreadable_message_still_re_asks_both_questions(self):
+    def test_an_unreadable_message_still_re_asks_the_purpose(self):
         r = b.compose_followup_reply(b.parse_followup("hmm ok"))
-        self.assertIn("units", r)
         self.assertIn("ಉದ್ದೇಶ", r)
+
+    def test_the_quantity_is_never_chased(self):
+        """Owner's ruling: ask once in the opening reply, then assume one.
+
+        Re-asking a question whose answer no longer changes what happens next
+        is how a customer learns to stop replying."""
+        for msg in ("hmm ok", "Charging Station", "100kv", "rate eshtu"):
+            r = b.compose_followup_reply(b.parse_followup(msg))
+            self.assertNotIn("ಎಷ್ಟು *units* ಬೇಕು?", r, msg)
 
     def test_the_exact_2026_09_17_replies_now_carry_content(self):
         first = b.compose_followup_reply(b.parse_followup("Charging Station ⛽"))
         self.assertIn("ev charging", first)      # confirms what was said
-        self.assertIn("units", first)            # asks what is still missing
         self.assertNotIn("ಉದ್ದೇಶ", first)        # does not re-ask what it has
+        # Nothing is outstanding once the purpose is in: quantity defaults.
+        self.assertNotIn("ತಿಳಿಸಿ:", first)
 
         second = b.compose_followup_reply(b.parse_followup("100kv"))
         self.assertIn("100 kVA", second)
-        self.assertIn("units", second)
+        self.assertIn("ಉದ್ದೇಶ", second)          # purpose is still outstanding
 
     def test_the_re_ask_gives_a_reason_to_answer(self):
         """A bare question is easy to ignore. The sentence that says why —
@@ -933,11 +944,16 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
                       b.compose_followup_reply(b.parse_followup("100 kv")))
 
     def test_the_keycap_numerals_are_not_torn_in_half(self):
-        """Each keycap is three codepoints; slicing them by two produced
-        "1️" and "⃣2" on the customer's phone."""
-        r = b.compose_followup_reply(b.parse_followup("hmm ok"))
-        self.assertIn("1️⃣", r)
-        self.assertIn("2️⃣", r)
+        """Each keycap is three codepoints (digit + VS16 + enclosing keycap);
+        slicing them by two produced "1️" and "⃣2" on the customer's phone.
+
+        Asserted on the constant rather than on a rendered reply, so it holds
+        however many questions the reply happens to ask."""
+        for numeral in b._NUMERALS:
+            self.assertEqual(len(numeral), 3, repr(numeral))
+            self.assertTrue(numeral.endswith("\u20e3"), repr(numeral))
+        self.assertIn(b._NUMERALS[0],
+                      b.compose_followup_reply(b.parse_followup("hmm ok")))
 
     def test_a_price_question_still_gets_no_number(self):
         r = b.compose_followup_reply(b.parse_followup("rate eshtu"))
@@ -977,3 +993,65 @@ class TheOwnerSeesWhatWasRestated(unittest.TestCase):
         a = b.compose_followup_alert("910000000000",
                                      b.parse_followup("100kv"), "100kv")
         self.assertIn("Their words: 100kv", a)
+
+
+class AnUnstatedQuantityIsOneUnit(unittest.TestCase):
+    """Owner's ruling, 2026-09-17: "quantity is not must important. just ask
+    them, if they don't tell anything assume it as single quantity only."
+
+    The ruling is a DEFAULT, not a parse result. The tests below pin the
+    distinction, because "they said one" and "they said nothing" call for
+    different things from a salesperson.
+    """
+
+    def test_the_default_is_one(self):
+        self.assertEqual(b.DEFAULT_QUANTITY, 1)
+
+    def test_a_stated_quantity_is_reported_as_stated(self):
+        for text, qty in (("3 units", 3), ("1 unit", 1), ("2 nos", 2)):
+            got, assumed = b.effective_quantity(b.parse_followup(text))
+            self.assertEqual(got, qty, text)
+            self.assertFalse(assumed, text)
+
+    def test_an_unstated_quantity_is_one_and_flagged_as_assumed(self):
+        for text in ("hmm ok", "Charging Station", "100kv", ""):
+            got, assumed = b.effective_quantity(b.parse_followup(text))
+            self.assertEqual(got, 1, text)
+            self.assertTrue(assumed, text)
+
+    def test_the_parse_still_reports_None_rather_than_the_default(self):
+        """The assumption must not be written into the evidence. A parse that
+        returned 1 would make a stated single unit and a silent customer
+        indistinguishable for ever afterwards."""
+        self.assertIsNone(b.parse_followup("Charging Station")["quantity"])
+        self.assertIsNone(b.parse("")["quantity"])
+
+    def test_a_stated_one_and_an_assumed_one_read_differently_to_the_owner(self):
+        stated = b.compose_followup_alert(
+            "910000000000", b.parse_followup("1 unit"), "1 unit")
+        silent = b.compose_followup_alert(
+            "910000000000", b.parse_followup("Charging Station"),
+            "Charging Station")
+        self.assertIn("Quantity: 1\n", stated)
+        self.assertNotIn("assumed", stated)
+        self.assertIn("Quantity: 1 (assumed — not stated)", silent)
+
+    def test_the_customer_is_never_told_we_assumed_anything(self):
+        """The default is an internal convenience. Telling the customer "we
+        have recorded 1 unit" when they never said so invites a correction
+        they should not have to make."""
+        for msg in ("Charging Station", "hmm ok", "100kv"):
+            r = b.compose_followup_reply(b.parse_followup(msg))
+            self.assertNotIn("assumed", r.lower(), msg)
+            self.assertNotIn("1 unit", r, msg)
+
+    def test_the_opening_reply_still_ASKS_once(self):
+        """"just ask them" — the question stays in the first reply. What
+        changed is that it is never chased afterwards."""
+        r = b.compose_reply(b.parse(form()))
+        self.assertIn("units", r)
+
+    def test_the_owner_alert_for_a_fresh_form_says_assumed_not_TBD(self):
+        a = b.compose_owner_alert("910000000000", b.parse(form()))
+        self.assertIn("Quantity: 1 (assumed", a)
+        self.assertNotIn("Quantity: TBD", a)

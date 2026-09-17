@@ -433,6 +433,23 @@ _APPLICATIONS = (
     ("commercial", "COMMERCIAL"), ("shop", "COMMERCIAL"),
 )
 
+# QUANTITY DEFAULT — owner's ruling, 2026-09-17.
+#
+# "quantity is not must important. just ask them, if they don't tell anything
+# assume it as single quantity only."
+#
+# So quantity is asked once in the opening reply and never chased. An
+# unanswered quantity is ONE unit, which is the common case for a distribution
+# transformer enquiry.
+#
+# WHAT THIS DOES NOT DO: it does not write 1 into the parsed fields. "The
+# customer said one" and "the customer said nothing, so we assume one" are
+# different facts, and the second is the one where a salesperson should
+# confirm before quoting five. The parse keeps reporting None; the assumption
+# is applied where a number is needed, and every place it surfaces says it was
+# assumed.
+DEFAULT_QUANTITY = 1
+
 # Offered to the customer verbatim. Kept next to _APPLICATIONS so the list we
 # SHOW can never drift from the list we can READ — the 2026-09-17 enquiry was
 # offered four options and answered with a fifth.
@@ -563,6 +580,20 @@ def compose_reply(parsed: dict) -> str:
     return "\n".join(lines)
 
 
+def effective_quantity(followup: dict) -> tuple:
+    """(quantity, was_assumed) under the owner's default.
+
+    Returns the stated quantity when there is one, otherwise DEFAULT_QUANTITY
+    with was_assumed True. Callers that show a number to a human must show the
+    flag too — an assumed 1 and a stated 1 look identical otherwise, and only
+    one of them is worth confirming.
+    """
+    qty = followup.get("quantity")
+    if qty is not None:
+        return qty, False
+    return DEFAULT_QUANTITY, True
+
+
 def compose_followup_reply(followup: dict) -> str:
     """The reply to a message inside an existing transformer conversation.
 
@@ -614,9 +645,12 @@ def compose_followup_reply(followup: dict) -> str:
 
     # Only what is still outstanding, and only the two things the opening
     # reply asked for. The capacity is not re-asked: it comes from the ad form.
+    # QUANTITY IS NOT CHASED. Per the owner's ruling it is asked once in the
+    # opening reply and then assumed to be one. Re-asking a question whose
+    # answer does not change what happens next is how a customer learns to
+    # stop replying — and purpose, which does change what happens next, is
+    # the one worth pressing.
     missing = []
-    if followup["quantity"] is None:
-        missing.append("ಎಷ್ಟು *units* ಬೇಕು?")
     if not followup["application"]:
         missing.append("ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS)
 
@@ -638,6 +672,16 @@ def compose_followup_reply(followup: dict) -> str:
     return "\n".join(lines)
 
 
+def _quantity_line(followup: dict) -> str:
+    """"3" when they said three; "1 (assumed — not stated)" when they did not.
+
+    The parenthetical is the whole point: it tells the salesperson whether
+    there is anything to confirm.
+    """
+    qty, assumed = effective_quantity(followup)
+    return f"{qty} (assumed — not stated)" if assumed else str(qty)
+
+
 def compose_followup_alert(phone: str, followup: dict, text: str) -> str:
     """The owner's copy of a follow-up. Carries the customer's own words.
 
@@ -655,7 +699,7 @@ def compose_followup_alert(phone: str, followup: dict, text: str) -> str:
         # inside the verbatim text.
         f"Capacity restated: {val(followup.get('capacity_kva'))}"
         + (" kVA\n" if followup.get('capacity_kva') is not None else "\n")
-        + f"Quantity: {val(followup['quantity'])}\n"
+        + f"Quantity: {_quantity_line(followup)}\n"
         f"Application: {val(followup['application'])}\n"
         f"Asked for price: {'YES' if followup['asked_price'] else 'no'}\n"
         f"\nTheir words: {(text or '').strip()[:300]}\n"
@@ -696,6 +740,7 @@ def compose_owner_alert(phone: str, parsed: dict) -> str:
         f"SKU: {val(parsed['sku'])} ({parsed['sku_status']})\n"
         f"Location: {val(parsed['location'])}\n"
         f"Urgency: {val(parsed['urgency'])}\n"
-        f"Quantity: TBD (not asked in the ad form)\n"
+        f"Quantity: {DEFAULT_QUANTITY} (assumed — the ad form does not ask, "
+        f"and the customer has not said)\n"
         f"\nNo price, delivery date or certificate was quoted to the customer."
     )
