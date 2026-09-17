@@ -480,10 +480,20 @@ class Segregation(unittest.TestCase):
         self.assertEqual(c["leads"], [])
 
     def test_the_transcript_records_the_reply_without_pii(self):
+        """The row carries the marker and what the reply is waiting for —
+        field NAMES, never the customer's answers. Asserted as a property
+        rather than an exact string, because the suffix is what lets the
+        hourly sweep ask again and it will grow as more fields are chased."""
         c = self.drive(form(name="Someone Real", location="Somewhere"))
         assistant = [t for who, role, t in c["saved"] if role == "assistant"]
-        self.assertEqual(assistant, ["[Bairavi transformer reply]"])
-        self.assertNotIn("Someone Real", " ".join(assistant))
+        self.assertEqual(len(assistant), 1)
+        row = assistant[0]
+        self.assertTrue(row.startswith(b.FLOW_MARKER), row)
+        for pii in ("Someone Real", "Somewhere", "910000000000", "25 kVA"):
+            self.assertNotIn(pii, row)
+        # Only field names may follow the marker.
+        self.assertEqual(set(b.marker_awaiting(row))
+                         - {b.AWAITING_DELIVERY, b.AWAITING_PURPOSE}, set())
 
 
 # ══════════════════════════════════════════════════════════════════════════

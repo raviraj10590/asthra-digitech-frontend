@@ -5083,8 +5083,12 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             known = bairavi.established_from_history(ctx["history"])
             send_text(sender,
                       bairavi.compose_followup_reply(followup, known))
-            _saved = save_messages([(sender, "user", user_text),
-                                    (sender, "assistant", bairavi.FLOW_MARKER)])
+            # The marker records WHAT this reply is still waiting for, so the
+            # hourly sweep can ask again without any new storage.
+            _saved = save_messages([
+                (sender, "user", user_text),
+                (sender, "assistant",
+                 bairavi.flow_marker(bairavi.outstanding(followup, known)))])
             warn_if_transcript_lost(sender, _saved, "Bairavi follow-up reply")
             # EVERY follow-up is forwarded, not only the ones that parse.
             #
@@ -5111,7 +5115,11 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         # Verbatim first (AC-07): the parsed view never replaces what they
         # actually wrote, and a parse failure must not lose the enquiry.
         _saved = save_messages([(sender, "user", user_text),
-                                (sender, "assistant", bairavi.FLOW_MARKER)])
+                                (sender, "assistant",
+                                 bairavi.flow_marker(bairavi.outstanding(
+                                     {}, {"location": parsed["location"],
+                                          "delivery_location":
+                                              parsed["delivery_location"]})))])
         warn_if_transcript_lost(sender, _saved, "Bairavi opening reply")
         # source marks these as Bairavi so they are separable later. `leads`
         # feeds no Brain metric — new_enquiries comes from first_seen_at

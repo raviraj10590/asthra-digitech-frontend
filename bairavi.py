@@ -785,6 +785,64 @@ def effective_quantity(followup: dict) -> tuple:
     return DEFAULT_QUANTITY, True
 
 
+# WHAT A REPLY IS WAITING FOR. Named, because three things now consume it:
+# the reply that asks, the transcript row that records it, and the nudge an
+# hour later that asks again. Three copies of the rule would drift.
+AWAITING_DELIVERY = "delivery"
+AWAITING_PURPOSE = "purpose"
+
+
+def outstanding(followup: dict, known: dict = None) -> tuple:
+    """Which of the asked-for fields are still unanswered.
+
+    Quantity is never here: the owner ruled an unstated quantity is one unit,
+    so it is asked once and never chased.
+    """
+    known = known or {}
+    out = []
+    if not (followup.get("delivery_location") or followup.get("delivery_same")
+            or followup.get("delivery_mentioned")
+            or known.get("delivery_location")):
+        out.append(AWAITING_DELIVERY)
+    if not followup.get("application"):
+        out.append(AWAITING_PURPOSE)
+    return tuple(out)
+
+
+def question_for(field: str, known: dict = None) -> str:
+    """The customer-facing question for one outstanding field."""
+    known = known or {}
+    if field == AWAITING_DELIVERY:
+        if known.get("location"):
+            return (f"🚚 TC *ಡೆಲಿವರಿ* ಇದೇ ಸ್ಥಳಕ್ಕೆ ಆ — *{known['location']}*?")
+        return "🚚 TC *ಡೆಲಿವರಿ* ಯಾವ ಸ್ಥಳಕ್ಕೆ ಬೇಕು?"
+    if field == AWAITING_PURPOSE:
+        return "ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS
+    raise ValueError(f"no question for {field!r}")
+
+
+def flow_marker(awaiting=()) -> str:
+    """The transcript row written for a Bairavi reply.
+
+    Carries what the reply is waiting for, so an hour later something can
+    decide whether to ask again — WITHOUT new storage. FLOW_MARKER stays a
+    prefix so in_transformer_flow() keeps matching it.
+    """
+    if not awaiting:
+        return FLOW_MARKER
+    return f"{FLOW_MARKER} awaiting={','.join(awaiting)}"
+
+
+def marker_awaiting(content: str) -> tuple:
+    """Read back what a transcript row says the reply was waiting for."""
+    text = content or ""
+    if FLOW_MARKER not in text or "awaiting=" not in text:
+        return ()
+    raw = text.split("awaiting=", 1)[1].split()[0]
+    valid = (AWAITING_DELIVERY, AWAITING_PURPOSE)
+    return tuple(f for f in raw.split(",") if f in valid)
+
+
 def compose_followup_reply(followup: dict, known: dict = None) -> str:
     """The reply to a message inside an existing transformer conversation.
 
@@ -846,21 +904,9 @@ def compose_followup_reply(followup: dict, known: dict = None) -> str:
     # stop replying — and purpose, which does change what happens next, is
     # the one worth pressing.
     known = known or {}
-    delivery_settled = bool(
-        followup.get("delivery_location") or followup.get("delivery_same")
-        or followup.get("delivery_mentioned") or known.get("delivery_location"))
-
-    missing = []
     # The delivery place leads, because not knowing it is what stops a
     # quotation: transport and site access are priced from it.
-    if not delivery_settled:
-        if known.get("location"):
-            missing.append(f"🚚 TC *ಡೆಲಿವರಿ* ಇದೇ ಸ್ಥಳಕ್ಕೆ ಆ — "
-                           f"*{known['location']}*?")
-        else:
-            missing.append("🚚 TC *ಡೆಲಿವರಿ* ಯಾವ ಸ್ಥಳಕ್ಕೆ ಬೇಕು?")
-    if not followup["application"]:
-        missing.append("ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS)
+    missing = [question_for(f, known) for f in outstanding(followup, known)]
 
     if missing:
         lines.append("\nಇನ್ನೊಂದು ವಿಷಯ ತಿಳಿಸಿ:" if len(missing) == 1
