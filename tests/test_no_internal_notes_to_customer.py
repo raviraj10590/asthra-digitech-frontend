@@ -22,6 +22,13 @@ THREE CALLERS DID THIS, not one:
 All three are removed. Nothing is lost: each was immediately preceded by a
 notify_owner() carrying the same material more completely.
 
+LATER WIDENING. The mirror now covers every customer-facing send, not just
+text — the welcome image, the service list, the follow-up buttons and the
+brochure. That widens the surface this file guards, so the prohibition moved
+to the shared write path (_mirror_outbound_to_crm) where every send path can
+see it, and the tests below enumerate which functions may reach it.
+notify_owner is deliberately not one of them.
+
 WHY NOT RE-LABEL INSTEAD. The CRM's schema is not readable from this process
 (its credentials are write-only here), so any other `direction` value would be
 a guess — and because the write is fire-and-forget, a value the CRM rejects
@@ -30,6 +37,7 @@ fails SILENTLY and would look exactly like a fix.
 Offline: no HTTP, no provider, no database.
 """
 
+import inspect
 import io
 import os
 import re
@@ -179,11 +187,47 @@ class OnlySendTextMayMirror(unittest.TestCase):
 
     def test_that_caller_is_send_text(self):
         import inspect
-        # The mirror now also carries the id Meta assigned to this very
-        # message; `to, message` still leads, so what reaches the CRM is
-        # still the customer's own reply and nothing else.
-        self.assertIn("log_reply_to_crm(to, message, _wamid)",
+        # The mirror also carries the id Meta assigned to this very message;
+        # `to, message` still leads, so what reaches the CRM is still the
+        # customer's own reply and nothing else.
+        self.assertIn("log_reply_to_crm(to, message, _wamid_of(_result))",
                       inspect.getsource(w.send_text))
+
+    def test_the_generic_mirror_has_exactly_TWO_callers(self):
+        """Non-text customer-facing sends now mirror too, so the leak surface
+        is wider than log_reply_to_crm alone. It is still closed: the only two
+        ways to reach the write are the text wrapper and _mirror_sent_message,
+        and both are reached only from functions that really did send."""
+        src = io.open(WEBHOOK_SRC, encoding="utf-8").read()
+        code = "\n".join(l for l in src.splitlines()
+                          if not l.strip().startswith("#"))
+        sites = [m for m in re.findall(r"_mirror_outbound_to_crm\(", code)]
+        self.assertEqual(len(sites), 3, sites)   # 1 def + 2 callers
+        for caller in (w.log_reply_to_crm, w._mirror_sent_message):
+            self.assertIn("_mirror_outbound_to_crm(",
+                          inspect.getsource(caller))
+
+    def test_only_the_approved_send_paths_reach_the_non_text_mirror(self):
+        """notify_owner and send_typing must NOT appear in this list — the
+        owner's material stays in notify_owner, and typing is not a message."""
+        import inspect
+        # send_welcome_menu sends TWO mirrorable messages of its own — the
+        # image and the service list — so its count is 2, not 1.
+        approved = {"send_welcome_menu": 2, "send_followup_buttons": 1,
+                    "send_brochure": 1}
+        for name, n in approved.items():
+            self.assertEqual(
+                inspect.getsource(getattr(w, name)).count(
+                    "_mirror_sent_message("), n, name)
+        for name in ("notify_owner", "send_typing"):
+            self.assertNotIn("_mirror_sent_message",
+                             inspect.getsource(getattr(w, name)), name)
+        src = io.open(WEBHOOK_SRC, encoding="utf-8").read()
+        code = "\n".join(l for l in src.splitlines()
+                          if not l.strip().startswith("#"))
+        # 1 def + those call sites, and nowhere else in the file.
+        self.assertEqual(code.count("_mirror_sent_message("),
+                         1 + sum(approved.values()))
 
     def test_the_mirror_still_records_a_genuine_reply(self):
         """The legitimate path must keep working."""
@@ -198,16 +242,22 @@ class OnlySendTextMayMirror(unittest.TestCase):
         self.assertEqual(sent, ["ನಮಸ್ಕಾರ 🙏"])
 
     def test_the_write_still_claims_outbound_sent(self):
-        """Unchanged — which is exactly why nothing unsent may pass through."""
+        """Unchanged — which is exactly why nothing unsent may pass through.
+        The row is now built once in _mirror_outbound_to_crm, so the claim is
+        asserted there rather than in the text wrapper."""
         import inspect
-        src = inspect.getsource(w.log_reply_to_crm)
+        src = inspect.getsource(w._mirror_outbound_to_crm)
         self.assertIn('"direction": "outbound"', src)
         self.assertIn('"status": "sent"', src)
 
     def test_the_contract_is_written_down(self):
+        """The prohibition moved to the shared write path so every send path
+        reads it, and log_reply_to_crm keeps the incident that produced it."""
         import inspect
-        doc = (w.log_reply_to_crm.__doc__ or "")
-        self.assertIn("ONE LEGITIMATE CALLER", doc)
+        self.assertIn("NOT FOR INTERNAL MATERIAL",
+                      w._mirror_outbound_to_crm.__doc__ or "")
+        self.assertIn("notify_owner", w._mirror_outbound_to_crm.__doc__ or "")
+        self.assertIn("internal notes", w.log_reply_to_crm.__doc__ or "")
 
 
 # ══════════════════════════════════════════════════════════════════════════

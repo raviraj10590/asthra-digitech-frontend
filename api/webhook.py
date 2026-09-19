@@ -1851,20 +1851,32 @@ def _crm_headers():
         "Content-Type": "application/json",
     }
 
-def log_reply_to_crm(phone: str, body: str, wa_message_id: str = None):
-    """Mirror an outbound bot reply into the Asthra CRM's whatsapp_messages.
+def _mirror_outbound_to_crm(phone: str, *, message_type: str, body: str,
+                            wa_message_id: str = None, media_url: str = None,
+                            original_type: str = None, file_name: str = None):
+    """THE single write path for mirroring a CUSTOMER-FACING outbound WhatsApp
+    message into the Asthra CRM's whatsapp_messages.
 
-    ONE LEGITIMATE CALLER: send_text. This writes direction="outbound",
-    status="sent" — a claim that the customer received this text. Anything
+    Every caller reaches this through log_reply_to_crm (text) or
+    _mirror_sent_message (everything else), so the properties below are
+    established once instead of per send path. It writes direction="outbound",
+    status="sent" — a claim that the customer received this message. Anything
     passed here that was NOT sent to the customer is a false record at best,
     and reaches the customer at worst.
 
-    Three callers once passed internal notes through it: a lead summary
-    literally labelled "not sent to customer", a quotation task carrying the
-    customer's budget, and a follow-up task. All three were removed; the owner
-    receives that material through notify_owner instead. If an internal note
-    ever needs to live in the CRM, it needs a representation the CRM treats as
-    internal — not this one.
+    NOT FOR INTERNAL MATERIAL. Owner and staff notifications do not belong in
+    a customer conversation thread; notify_owner is their channel and it is
+    deliberately not wired to this function. An internal note needs a
+    representation the CRM treats as internal — not this one.
+
+    message_type / original_type / media_url / file_name follow the CRM's OWN
+    ingestion vocabulary, not a new one: parseMessage in
+    supabase/functions/_shared/whatsapp/ingest.ts maps Meta's image and
+    document to message_type "media" (body = caption or filename) and Meta's
+    interactive to "interactive", and the inbound insert records Meta's own
+    type in metadata.original_type. WhatsAppInbox keys its media rendering off
+    exactly that pair, with metadata.file_name as the document label. Sending
+    anything else here would store rows the CRM cannot render.
 
     Fire-and-forget: any failure is printed and swallowed — CRM logging must
     never delay or break a customer reply. That same property is why a wrong
@@ -1873,15 +1885,28 @@ def log_reply_to_crm(phone: str, body: str, wa_message_id: str = None):
     if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
         return
     try:
+        # "source" is the established convention and several CRM queries key
+        # off it, so it stays first and unconditional. The other two are added
+        # only when they carry a value: metadata.original_type makes the CRM's
+        # conversation-list preview treat a row as an attachment, so putting it
+        # on a plain text row would mislabel every reply the bot sends.
+        metadata = {"source": "asthra_ai_bot"}
+        if original_type:
+            metadata["original_type"] = original_type
+        if file_name:
+            metadata["file_name"] = file_name
+
         row = {
             "user_id": CRM_OWNER_USER_ID,
             "phone": phone,
             "direction": "outbound",
-            "message_type": "text",
+            "message_type": message_type,
             "body": body,
             "status": "sent",
-            "metadata": {"source": "asthra_ai_bot"},
+            "metadata": metadata,
         }
+        if media_url:
+            row["media_url"] = media_url
         # THE MESSAGE'S OWN IDENTITY. Omitting it is why 1,149 delivery
         # receipts became orphan_status dead letters: Meta reported on a
         # wa_message_id the CRM had never stored. The value is already in the
@@ -1922,10 +1947,89 @@ def log_reply_to_crm(phone: str, body: str, wa_message_id: str = None):
             # rejected row, and for this table that row is the customer's own
             # message. The same rule is already applied at upsert_lead and
             # _record_lead_upsert; this call site had been missed.
+            #
+            # message_type is safe to name and is the one field that tells a
+            # broken send path apart from a broken table.
             print(f"CRM_MIRROR_FAILED status={r.status_code} "
-                  f"phone=...{str(phone)[-4:]}")
+                  f"type={message_type} phone=...{str(phone)[-4:]}")
     except Exception as e:
         print(f"log_reply_to_crm error: {e}")
+
+
+def log_reply_to_crm(phone: str, body: str, wa_message_id: str = None):
+    """Mirror an outbound bot TEXT reply into the CRM.
+
+    Kept as its own name because it is the only mirror with a history: three
+    callers once passed internal notes through it — a lead summary literally
+    labelled "not sent to customer", a quotation task carrying the customer's
+    budget, and a follow-up task. All three were removed, and the prohibition
+    now lives on _mirror_outbound_to_crm where every send path can see it.
+    """
+    _mirror_outbound_to_crm(phone, message_type="text", body=body,
+                            wa_message_id=wa_message_id)
+
+
+def _wamid_of(result):
+    """The id Meta assigned to a send, or None.
+
+    Read defensively and in one place: a rejected send has no messages array,
+    an error body is not to be trusted for an id, and _wa_post does not raise
+    on a non-2xx so `result` may well describe a failure. None means "this
+    message has no identity in the CRM", which is exactly what Meta's later
+    delivery receipt will orphan against.
+    """
+    try:
+        if result is not None and result.ok:
+            return (result.json().get("messages") or [{}])[0].get("id")
+    except Exception:
+        pass
+    return None
+
+
+def _mirror_sent_message(to: str, result, *, message_type: str, body: str,
+                         original_type: str = None, media_url: str = None,
+                         file_name: str = None):
+    """Mirror a NON-TEXT customer-facing send, and only a real one.
+
+    Two gates, both deliberate:
+
+    ROLE — owner and staff replies are internal, not customer conversation.
+    Role-based rather than the bootstrap list, so DB-added staff numbers are
+    excluded too. Identical to the gate send_text already applies.
+
+    A REAL WAMID — unlike send_text, these paths mirror nothing when Meta
+    rejected the send. Every one of them falls back to send_text on failure,
+    and send_text mirrors; recording the rejected send as well would put two
+    CRM rows in the thread for one message the customer actually saw. A send
+    that produced no wamid produced no message.
+
+    Returns the wamid it mirrored, or None. Additive: no caller depends on it.
+    """
+    if get_role(to)[0] != "CLIENT":
+        return None
+    wamid = _wamid_of(result)
+    if not wamid:
+        return None
+    _mirror_outbound_to_crm(to, message_type=message_type, body=body,
+                            wa_message_id=wamid, media_url=media_url,
+                            original_type=original_type, file_name=file_name)
+    return wamid
+
+
+def _interactive_transcript(prompt: str, options) -> str:
+    """What the customer actually saw on an interactive message.
+
+    An interactive send is a question PLUS the answers on offer, and the CRM
+    thread is unreadable without both: the owner would see the question, then
+    a customer tap arriving from nowhere. Inbound rows keep the CRM's own
+    convention (the option the customer picked); this is its outbound
+    counterpart. Titles only — the ids are routing, not conversation.
+    """
+    lines = []
+    if prompt and prompt.strip():
+        lines.append(prompt.strip())
+    lines += [f"• {t}" for t in options if t]
+    return "\n".join(lines)
 
 def sync_lead_to_crm(phone: str, data: dict):
     """Upsert a captured lead into the Asthra CRM's clients table so every
@@ -2031,15 +2135,12 @@ def send_text(to: str, message: str):
     # mirror for them (role-based, not just the bootstrap list, so DB-added
     # staff numbers are excluded too).
     if get_role(to)[0] == "CLIENT":
-        # The id Meta just assigned. Read defensively: a rejected send has no
-        # messages array, and the mirror must still record the attempt.
-        _wamid = None
-        try:
-            if _result is not None and _result.ok:
-                _wamid = (_result.json().get("messages") or [{}])[0].get("id")
-        except Exception:
-            _wamid = None
-        log_reply_to_crm(to, message, _wamid)
+        # The id Meta just assigned, or None. UNLIKE the non-text paths this
+        # mirrors either way: a text reply has no fallback send behind it, so
+        # an id-less row is the only record that the bot said something. The
+        # non-text paths do have a fallback (this very function), which is why
+        # _mirror_sent_message refuses a send with no wamid.
+        log_reply_to_crm(to, message, _wamid_of(_result))
     return _result
 
 def notify_owner(message: str):
@@ -2126,7 +2227,10 @@ def send_brochure(to: str, timeout: float = None, **_) -> bool:
             "ಈಗ ಕರೆ ಮಾಡಿ: +91 88844 48141"
         )
         return False
-    _wa_post({
+    # Built as a value so the mirror reads the caption and filename BACK off
+    # the payload that was actually sent, rather than repeating the literals
+    # and letting the two drift.
+    _doc = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "document",
@@ -2135,25 +2239,45 @@ def send_brochure(to: str, timeout: float = None, **_) -> bool:
             "caption": "ಆಸ್ತ್ರ ಡಿಜಿಟೆಕ್ — ಕಂಪನಿ ಪ್ರೊಫೈಲ್ 🙏",
             "filename": "Asthra_DigiTech_Company_Profile.pdf",
         },
-    })
+    }
+    _res = _wa_post(_doc)
+    _mirror_sent_message(
+        to, _res,
+        message_type="media",                      # the CRM's type for a document
+        body=_doc["document"]["caption"],          # ingest.ts: caption or filename
+        original_type="document",
+        media_url=BROCHURE_URL,
+        file_name=_doc["document"]["filename"],    # the inbox's document label
+    )
     return True
 
 def send_welcome_menu(to: str):
     """First-contact greeting: branded logo image + tappable services list."""
     if WELCOME_IMAGE:
+        _img = None
         try:
-            _wa_post({
+            _img = _wa_post({
                 "messaging_product": "whatsapp", "to": to, "type": "image",
                 "image": {"link": WELCOME_IMAGE},
             })
         except Exception as e:
             print(f"welcome image error: {e}")
+        # OUTSIDE the try on purpose: a mirror problem must never be reported
+        # as an image problem. _img stays None if the send itself raised, and
+        # _mirror_sent_message then writes nothing.
+        _mirror_sent_message(
+            to, _img,
+            message_type="media",       # the CRM's type for an image
+            body="",                    # ingest.ts stores '' for a caption-less image
+            original_type="image",
+            media_url=WELCOME_IMAGE,
+        )
     send_text(to,
         "ನಮಸ್ಕಾರ 🙏 ಆಸ್ತ್ರ ಡಿಜಿಟೆಕ್‌ಗೆ ಸ್ವಾಗತ!\n\n"
         "ನಾನು ಆಸ್ತ್ರ AI — ನಿಮ್ಮ ಡಿಜಿಟಲ್ ಮಾರ್ಕೆಟಿಂಗ್ ಸಹಾಯಕ.\n"
         "ಕನ್ನಡ, English, ಹಿಂದಿ — ಯಾವ ಭಾಷೆಯಲ್ಲಾದರೂ ಮಾತನಾಡಿ!"
     )
-    r = _wa_post({
+    _menu = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "interactive",
@@ -2179,8 +2303,24 @@ def send_welcome_menu(to: str):
                 ],
             },
         },
-    })
+    }
+    r = _wa_post(_menu)
+    # The titles are read back off the payload so the CRM thread lists exactly
+    # the services the customer was shown, and cannot drift from them.
+    _mirror_sent_message(
+        to, r,
+        message_type="interactive",
+        body=_interactive_transcript(
+            _menu["interactive"]["body"]["text"],
+            [row["title"]
+             for section in _menu["interactive"]["action"]["sections"]
+             for row in section["rows"]]),
+        original_type="interactive",
+    )
     if not r.ok:
+        # The fallback goes through send_text, which mirrors on its own — and
+        # the rejected list above mirrored nothing, so the thread gets one row
+        # for the one message the customer actually received.
         send_text(to,
             "ನಮ್ಮ ಸೇವೆಗಳು:\n"
             "1️⃣ Social Media ನಿರ್ವಹಣೆ\n"
@@ -2237,7 +2377,7 @@ SERVICE_MENU_REPLIES = {
 
 def send_followup_buttons(to: str):
     """Send interactive quick-reply buttons after brochure (max 3)."""
-    r = _wa_post({
+    _buttons = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "interactive",
@@ -2252,7 +2392,17 @@ def send_followup_buttons(to: str):
                 ]
             },
         },
-    })
+    }
+    r = _wa_post(_buttons)
+    _mirror_sent_message(
+        to, r,
+        message_type="interactive",
+        body=_interactive_transcript(
+            _buttons["interactive"]["body"]["text"],
+            [b["reply"]["title"]
+             for b in _buttons["interactive"]["action"]["buttons"]]),
+        original_type="interactive",
+    )
     if not r.ok:
         send_text(to,
             "ನಿಮಗೆ ಮುಂದೆ ಏನು ಬೇಕು?\n\n"
