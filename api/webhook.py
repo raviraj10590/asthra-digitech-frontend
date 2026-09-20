@@ -2016,21 +2016,6 @@ def _mirror_sent_message(to: str, result, *, message_type: str, body: str,
     return wamid
 
 
-def _interactive_transcript(prompt: str, options) -> str:
-    """What the customer actually saw on an interactive message.
-
-    An interactive send is a question PLUS the answers on offer, and the CRM
-    thread is unreadable without both: the owner would see the question, then
-    a customer tap arriving from nowhere. Inbound rows keep the CRM's own
-    convention (the option the customer picked); this is its outbound
-    counterpart. Titles only — the ids are routing, not conversation.
-    """
-    lines = []
-    if prompt and prompt.strip():
-        lines.append(prompt.strip())
-    lines += [f"• {t}" for t in options if t]
-    return "\n".join(lines)
-
 def sync_lead_to_crm(phone: str, data: dict):
     """Upsert a captured lead into the Asthra CRM's clients table so every
     lead the bot qualifies shows up in the CRM without manual re-entry.
@@ -2254,30 +2239,19 @@ def send_brochure(to: str, timeout: float = None, **_) -> bool:
 def send_welcome_menu(to: str):
     """First-contact greeting: branded logo image + tappable services list."""
     if WELCOME_IMAGE:
-        _img = None
         try:
-            _img = _wa_post({
+            _wa_post({
                 "messaging_product": "whatsapp", "to": to, "type": "image",
                 "image": {"link": WELCOME_IMAGE},
             })
         except Exception as e:
             print(f"welcome image error: {e}")
-        # OUTSIDE the try on purpose: a mirror problem must never be reported
-        # as an image problem. _img stays None if the send itself raised, and
-        # _mirror_sent_message then writes nothing.
-        _mirror_sent_message(
-            to, _img,
-            message_type="media",       # the CRM's type for an image
-            body="",                    # ingest.ts stores '' for a caption-less image
-            original_type="image",
-            media_url=WELCOME_IMAGE,
-        )
     send_text(to,
         "ನಮಸ್ಕಾರ 🙏 ಆಸ್ತ್ರ ಡಿಜಿಟೆಕ್‌ಗೆ ಸ್ವಾಗತ!\n\n"
         "ನಾನು ಆಸ್ತ್ರ AI — ನಿಮ್ಮ ಡಿಜಿಟಲ್ ಮಾರ್ಕೆಟಿಂಗ್ ಸಹಾಯಕ.\n"
         "ಕನ್ನಡ, English, ಹಿಂದಿ — ಯಾವ ಭಾಷೆಯಲ್ಲಾದರೂ ಮಾತನಾಡಿ!"
     )
-    _menu = {
+    r = _wa_post({
         "messaging_product": "whatsapp",
         "to": to,
         "type": "interactive",
@@ -2303,24 +2277,8 @@ def send_welcome_menu(to: str):
                 ],
             },
         },
-    }
-    r = _wa_post(_menu)
-    # The titles are read back off the payload so the CRM thread lists exactly
-    # the services the customer was shown, and cannot drift from them.
-    _mirror_sent_message(
-        to, r,
-        message_type="interactive",
-        body=_interactive_transcript(
-            _menu["interactive"]["body"]["text"],
-            [row["title"]
-             for section in _menu["interactive"]["action"]["sections"]
-             for row in section["rows"]]),
-        original_type="interactive",
-    )
+    })
     if not r.ok:
-        # The fallback goes through send_text, which mirrors on its own — and
-        # the rejected list above mirrored nothing, so the thread gets one row
-        # for the one message the customer actually received.
         send_text(to,
             "ನಮ್ಮ ಸೇವೆಗಳು:\n"
             "1️⃣ Social Media ನಿರ್ವಹಣೆ\n"
@@ -2377,7 +2335,7 @@ SERVICE_MENU_REPLIES = {
 
 def send_followup_buttons(to: str):
     """Send interactive quick-reply buttons after brochure (max 3)."""
-    _buttons = {
+    r = _wa_post({
         "messaging_product": "whatsapp",
         "to": to,
         "type": "interactive",
@@ -2392,17 +2350,7 @@ def send_followup_buttons(to: str):
                 ]
             },
         },
-    }
-    r = _wa_post(_buttons)
-    _mirror_sent_message(
-        to, r,
-        message_type="interactive",
-        body=_interactive_transcript(
-            _buttons["interactive"]["body"]["text"],
-            [b["reply"]["title"]
-             for b in _buttons["interactive"]["action"]["buttons"]]),
-        original_type="interactive",
-    )
+    })
     if not r.ok:
         send_text(to,
             "ನಿಮಗೆ ಮುಂದೆ ಏನು ಬೇಕು?\n\n"
