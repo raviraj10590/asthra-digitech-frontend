@@ -641,7 +641,20 @@ def validate_narration(text, out: dict) -> Optional[str]:
     for number in _NUMBER_RE.findall(scannable):
         if number in allowed:
             continue
-        if number.rstrip("0").rstrip(".") in allowed:
+        # DECIMAL EQUIVALENCE ONLY — `"." in number` is not optional.
+        #
+        # 0.70 and 0.7 are one number, and a narration may quote either. An
+        # INTEGER's trailing zeros are significant, so stripping them there
+        # removes real digits: 250000 -> 25, 3490000 -> 349, 100000 -> 1. A
+        # fabricated ₹2,50,000 was therefore admissible whenever the token
+        # "25" appeared anywhere in the packet — a risk tier, a percentage, a
+        # confidence of 0.25, or a timestamp whose minute happened to be 25.
+        # It surfaced as a FLAKY hallucination test, because a clock decided
+        # whether an invented figure passed.
+        #
+        # allowed_tokens() has always carried this guard on the same
+        # expression (see `add`); only this side lost it, in the same commit.
+        if "." in number and number.rstrip("0").rstrip(".") in allowed:
             continue
         return REJ_UNSUPPORTED_NUMBER
     return None

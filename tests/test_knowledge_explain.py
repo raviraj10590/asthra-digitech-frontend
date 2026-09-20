@@ -839,6 +839,126 @@ class OpaqueIdentifiersDoNotAuthoriseTheirDigits(Base):
         for part in ("2026", "08", "18"):
             self.assertIn(part, allowed)
 
+
+class TrailingZerosAreNotStrippedFromIntegers(Base):
+    """Regression: a fabricated monetary figure must not be admitted because
+    a SHORTER number happens to appear in the evidence.
+
+    THE HOLE. validate_narration accepted a number when
+    `number.rstrip("0").rstrip(".")` was an allowed token. The leniency is
+    there for decimal equivalence — a narration may say "0.70" where the
+    evidence records 0.7 — but applied to an integer it removes SIGNIFICANT
+    digits:
+
+        250000  -> 25          3490000 -> 349        100000 -> 1
+
+    So "Revenue reached 250000" was admissible whenever the token "25"
+    appeared anywhere in the packet: a risk tier, a percentage, a confidence
+    of 0.25, or a timestamp whose minute, day or second rendered 25. A
+    fabricated ₹2,50,000 entered an explanation on the strength of a clock.
+
+    THE ASYMMETRY THAT GAVE IT AWAY. allowed_tokens() has always guarded the
+    same expression with `if "." in number` (see the `add` helper). Only the
+    consumer lost the condition, in the same commit. Decimal-only stripping
+    was the intent throughout; the fix restores it.
+
+    Found as a FLAKY test — test_business_status_owner's hallucinated-number
+    case failed only on runs where a timestamp supplied "25". Same shape as
+    OpaqueIdentifiersDoNotAuthoriseTheirDigits above: the flakiness was the
+    symptom, the hole was real.
+    """
+
+    def _packet(self, value):
+        """A packet whose only evidence value is `value`."""
+        return {"evidence": [{"value": value}], "conflicts": [],
+                "coverage": {}, "confidence": {}}
+
+    # ── the defect itself ───────────────────────────────────────────────
+    def test_a_fabricated_lakh_figure_is_refused(self):
+        out = self._packet(25)
+        self.assertEqual(
+            x.validate_narration("Revenue reached 250000 this month.", out),
+            x.REJ_UNSUPPORTED_NUMBER)
+
+    def test_every_zero_padded_fabrication_is_refused(self):
+        """One case per shape of the bug, so a partial fix cannot pass."""
+        for value, fabricated in ((25, "250000"), (25, "2500"),
+                                  (1, "100000"), (349, "3490000"),
+                                  (68, "68000"), (5, "500")):
+            out = self._packet(value)
+            with self.subTest(evidence=value, narration=fabricated):
+                self.assertEqual(
+                    x.validate_narration(f"The figure is {fabricated}.", out),
+                    x.REJ_UNSUPPORTED_NUMBER)
+
+    def test_the_shorter_token_is_genuinely_present_in_the_evidence(self):
+        """Guards the tests above: they prove nothing unless the prefix REALLY
+        is an allowed token, which is what made the hole exploitable."""
+        self.assertIn("25", x.allowed_tokens(self._packet(25)))
+
+    def test_a_timestamp_minute_cannot_authorise_a_lakh(self):
+        """The exact production shape: the token came from a clock, not from
+        a business fact."""
+        out = {"evidence": [{"observed_at": "2026-09-20T14:25:00+00:00"}],
+               "conflicts": [], "coverage": {}, "confidence": {}}
+        self.assertIn("25", x.allowed_tokens(out))
+        self.assertEqual(
+            x.validate_narration("Revenue reached 250000.", out),
+            x.REJ_UNSUPPORTED_NUMBER)
+
+    # ── what must keep working ──────────────────────────────────────────
+    def test_decimal_equivalence_is_preserved(self):
+        """The reason the leniency exists. 0.70 and 0.7 are one number."""
+        out = self._packet(0.7)
+        self.assertIsNone(x.validate_narration("confidence 0.70", out))
+
+    def test_decimal_equivalence_both_ways(self):
+        out = self._packet(0.70)
+        self.assertIsNone(x.validate_narration("confidence 0.7", out))
+
+    def test_a_trailing_zero_decimal_of_an_integer_is_still_allowed(self):
+        """25.00 is 25."""
+        out = self._packet(25)
+        self.assertIsNone(x.validate_narration("the value is 25.00", out))
+
+    def test_an_exact_integer_is_still_allowed(self):
+        out = self._packet(250000)
+        self.assertIsNone(x.validate_narration("Revenue reached 250000.", out))
+
+    def test_the_evidence_value_itself_is_still_quotable(self):
+        out = self._packet(25)
+        self.assertIsNone(x.validate_narration("There are 25 enquiries.", out))
+
+    def test_an_unrelated_fabrication_is_still_refused(self):
+        """It always was — this proves the new tests are not passing merely
+        because everything is refused."""
+        out = self._packet(25)
+        self.assertEqual(x.validate_narration("The figure is 251000.", out),
+                         x.REJ_UNSUPPORTED_NUMBER)
+
+    def test_the_real_fixture_still_narrates(self):
+        """End to end on the suite's own full envelope, so the fix cannot
+        have made legitimate narration impossible."""
+        out = self.explain()
+        allowed = sorted(x.allowed_tokens(out))
+        self.assertTrue(allowed)
+        self.assertIsNone(x.validate_narration(
+            "Recorded on 2026-08-18.", out))
+
+    # ── the producer and consumer must agree ────────────────────────────
+    def test_the_two_sides_of_the_rule_are_now_symmetric(self):
+        """allowed_tokens and validate_narration implement one rule. The bug
+        was that only one of them guarded it, so this asserts the guard
+        appears on both sides."""
+        import inspect
+        src = inspect.getsource(x)
+        stripped = [line.strip() for line in src.splitlines()
+                    if 'rstrip("0")' in line]
+        self.assertEqual(len(stripped), 2, stripped)
+        for line in stripped:
+            self.assertIn('"." in number', line,
+                          f"unguarded zero-stripping: {line}")
+
     def test_knowledge_ids_are_opaque_too(self):
         env = copy.deepcopy(FULL)
         env["subject"] = "9f9f9f9f-9999-4999-8999-9f9f9f9f9f9f"
