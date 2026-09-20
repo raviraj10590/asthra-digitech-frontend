@@ -751,35 +751,96 @@ def compose_reply(parsed: dict) -> str:
     return "\n".join(lines)
 
 
+# THE FIELDS THAT PERSIST ONCE THE CUSTOMER HAS ANSWERED THEM.
+#
+# asked_price is deliberately absent. It is a per-turn INTENT, not an
+# established fact: a price asked four turns ago must not make every later
+# reply a price reply. Everything here, by contrast, stays true until the
+# customer says otherwise.
+_PERSISTENT_FIELDS = ("capacity_kva", "quantity", "application", "location",
+                      "delivery_location", "delivery_same",
+                      "delivery_mentioned")
+
+
+def merged_state(known: dict, turn: dict = None) -> dict:
+    """Established state, plus whatever this turn adds. Never less.
+
+    THE INVARIANT THIS EXISTS TO ENFORCE: a field that has been established
+    cannot become unestablished. It may only be REPLACED, and only by an
+    explicit new value from the customer.
+
+    A real conversation on 2026-09-20 is what this is for. The customer said
+    "ಕೃಷಿ" (agriculture) and the flow correctly narrowed to awaiting=delivery.
+    One message later — "ಗುಜರಾತ್", a place, nothing to do with purpose — it
+    widened back to awaiting=delivery,purpose. The purpose had been read,
+    acknowledged, and then silently forgotten, so the bot asked for it again.
+    The customer answered twice more and then wrote "You mad".
+
+    The cause was not the extractor: it read ಕೃಷಿ correctly. It was that
+    `outstanding()` read `application` from the CURRENT message only, and no
+    field had anywhere to live between turns. So this merge is the fix, and it
+    is deliberately field-agnostic — there is no `if field == "purpose"`
+    anywhere, because the next field to be forgotten would not be purpose.
+
+    None / False / "" mean "this turn says nothing about it", which is not the
+    same as "it is no longer true".
+    """
+    state = dict(known or {})
+    for field in _PERSISTENT_FIELDS:
+        value = (turn or {}).get(field)
+        if value is None or value is False or value == "":
+            continue           # nothing new — and NEVER erase what is known
+        state[field] = value   # an explicit value supersedes the old one
+    return state
+
+
 def established_from_history(history) -> dict:
-    """What the ad form in this conversation already told us.
+    """Everything this conversation has already told us, accumulated.
 
     The follow-up composer is otherwise stateless and would re-ask for
     something the customer gave in their first message — which is the exact
     discourtesy that lost the first fifteen leads. The transcript keeps the
-    customer's own form text, so the answer is recoverable without new
-    storage.
+    customer's own text, so the answers are recoverable without new storage.
+
+    WAS: this scanned backwards for the most recent LEAD FORM and returned
+    location and delivery_location from it alone. Every conversational turn in
+    between was ignored, and the four fields the follow-up actually asks for —
+    capacity, quantity, purpose, delivery — had no home at all. An answer
+    given in a chat message survived exactly one turn.
+
+    NOW: oldest turn first, merging each one forward, forms and chat messages
+    alike. Later explicit values win because they arrive later; silence never
+    wins. The transcript is still the only store (see FLOW_MARKER) — this adds
+    no state, it reads what was already there.
     """
-    for msg in reversed(list(history or [])):
+    state = {f: None for f in _PERSISTENT_FIELDS}
+    for msg in list(history or []):        # OLDEST FIRST — merge forward
         if msg.get("role") != "user":
             continue
         text = msg.get("content") or ""
-        if is_lead_form(text):
-            p = parse(text)
-            return {"location": p["location"],
-                    "delivery_location": p["delivery_location"]}
-    return {"location": None, "delivery_location": None}
+        # A form answers different questions from a chat reply, so each is
+        # read by its own extractor. Neither is trusted to invent a field.
+        turn = parse(text) if is_lead_form(text) else parse_followup(text)
+        state = merged_state(state, turn)
+    return state
 
 
-def effective_quantity(followup: dict) -> tuple:
+def effective_quantity(followup: dict, known: dict = None) -> tuple:
     """(quantity, was_assumed) under the owner's default.
 
     Returns the stated quantity when there is one, otherwise DEFAULT_QUANTITY
     with was_assumed True. Callers that show a number to a human must show the
     flag too — an assumed 1 and a stated 1 look identical otherwise, and only
     one of them is worth confirming.
+
+    `known` is optional and additive: without it this reads the current turn
+    exactly as before. With it, a quantity stated EARLIER in the conversation
+    is still reported as stated. Printing "1 (assumed — not stated)" for a
+    customer who did say "೧ beku" tells the salesperson to go and confirm
+    something already answered, which is the same forgetting this fix is
+    about — just on the owner's side of it.
     """
-    qty = followup.get("quantity")
+    qty = merged_state(known, followup).get("quantity")
     if qty is not None:
         return qty, False
     return DEFAULT_QUANTITY, True
@@ -797,14 +858,21 @@ def outstanding(followup: dict, known: dict = None) -> tuple:
 
     Quantity is never here: the owner ruled an unstated quantity is one unit,
     so it is asked once and never chased.
+
+    Computed from the MERGED state, not from this turn plus a couple of
+    hand-picked history keys. The delivery test already consulted `known`;
+    the purpose test did not, and read `application` from the current message
+    alone — so a purpose established one turn earlier came back as
+    outstanding and was asked for again. Merging first means neither field
+    can regress, and a field added later is protected without editing this
+    function.
     """
-    known = known or {}
+    state = merged_state(known, followup)
     out = []
-    if not (followup.get("delivery_location") or followup.get("delivery_same")
-            or followup.get("delivery_mentioned")
-            or known.get("delivery_location")):
+    if not (state.get("delivery_location") or state.get("delivery_same")
+            or state.get("delivery_mentioned")):
         out.append(AWAITING_DELIVERY)
-    if not followup.get("application"):
+    if not state.get("application"):
         out.append(AWAITING_PURPOSE)
     return tuple(out)
 
@@ -927,13 +995,13 @@ def compose_followup_reply(followup: dict, known: dict = None) -> str:
     return "\n".join(lines)
 
 
-def _quantity_line(followup: dict) -> str:
+def _quantity_line(followup: dict, known: dict = None) -> str:
     """"3" when they said three; "1 (assumed — not stated)" when they did not.
 
     The parenthetical is the whole point: it tells the salesperson whether
     there is anything to confirm.
     """
-    qty, assumed = effective_quantity(followup)
+    qty, assumed = effective_quantity(followup, known)
     return f"{qty} (assumed — not stated)" if assumed else str(qty)
 
 
@@ -974,8 +1042,12 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
         f"Capacity restated: {val(followup.get('capacity_kva'))}"
         + (" kVA\n" if followup.get('capacity_kva') is not None else "\n")
         + f"Delivery to: {delivery_line(followup, known)}\n"
-        + f"Quantity: {_quantity_line(followup)}\n"
-        f"Application: {val(followup['application'])}\n"
+        + f"Quantity: {_quantity_line(followup, known)}\n"
+        # From the MERGED state, symmetric with delivery_line above, which
+        # has always consulted `known`. An application established earlier
+        # printed as TBD here, so the owner could not see a purpose the bot
+        # had already been told.
+        + f"Application: {val(merged_state(known, followup).get('application'))}\n"
         f"Asked for price: {'YES' if followup['asked_price'] else 'no'}\n"
         f"\nTheir words: {(text or '').strip()[:300]}\n"
         "\nNo price, delivery date or certificate was quoted to the customer."
