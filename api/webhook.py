@@ -94,8 +94,19 @@ BROCHURE_URL    = os.environ.get("BROCHURE_URL",    "")
 # bot_roles table is empty or unreachable, so admin access is never a single
 # point of failure. Additional OWNER/STAFF numbers are added via the
 # bot_roles table (see get_role below) — no redeploy needed for those.
+#
+# 918884448141 WAS a bootstrap OWNER and was deliberately removed on
+# 2026-09-20. It is the number published in the bot's own replies as the
+# company line, and being a bootstrap OWNER meant it could never act as a
+# CLIENT: its conversations were never mirrored into the CRM and it received
+# owner alerts instead of customer handling. Removing it makes that number a
+# CLIENT like any other. The bootstrap list is deliberately not empty — a
+# single remaining owner keeps notify_owner and the daily digest deliverable.
+#
+# THIS LIST IS NOT THE WHOLE ANSWER: get_role also consults bot_roles, so an
+# active OWNER/STAFF row there still grants the role without a redeploy.
 OWNER_PHONES = [p.strip() for p in
-    os.environ.get("OWNER_PHONE", "918884448141,918861369951").split(",") if p.strip()]
+    os.environ.get("OWNER_PHONE", "918861369951").split(",") if p.strip()]
 OWNER_PHONE  = OWNER_PHONES[0]  # kept for any code that still expects a single primary number
 ROLES_TABLE  = "bot_roles"      # phone, role (OWNER/STAFF/CLIENT), label, active, added_by
 # Hierarchical memory (customer profile / rolling summary / business history).

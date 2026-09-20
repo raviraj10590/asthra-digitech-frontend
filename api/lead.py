@@ -31,7 +31,7 @@ LEAD_INTAKE_TOKEN        = os.environ.get("LEAD_INTAKE_TOKEN",        "")
 WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN",  "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 OWNER_PHONES    = [p.strip() for p in
-    os.environ.get("OWNER_PHONE", "918884448141,918861369951").split(",") if p.strip()]
+    os.environ.get("OWNER_PHONE", "918861369951").split(",") if p.strip()]
 
 
 def _crm_headers():

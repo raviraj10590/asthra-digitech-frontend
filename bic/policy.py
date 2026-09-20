@@ -32,7 +32,7 @@ ROLES_TABLE = "bot_roles"
 # so administrative access is never a single point of failure.
 BOOTSTRAP_OWNERS = [
     p.strip()
-    for p in os.environ.get("OWNER_PHONE", "918884448141,918861369951").split(",")
+    for p in os.environ.get("OWNER_PHONE", "918861369951").split(",")
     if p.strip()
 ]
 

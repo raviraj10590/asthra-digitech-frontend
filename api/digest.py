@@ -36,7 +36,7 @@ SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://kpzprllzgqlqkqgcgrb
 SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in Vercel env vars
 # OWNER_PHONE may be a comma-separated list (same env var the webhook uses).
 OWNER_PHONES    = [p.strip() for p in
-    os.environ.get("OWNER_PHONE", "918884448141").split(",") if p.strip()]
+    os.environ.get("OWNER_PHONE", "918861369951").split(",") if p.strip()]
 
 
 def _supa_get(table: str, params: dict) -> list:
