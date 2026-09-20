@@ -9,26 +9,34 @@ service-list/menu flow.
 
 So the mirror covers the conversation, not the menu furniture:
 
-  MIRROR      send_text      — every bot reply, which is the conversation
-              send_brochure  — the document the customer asked for and received
+  MIRROR      send_text             — every bot reply, which is the
+                                      conversation itself
+              send_brochure         — the document the customer asked for
+                                      and received
+              send_followup_buttons — live customer-facing communication,
+                                      fired after a successful brochure. The
+                                      customer's next message is a TAP on one
+                                      of its titles, so the thread needs the
+                                      options to be readable at all.
   DO NOT      send_welcome_menu — neither its image nor its interactive
-              service list. That menu is not the experience being built, and
-              mirroring it would invest in UX the product is moving away from.
-  DO NOT      send_followup_buttons — the same reasoning. It is a live path
-              today (fired after a successful brochure), so the thread will
-              show the brochure and then a customer tap with no recorded
-              prompt. That is accepted deliberately rather than by oversight:
-              no interactive mirroring is built until an interactive UX is
-              actually settled.
+              service list. A fixed service-list menu is not the AI-first
+              experience being built, so nothing is invested in recording it.
   DO NOT      send_typing — a read receipt plus an indicator on the INBOUND
               message id. Not a message, and it has no wa_message_id at all.
   DO NOT      notify_owner — owner and staff notifications are internal and
               must never appear in a customer conversation thread.
 
-WHAT THE BROCHURE PATH CLOSED. Before this, send_text was the only path wired
-to the mirror. The brochure document was sent and never recorded, so Meta's
-delivery receipt for it orphaned into the dead-letter queue against a
-wa_message_id the CRM had never stored.
+THE ASYMMETRY IS THE POINT. Both the welcome list and the follow-up buttons
+are Meta `interactive` messages, and only one is mirrored. That is a product
+decision about which conversations matter, not a technical distinction — so
+there is NO generic interactive-mirroring helper. The follow-up buttons
+compose their own body inline, and any future interactive path gets its own
+decision based on its own UX.
+
+WHAT THESE PATHS CLOSED. Before this, send_text was the only path wired to the
+mirror. The brochure document and the follow-up buttons were sent and never
+recorded, so Meta's delivery receipts for them orphaned into the dead-letter
+queue against wa_message_ids the CRM had never stored.
 
 The tests below are two-sided on purpose: the paths that must mirror are
 asserted to mirror, and the paths that must not are asserted to write nothing
@@ -145,6 +153,8 @@ def channel(**kw):
 # ══════════════════════════════════════════════════════════════════════════
 
 class TheConversationIsRecorded(unittest.TestCase):
+    """The three paths that reach the CRM thread."""
+
 
     def test_a_text_reply_is_mirrored(self):
         """The bot's replies ARE the conversation — this is the path the
@@ -169,12 +179,51 @@ class TheConversationIsRecorded(unittest.TestCase):
         self.assertEqual(ch.rows[0]["message_type"], "text")
         self.assertNotIn("media_url", ch.rows[0])
 
-    def test_exactly_two_send_paths_mirror(self):
+    def test_the_followup_buttons_are_mirrored(self):
+        """Live customer-facing communication after a brochure the customer
+        asked for — so the CRM records what they were offered."""
+        with channel() as ch:
+            w.send_followup_buttons(PHONE)
+        self.assertEqual(len(ch.of_type("interactive")), 1)
+
+    def test_the_followup_row_records_the_prompt_and_every_option(self):
+        """The customer's next message is a TAP on one of these titles.
+        Without them the thread shows a reply arriving from nowhere."""
+        with channel() as ch:
+            w.send_followup_buttons(PHONE)
+        act = ch.sends[0]["interactive"]
+        body = ch.rows[0]["body"]
+        self.assertIn(act["body"]["text"], body)
+        titles = [b["reply"]["title"] for b in act["action"]["buttons"]]
+        self.assertEqual(len(titles), 3)
+        for t in titles:
+            self.assertIn(t, body)
+
+    def test_the_followup_row_carries_no_routing_ids(self):
+        """quotation / call / meeting are plumbing, not conversation."""
+        with channel() as ch:
+            w.send_followup_buttons(PHONE)
+        for ident in ("quotation", "call", "meeting"):
+            self.assertNotIn(ident, ch.rows[0]["body"])
+
+    def test_the_followup_row_claims_no_attachment(self):
+        with channel() as ch:
+            w.send_followup_buttons(PHONE)
+        self.assertNotIn("media_url", ch.rows[0])
+
+    def test_a_rejected_followup_send_mirrors_NOTHING(self):
+        """Its fallback goes through send_text, which mirrors. Recording the
+        rejected send as well would put two rows in the thread for the one
+        message the customer actually received."""
+        with channel(wa_code=400) as ch:
+            w.send_followup_buttons(PHONE)
+        self.assertEqual([r["message_type"] for r in ch.rows], ["text"])
+
+    def test_exactly_three_send_paths_mirror(self):
         """The inventory, asserted. A new path added later must make a
         deliberate choice rather than inherit one."""
-        mirrors = {"send_text", "send_brochure"}
-        silent = {"send_welcome_menu", "send_followup_buttons",
-                  "send_typing", "notify_owner"}
+        mirrors = {"send_text", "send_brochure", "send_followup_buttons"}
+        silent = {"send_welcome_menu", "send_typing", "notify_owner"}
         for name in mirrors:
             src = code_of(getattr(w, name))
             self.assertTrue(
@@ -191,11 +240,14 @@ class TheConversationIsRecorded(unittest.TestCase):
 # 2 · THE MENU IS NOT MIRRORED
 # ══════════════════════════════════════════════════════════════════════════
 
-class TheMenuFurnitureStaysOutOfTheThread(unittest.TestCase):
+class TheWelcomeMenuStaysOutOfTheThread(unittest.TestCase):
     """Asserted positively, not merely absent: the welcome image and the
     interactive service list must write NOTHING. The product is an expert AI
     chat, not a fixed menu flow, so this is the intended scope — and a future
-    re-add has to fail a test first."""
+    re-add has to fail a test first.
+
+    Note the contrast with send_followup_buttons, which IS mirrored: the same
+    Meta payload shape, a different product judgement."""
 
     def test_the_welcome_image_writes_no_crm_row(self):
         with channel() as ch:
@@ -219,22 +271,22 @@ class TheMenuFurnitureStaysOutOfTheThread(unittest.TestCase):
         self.assertEqual(len(ch.sends), 3)
         self.assertEqual([r["message_type"] for r in ch.rows], ["text"])
 
-    def test_the_followup_buttons_write_no_crm_row(self):
-        with channel() as ch:
-            w.send_followup_buttons(PHONE)
-        self.assertEqual(ch.rows, [])
-
-    def test_no_interactive_row_is_ever_written_by_any_path(self):
+    def test_the_ONLY_mirrored_interactive_message_is_the_followup(self):
+        """Both are Meta `interactive` messages and only one is recorded. The
+        distinction is which conversation matters, not which payload shape."""
         with channel() as ch:
             w.send_text(PHONE, "hi")
             w.send_welcome_menu(PHONE)
-            w.send_followup_buttons(PHONE)
             w.send_brochure(PHONE)
         self.assertEqual(ch.of_type("interactive"), [])
+        with channel() as ch:
+            w.send_followup_buttons(PHONE)
+        self.assertEqual(len(ch.of_type("interactive")), 1)
 
-    def test_no_interactive_transcript_helper_survives(self):
-        """Kept solely for the welcome menu, so it goes with it. No generic
-        interactive-mirroring framework is retained for hypothetical use."""
+    def test_no_generic_interactive_helper_exists(self):
+        """The follow-up buttons compose their own body inline. A shared
+        helper would be a framework for hypothetical future paths, and the
+        welcome menu is precisely the path that must NOT get one."""
         self.assertFalse(hasattr(w, "_interactive_transcript"))
         src = io.open(os.path.join(os.path.dirname(__file__), "..",
                                    "api", "webhook.py"),
@@ -251,8 +303,7 @@ class TheMenuFurnitureStaysOutOfTheThread(unittest.TestCase):
             cwd=os.path.join(os.path.dirname(__file__), ".."),
             capture_output=True, text=True).stdout
         self.assertTrue(base, "could not read 680cab8")
-        for name in ("send_welcome_menu", "send_followup_buttons",
-                     "send_typing", "notify_owner"):
+        for name in ("send_welcome_menu", "send_typing", "notify_owner"):
             marker = f"\ndef {name}("
             start = base.index(marker)
             end = base.index("\ndef ", start + len(marker))
@@ -328,6 +379,7 @@ class TheIdIsAlwaysCarried(unittest.TestCase):
     def _both_paths(self, ch):
         w.send_text(PHONE, "hello")
         w.send_brochure(PHONE)
+        w.send_followup_buttons(PHONE)
         return ch.rows
 
     def test_every_mirrored_row_carries_the_wamid(self):
@@ -335,7 +387,7 @@ class TheIdIsAlwaysCarried(unittest.TestCase):
         letters: Meta reported on an id the CRM had never stored."""
         with channel() as ch:
             rows = self._both_paths(ch)
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 3)
         for r in rows:
             self.assertEqual(r.get("wa_message_id"), WAMID, r["message_type"])
 
@@ -364,6 +416,7 @@ class TheIdIsAlwaysCarried(unittest.TestCase):
         with channel(wa_code=400) as ch:
             ch.wamid = "wamid.FROM_AN_ERROR_BODY"
             w.send_brochure(PHONE)
+            w.send_followup_buttons(PHONE)
             w.send_text(PHONE, "hi")
         for r in ch.rows:
             self.assertNotEqual(r.get("wa_message_id"),
@@ -396,7 +449,8 @@ class IdempotencyIsTheIndexsJob(unittest.TestCase):
         with channel() as ch:
             w.send_text(PHONE, "hi")
             w.send_brochure(PHONE)
-        self.assertEqual(len(ch.posts), 2)
+            w.send_followup_buttons(PHONE)
+        self.assertEqual(len(ch.posts), 3)
         for url, kw in ch.posts:
             self.assertNotIn("on_conflict", url)
             self.assertNotIn("params", kw)
@@ -423,7 +477,8 @@ class IdempotencyIsTheIndexsJob(unittest.TestCase):
         index rejects the second rather than the CRM gaining a twin."""
         with channel() as ch:
             w.send_brochure(PHONE)
-            w.send_brochure(PHONE)
+            w.send_followup_buttons(PHONE)
+            w.send_followup_buttons(PHONE)
         self.assertEqual(len({r["wa_message_id"] for r in ch.rows}), 1)
 
 
@@ -445,6 +500,12 @@ class OnlyCustomersGetACustomerThread(unittest.TestCase):
         self.assertEqual(ch.rows, [])
         self.assertEqual(len(ch.sends), 6)     # still SENT, just not mirrored
 
+    def test_the_followup_buttons_respect_the_role_gate_too(self):
+        for role in ("OWNER", "STAFF", "MANAGER"):
+            with channel(role=role) as ch:
+                w.send_followup_buttons(PHONE)
+            self.assertEqual(ch.rows, [], role)
+
     def test_staff_are_mirrored_nowhere(self):
         with channel(role="STAFF") as ch:
             self._every_path()
@@ -460,7 +521,7 @@ class OnlyCustomersGetACustomerThread(unittest.TestCase):
         with channel(role="CLIENT") as ch:
             self._every_path()
         self.assertEqual([r["message_type"] for r in ch.rows],
-                         ["text", "text", "media"])
+                         ["text", "text", "interactive", "media"])
 
     def test_the_gate_is_role_based_not_the_bootstrap_list(self):
         """A staff number added to bot_roles must be excluded without a
@@ -492,6 +553,7 @@ class TheRowsSpeakTheCRMsVocabulary(unittest.TestCase):
     def _all(self, ch):
         w.send_text(PHONE, "hello")
         w.send_brochure(PHONE)
+        w.send_followup_buttons(PHONE)
         return ch.rows
 
     def test_every_message_type_satisfies_the_crm_check_constraint(self):
@@ -565,6 +627,7 @@ class TheMirrorLeaksNothing(unittest.TestCase):
         with channel(crm_code=500) as ch:
             w.send_text(PHONE, "ಕೋಟೇಶನ್ ಬೇಕು")
             w.send_brochure(PHONE)
+            w.send_followup_buttons(PHONE)
         self.assertIn("CRM_MIRROR_FAILED", ch.log)
         for secret in ("ಕೋಟೇಶನ್", "ಪ್ರೊಫೈಲ್", DOC, IMAGE, PHONE, WAMID):
             self.assertNotIn(secret, ch.log)
@@ -597,14 +660,16 @@ class TheMirrorLeaksNothing(unittest.TestCase):
              mock.patch.object(w, "CRM_SUPABASE_URL", ""):
             w.send_text(PHONE, "hi")
             w.send_brochure(PHONE)
+            w.send_followup_buttons(PHONE)
         self.assertEqual(ch.rows, [])
-        self.assertEqual(len(ch.sends), 2)
+        self.assertEqual(len(ch.sends), 3)
 
 
 class NothingOutsideScopeWasTouched(unittest.TestCase):
 
     TOUCHED = ("_mirror_outbound_to_crm", "log_reply_to_crm", "_wamid_of",
-               "_mirror_sent_message", "send_text", "send_brochure")
+               "_mirror_sent_message", "send_text", "send_brochure",
+               "send_followup_buttons")
 
     def _touched_source(self):
         """EXECUTABLE source only. send_text's docstring says "stage ⑫" and
@@ -631,7 +696,8 @@ class NothingOutsideScopeWasTouched(unittest.TestCase):
         with channel() as ch:
             w.send_text(PHONE, "hi")
             w.send_brochure(PHONE)
-        self.assertEqual(len(ch.posts), 2)
+            w.send_followup_buttons(PHONE)
+        self.assertEqual(len(ch.posts), 3)
         for url, _ in ch.posts:
             self.assertEqual(url, "https://crm.test/rest/v1/whatsapp_messages")
         raw = "\n".join(inspect.getsource(getattr(w, n)) for n in self.TOUCHED)
@@ -645,6 +711,7 @@ class NothingOutsideScopeWasTouched(unittest.TestCase):
         with channel() as ch:
             w.send_text(PHONE, "hi")
             w.send_brochure(PHONE)
+            w.send_followup_buttons(PHONE)
         for r in ch.rows:
             self.assertTrue(set(r) <= allowed, set(r) - allowed)
 
@@ -653,6 +720,7 @@ class NothingOutsideScopeWasTouched(unittest.TestCase):
         with channel() as ch:
             w.send_text(PHONE, "hi")
             w.send_brochure(PHONE)
+            w.send_followup_buttons(PHONE)
         for r in ch.rows:
             self.assertTrue(set(r["metadata"]) <= allowed,
                             set(r["metadata"]) - allowed)

@@ -2335,7 +2335,10 @@ SERVICE_MENU_REPLIES = {
 
 def send_followup_buttons(to: str):
     """Send interactive quick-reply buttons after brochure (max 3)."""
-    r = _wa_post({
+    # Captured as a value ONLY so the mirror can read the prompt and the
+    # button titles back off the payload that was actually sent, instead of
+    # repeating the literals and letting the two drift.
+    _buttons = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "interactive",
@@ -2350,7 +2353,37 @@ def send_followup_buttons(to: str):
                 ]
             },
         },
-    })
+    }
+    r = _wa_post(_buttons)
+    # THE ONE INTERACTIVE MESSAGE THAT IS MIRRORED, and deliberately the only
+    # one. It is live customer-facing communication — fired after a brochure
+    # the customer asked for and received — so the CRM conversation should
+    # record what options they were offered. The customer's next message is a
+    # TAP on one of these titles, and without them the thread shows a reply
+    # arriving from nowhere.
+    #
+    # The welcome menu is NOT mirrored, and that asymmetry is the product
+    # decision, not an oversight: a fixed service-list menu is not the
+    # AI-first experience being built, so nothing is invested in recording it.
+    #
+    # Composed inline and specific to this path. There is no generic
+    # interactive-mirroring helper and none is wanted — if another interactive
+    # path is ever adopted, it gets its own decision based on its own UX.
+    #
+    # Nothing is mirrored when Meta rejects the send: the fallback below goes
+    # through send_text, which mirrors on its own, so recording the rejected
+    # send too would put two rows in the thread for one message the customer
+    # actually received. _mirror_sent_message enforces that by requiring a
+    # real wamid.
+    _act = _buttons["interactive"]
+    _mirror_sent_message(
+        to, r,
+        message_type="interactive",     # the CRM's own type — see ingest.ts
+        body="\n".join([_act["body"]["text"]]
+                       + [f"• {b['reply']['title']}"
+                          for b in _act["action"]["buttons"]]),
+        original_type="interactive",
+    )
     if not r.ok:
         send_text(to,
             "ನಿಮಗೆ ಮುಂದೆ ಏನು ಬೇಕು?\n\n"

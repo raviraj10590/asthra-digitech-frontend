@@ -22,16 +22,18 @@ THREE CALLERS DID THIS, not one:
 All three are removed. Nothing is lost: each was immediately preceded by a
 notify_owner() carrying the same material more completely.
 
-LATER WIDENING. The mirror now also covers the brochure document, which was
-sent and never recorded. That widens the surface this file guards by one path,
-so the prohibition moved to the shared write path (_mirror_outbound_to_crm)
-where every send path can see it, and the tests below enumerate exactly which
-functions may reach it.
+LATER WIDENING. The mirror now also covers the brochure document and the
+follow-up buttons, both of which were sent and never recorded. That widens the
+surface this file guards, so the prohibition moved to the shared write path
+(_mirror_outbound_to_crm) where every send path can see it, and the tests
+below enumerate exactly which functions may reach it.
 
-The welcome menu and the follow-up buttons are deliberately NOT among them:
-Asthra Bot is an expert AI chat, not a fixed menu flow, so no interactive
-mirroring exists. notify_owner and send_typing are not among them either, for
-the original reasons.
+The WELCOME MENU is deliberately not among them — a fixed service-list menu is
+not the AI-first experience being built — even though its interactive list is
+the same Meta payload shape as the follow-up buttons that ARE mirrored. The
+distinction is which conversation matters, not which shape it has.
+notify_owner and send_typing are not among them either, for the original
+reasons.
 
 WHY NOT RE-LABEL INSTEAD. The CRM's schema is not readable from this process
 (its credentials are write-only here), so any other `direction` value would be
@@ -211,25 +213,25 @@ class OnlySendTextMayMirror(unittest.TestCase):
             self.assertIn("_mirror_outbound_to_crm(",
                           inspect.getsource(caller))
 
-    def test_only_the_approved_send_path_reaches_the_non_text_mirror(self):
-        """send_brochure is the ONE non-text path that mirrors. notify_owner
-        and send_typing must not appear — the owner's material stays in
-        notify_owner, and typing is not a message. The welcome menu and the
-        follow-up buttons must not appear either: the product is an expert AI
-        chat, so no interactive or menu message is mirrored at all."""
+    def test_only_the_approved_send_paths_reach_the_non_text_mirror(self):
+        """Exactly two non-text paths mirror: the brochure document and the
+        follow-up buttons. notify_owner and send_typing must not appear — the
+        owner's material stays in notify_owner, and typing is not a message.
+        send_welcome_menu must not appear either, which is the product
+        decision rather than a technical limit."""
         import inspect
-        self.assertEqual(
-            inspect.getsource(w.send_brochure).count("_mirror_sent_message("),
-            1)
-        for name in ("notify_owner", "send_typing", "send_welcome_menu",
-                     "send_followup_buttons"):
+        for name in ("send_brochure", "send_followup_buttons"):
+            self.assertEqual(
+                inspect.getsource(getattr(w, name)).count(
+                    "_mirror_sent_message("), 1, name)
+        for name in ("notify_owner", "send_typing", "send_welcome_menu"):
             self.assertNotIn("_mirror_sent_message",
                              inspect.getsource(getattr(w, name)), name)
         src = io.open(WEBHOOK_SRC, encoding="utf-8").read()
         code = "\n".join(l for l in src.splitlines()
                           if not l.strip().startswith("#"))
-        # 1 def + send_brochure's single call, and nowhere else in the file.
-        self.assertEqual(code.count("_mirror_sent_message("), 2)
+        # 1 def + those two calls, and nowhere else in the file.
+        self.assertEqual(code.count("_mirror_sent_message("), 3)
 
     def test_the_mirror_still_records_a_genuine_reply(self):
         """The legitimate path must keep working."""
