@@ -564,7 +564,7 @@ _PURPOSE_OPTIONS = ("(agriculture / industry / construction / "
 # Three, because the delivery question made the opening ask three items.
 # zip() against a shorter tuple silently DROPS the extra question rather than
 # erroring, which is exactly how the units ask disappeared once.
-_NUMERALS = ("1️⃣", "2️⃣", "3️⃣")
+_NUMERALS = ("1️⃣", "2️⃣", "3️⃣", "4️⃣")
 
 # A DELIVERY PLACE IS EXTRACTED ONLY FROM AN UNAMBIGUOUS SHAPE.
 #
@@ -589,11 +589,56 @@ _DELIVERY_MENTION_RE = re.compile(
 _SAME_PLACE = ("same place", "same address", "same location", "same",
                "ಅದೇ ಸ್ಥಳ", "ಅದೇ", "ಹೌದು", "yes same", "same only")
 
-# A price request. Worth recognising so the reply answers the question that
-# was actually asked instead of repeating the intake prompt.
-_PRICE_ASK = ("rate", "price", "cost", "quotation", "quote", "ದರ", "ಬೆಲೆ",
-              "eshtu", "estu", "ಎಷ್ಟು")
+# ── COMMERCIAL INTENT: TWO DIFFERENT ASKS ─────────────────────────────────
+#
+# "What does it cost?" and "send me a quotation" were one tuple, and they are
+# not one act. A price question wants a number. A quotation request is the
+# start of a commercial document — a sales process this system does not
+# perform and must never claim to have performed.
+#
+# NEITHER can be answered with a figure. There is no authoritative Bairavi
+# price source: the price list is recorded as `TBD` in the GTM source
+# inventory, contradiction C-07 rules the ₹68,244 in the design package "not
+# a confirmed commercial price", and §10's costing template is a FORMULA
+# (factory cost × (1 + margin) + GST) whose material rates change daily and
+# whose margin is a 10–18% range. A number produced from it would be an
+# invention wearing a decimal point.
+#
+# So the split exists to change WHO ACTS, not to unlock a price:
+#   PRICE_REQUEST      answer truthfully, collect what a quotation needs
+#   QUOTATION_REQUEST  the same, PLUS raise the sales signal — issuing the
+#                      quotation is a human process (owner ruling, D3=A)
+PRICE_REQUEST = "PRICE_REQUEST"
+QUOTATION_REQUEST = "QUOTATION_REQUEST"
 
+_PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
+                "eshtu", "estu", "ಎಷ್ಟು")
+# Already the bot's own words for this: the follow-up button is titled
+# "📋 ಕೋಟೇಶನ್" and its id is "quotation".
+_QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
+
+# The union, kept under its original name because two other readers depend on
+# it: the bare-delivery-answer filter and the `asked_price` field, whose
+# meaning ("did they ask about money at all") is unchanged.
+_PRICE_ASK = _PRICE_WORDS + _QUOTATION_WORDS
+
+
+def commercial_intent(text: str):
+    """QUOTATION_REQUEST, PRICE_REQUEST, or None.
+
+    Quotation outranks price: "quotation ಬೇಕು, rate ಎಷ್ಟು?" is a quotation
+    request that also mentions price, and the stronger act decides. The
+    reverse precedence would silently downgrade a sales signal.
+
+    PER-TURN, NEVER STATE. Deliberately absent from _PERSISTENT_FIELDS — a
+    price asked four turns ago must not make every later reply a price reply.
+    """
+    low = (text or "").lower()
+    if any(w in low for w in _QUOTATION_WORDS):
+        return QUOTATION_REQUEST
+    if any(w in low for w in _PRICE_WORDS):
+        return PRICE_REQUEST
+    return None
 
 # ── A BARE ANSWER TO THE DELIVERY QUESTION ────────────────────────────────
 #
@@ -746,7 +791,10 @@ def parse_followup(text: str, awaiting=()) -> dict:
     return {"quantity": qty, "application": app, "capacity_kva": cap,
             "delivery_location": dl, "delivery_same": same,
             "delivery_mentioned": mentioned,
-            "asked_price": any(w in low for w in _PRICE_ASK)}
+            # Unchanged meaning and unchanged readers: "did they raise money
+            # at all". commercial_intent says WHICH ask it was.
+            "asked_price": any(w in low for w in _PRICE_ASK),
+            "commercial_intent": commercial_intent(text)}
 
 
 # ── Reply composition ─────────────────────────────────────────────────────
@@ -960,6 +1008,89 @@ def effective_quantity(followup: dict, known: dict = None) -> tuple:
 # hour later that asks again. Three copies of the rule would drift.
 AWAITING_DELIVERY = "delivery"
 AWAITING_PURPOSE = "purpose"
+# Added for the quotation requirement set. They are asked only when a
+# commercial intent is present, because outside that the opening reply's own
+# three questions already cover the flow.
+AWAITING_CAPACITY = "capacity"
+AWAITING_QUANTITY = "quantity"
+
+# ── WHAT A QUOTATION NEEDS: READ FROM THE GOAL, NOT RESTATED HERE ─────────
+#
+# bic/goals.py already declares it — `transformer_quotation` names kva_rating,
+# quantity, voltage and delivery_location as its required slots. A second list
+# in this module would be a second truth, and the two would drift the first
+# time the business changed one.
+#
+# The goal is INJECTED as a plain dict, never imported. bairavi.py stays a
+# pure offline module with no dependency on the bic package, which is the same
+# "injected, not imported" discipline bic/context.py uses for its describer.
+QUOTATION_GOAL_ID = "transformer_quotation"
+
+# Goal slot name -> the established fact that fills it, and the ask that
+# collects it. VOLTAGE IS ABSENT ON PURPOSE.
+#
+# The goal declares `voltage` OBTAINABLE_BY_ASKING, but Bairavi's product
+# knowledge base lists "voltage ratio · primary voltage · secondary voltage"
+# among "the attribute set every SKU must eventually carry" — a PRODUCT
+# attribute, not a customer answer. The standard is 11 kV / 433 V while real
+# enquiries also say 22/0.433 kV, so which it is has not been decided
+# (business decision D6, open).
+#
+# Asking the customer would implement D6=A by default; dropping the slot
+# would implement D6=C. Neither is this module's call, so voltage is neither
+# asked nor silently satisfied: it is reported as undecided in the owner
+# signal, where a human can see the gap.
+_SLOT_TO_ASK = {
+    "kva_rating": AWAITING_CAPACITY,
+    "quantity": AWAITING_QUANTITY,
+    "delivery_location": AWAITING_DELIVERY,
+}
+
+# Which established facts satisfy each ask. Delivery matches the existing
+# `outstanding` semantics exactly — a named place, "same place", or a mention.
+_ASK_SATISFIED_BY = {
+    AWAITING_CAPACITY: ("capacity_kva",),
+    AWAITING_QUANTITY: ("quantity",),
+    AWAITING_DELIVERY: ("delivery_location", "delivery_same",
+                        "delivery_mentioned"),
+}
+
+
+def requirement_asks(goal_def) -> tuple:
+    """The asks this module can collect for a quotation goal, in goal order.
+
+    Slots the goal declares but this module cannot establish — voltage today —
+    are skipped rather than guessed at, and `unaskable_slots` reports them.
+    """
+    out = []
+    for slot_def in (goal_def or {}).get("required_slots") or ():
+        ask = _SLOT_TO_ASK.get(slot_def.get("name"))
+        if ask and ask not in out:
+            out.append(ask)
+    return tuple(out)
+
+
+def unaskable_slots(goal_def) -> tuple:
+    """Slots the goal requires that this module deliberately does not ask.
+
+    Not a bug list — a visible record of an undecided business question. The
+    owner signal prints it so a quotation is never assembled while quietly
+    short of a slot the goal itself declares.
+    """
+    return tuple(s.get("name")
+                 for s in (goal_def or {}).get("required_slots") or ()
+                 if s.get("name") not in _SLOT_TO_ASK)
+
+
+def missing_requirements(goal_def, state: dict = None) -> tuple:
+    """Which quotation requirements are still genuinely unanswered.
+
+    From the MERGED state, so a fact established four turns ago is never
+    asked for again — the invariant the 2026-09-20 conversation was lost to.
+    """
+    state = state or {}
+    return tuple(ask for ask in requirement_asks(goal_def)
+                 if not any(state.get(f) for f in _ASK_SATISFIED_BY[ask]))
 
 
 def outstanding(followup: dict, known: dict = None) -> tuple:
@@ -995,19 +1126,39 @@ def question_for(field: str, known: dict = None) -> str:
         return "🚚 TC *ಡೆಲಿವರಿ* ಯಾವ ಸ್ಥಳಕ್ಕೆ ಬೇಕು?"
     if field == AWAITING_PURPOSE:
         return "ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS
+    if field == AWAITING_CAPACITY:
+        # The RANGE, not a guess. _RANGE is built from CATALOGUE_KVA, so the
+        # list shown can never drift from the list manufactured — and kVA is
+        # stated explicitly because customers write "24 kv" for a capacity.
+        return f"ಎಷ್ಟು *kVA* ಬೇಕು? (ನಮ್ಮ range: {_RANGE})"
+    if field == AWAITING_QUANTITY:
+        return "ಎಷ್ಟು *units* ಬೇಕು?"
     raise ValueError(f"no question for {field!r}")
 
 
-def flow_marker(awaiting=()) -> str:
+QUOTE_SIGNALLED = "quote_signalled=1"
+
+
+def flow_marker(awaiting=(), quote_signalled: bool = False) -> str:
     """The transcript row written for a Bairavi reply.
 
     Carries what the reply is waiting for, so an hour later something can
     decide whether to ask again — WITHOUT new storage. FLOW_MARKER stays a
     prefix so in_transformer_flow() keeps matching it.
+
+    `quote_signalled` records that the sales signal for a quotation request
+    has already been raised. Kept HERE rather than in a new table for the
+    reason stated at FLOW_MARKER: a second store would be a second truth that
+    can disagree with the transcript. The real conversation on 2026-09-20
+    asked for a rate twice in four minutes, so without this the owner gets a
+    duplicate alert for one intent.
     """
-    if not awaiting:
-        return FLOW_MARKER
-    return f"{FLOW_MARKER} awaiting={','.join(awaiting)}"
+    parts = [FLOW_MARKER]
+    if awaiting:
+        parts.append(f"awaiting={','.join(awaiting)}")
+    if quote_signalled:
+        parts.append(QUOTE_SIGNALLED)
+    return " ".join(parts)
 
 
 def marker_awaiting(content: str) -> tuple:
@@ -1016,8 +1167,24 @@ def marker_awaiting(content: str) -> tuple:
     if FLOW_MARKER not in text or "awaiting=" not in text:
         return ()
     raw = text.split("awaiting=", 1)[1].split()[0]
-    valid = (AWAITING_DELIVERY, AWAITING_PURPOSE)
+    valid = (AWAITING_DELIVERY, AWAITING_PURPOSE,
+             AWAITING_CAPACITY, AWAITING_QUANTITY)
     return tuple(f for f in raw.split(",") if f in valid)
+
+
+def quote_already_signalled(history) -> bool:
+    """Has the sales signal for a quotation request already gone out?
+
+    Read from the transcript the flow already writes, like every other piece
+    of this module's state.
+    """
+    for msg in reversed(list(history or [])):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content") or ""
+        if FLOW_MARKER in content and QUOTE_SIGNALLED in content:
+            return True
+    return False
 
 
 def awaiting_from_history(history) -> tuple:
@@ -1038,7 +1205,8 @@ def awaiting_from_history(history) -> tuple:
     return ()
 
 
-def compose_followup_reply(followup: dict, known: dict = None) -> str:
+def compose_followup_reply(followup: dict, known: dict = None,
+                           goal_def: dict = None) -> str:
     """The reply to a message inside an existing transformer conversation.
 
     NOT the opening reply. Re-greeting someone mid-conversation and re-listing
@@ -1084,12 +1252,19 @@ def compose_followup_reply(followup: dict, known: dict = None) -> str:
     else:
         lines.append("✅ ಧನ್ಯವಾದ — ನಿಮ್ಮ ಸಂದೇಶ ಸಿಕ್ಕಿದೆ.")
 
+    _intent = followup.get("commercial_intent")
     if followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
         # never a number — the evidence for one does not exist.
         lines.append("\nದರದ ಬಗ್ಗೆ: ನಮ್ಮ engineer ನಿಮ್ಮ requirement "
                      "(capacity, quantity, ಸ್ಥಳ) ನೋಡಿ ನಿಖರವಾದ quotation "
                      "ಕೊಡುತ್ತಾರೆ — ಸಾಮಾನ್ಯ ದರ ಹೇಳುವುದು ತಪ್ಪಾಗುತ್ತದೆ.")
+        if _intent == QUOTATION_REQUEST:
+            # Says a REQUEST was recorded and a human will act. Never that a
+            # quotation exists — no quotation has been produced, and claiming
+            # one is the specific falsehood the owner's D3=A ruling forbids.
+            lines.append("ನಿಮ್ಮ quotation *ವಿನಂತಿ* ನಮ್ಮ sales ತಂಡಕ್ಕೆ "
+                         "ರವಾನಿಸಿದ್ದೇವೆ.")
 
     # Only what is still outstanding, and only the two things the opening
     # reply asked for. The capacity is not re-asked: it comes from the ad form.
@@ -1099,9 +1274,22 @@ def compose_followup_reply(followup: dict, known: dict = None) -> str:
     # stop replying — and purpose, which does change what happens next, is
     # the one worth pressing.
     known = known or {}
-    # The delivery place leads, because not knowing it is what stops a
-    # quotation: transport and site access are priced from it.
-    missing = [question_for(f, known) for f in outstanding(followup, known)]
+    # WHAT TO ASK FOR.
+    #
+    # Ordinarily: whatever this conversation is still waiting for.
+    #
+    # On a commercial turn: the quotation's OWN requirements lead, read from
+    # the goal definition (bic/goals.py) rather than restated here — asking
+    # for the purpose before the capacity when somebody just asked the price
+    # answers a question they did not ask. Anything already established is
+    # absent from both lists, because both are computed from merged state.
+    _state = merged_state(known, followup)
+    _asks = list(outstanding(followup, known))
+    if _intent and goal_def:
+        _required = [a for a in missing_requirements(goal_def, _state)
+                     if a not in _asks]
+        _asks = _required + _asks
+    missing = [question_for(f, known) for f in _asks]
 
     if missing:
         lines.append("\nಇನ್ನೊಂದು ವಿಷಯ ತಿಳಿಸಿ:" if len(missing) == 1
@@ -1179,6 +1367,60 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
         f"\nTheir words: {(text or '').strip()[:300]}\n"
         "\nNo price, delivery date or certificate was quoted to the customer."
     )
+
+
+def compose_quotation_signal(phone: str, followup: dict, text: str,
+                             known: dict = None, goal_def: dict = None) -> str:
+    """The sales signal for a QUOTATION REQUEST. Owner/staff only.
+
+    Says a request arrived and what is known about it. It does NOT contain a
+    price, a total, a margin or a validity date, because none of those exists
+    as evidence — and it never states that a quotation was produced. Issuing
+    one is a human process (owner ruling, D3=A: the AI may collect and qualify
+    a requirement, never issue a quotation).
+
+    Deliberately reports THREE things a salesperson cannot get elsewhere:
+      · which requirements are still missing, so the chase is specific
+      · the SKU status, so a VERIFY capacity like 24 kVA is never worked as
+        though it were a stocked 25 kVA
+      · which slots the quotation goal requires that nobody asked, so an
+        undecided business question stays visible instead of looking answered
+    """
+    state = merged_state(known, followup)
+    kva = state.get("capacity_kva")
+    qty, assumed = effective_quantity(followup, known)
+    still_missing = missing_requirements(goal_def, state)
+    unasked = unaskable_slots(goal_def)
+
+    def val(v):
+        return v if v not in (None, "") else "TBD"
+
+    lines = [
+        "🧾 *BAIRAVI — QUOTATION REQUEST*",
+        f"From: wa.me/{phone}",
+        "",
+        f"Capacity: {val(kva)}" + (" kVA" if kva is not None else ""),
+        f"SKU status: {sku_status(kva)}",
+        f"Quantity: {qty}" + (" (assumed — not stated)" if assumed else ""),
+        f"Delivery to: {delivery_line(followup, known)}",
+        f"Application: {val(state.get('application'))}",
+    ]
+    if still_missing:
+        lines.append("\n⚠️ Still missing for a quotation: "
+                     + ", ".join(still_missing))
+    else:
+        lines.append("\n✅ Every requirement this bot can collect is answered.")
+    if unasked:
+        lines.append("ℹ️ Required by the goal but NOT asked (undecided): "
+                     + ", ".join(unasked))
+    if sku_status(kva) != SUPPORTED:
+        lines.append("ℹ️ Capacity is not a currently manufactured rating — "
+                     "confirm before quoting.")
+    lines.append(f"\nTheir words: {(text or '').strip()[:300]}")
+    lines.append("\n👉 Prepare the quotation. No price, total, margin, "
+                 "validity or delivery date was given to the customer, and "
+                 "no quotation has been generated.")
+    return "\n".join(lines)
 
 
 def compose_owner_alert(phone: str, parsed: dict) -> str:

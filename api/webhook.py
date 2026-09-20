@@ -5347,14 +5347,34 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # delivery place the customer gave in their first message — the
             # same discourtesy that lost the first fifteen leads.
             known = bairavi.established_from_history(ctx["history"])
+            # WHAT A QUOTATION REQUIRES, taken from the Brain's own goal
+            # registry rather than restated in the Bairavi layer. Injected as
+            # data so bairavi.py keeps no dependency on the bic package and
+            # a BIC outage degrades to the previous reply rather than failing.
+            _quote_goal = None
+            if BIC_AVAILABLE:
+                try:
+                    _quote_goal = bic_goals.lookup(bairavi.QUOTATION_GOAL_ID)
+                except Exception as e:
+                    print(f"BAIRAVI_GOAL_LOOKUP_FAILED type={type(e).__name__}")
             send_text(sender,
-                      bairavi.compose_followup_reply(followup, known))
+                      bairavi.compose_followup_reply(followup, known,
+                                                     _quote_goal))
             # The marker records WHAT this reply is still waiting for, so the
             # hourly sweep can ask again without any new storage.
+            # WRITTEN BEFORE the alerts below so a notify failure cannot
+            # lose the transcript row; the quote flag is therefore computed
+            # here too.
+            _quote_now = (
+                followup.get("commercial_intent") == bairavi.QUOTATION_REQUEST
+                and not bairavi.quote_already_signalled(ctx["history"]))
             _saved = save_messages([
                 (sender, "user", user_text),
                 (sender, "assistant",
-                 bairavi.flow_marker(bairavi.outstanding(followup, known)))])
+                 bairavi.flow_marker(
+                     bairavi.outstanding(followup, known),
+                     quote_signalled=_quote_now
+                     or bairavi.quote_already_signalled(ctx["history"])))])
             warn_if_transcript_lost(sender, _saved, "Bairavi follow-up reply")
             # EVERY follow-up is forwarded, not only the ones that parse.
             #
@@ -5374,6 +5394,20 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             upsert_lead(sender, {"source": "bairavi-transformer",
                                  "notes": alert})
             notify_owner(alert)
+            # THE SALES SIGNAL FOR A QUOTATION REQUEST (owner ruling D3=A).
+            #
+            # Separate from the follow-up alert above because it asks for a
+            # different act: that one says "read this", this one says
+            # "prepare a quotation". Raised once per conversation — the real
+            # 2026-09-20 thread asked for a rate twice in four minutes, and a
+            # second identical alert trains the owner to ignore both.
+            #
+            # A PRICE question does not raise it: it is already carried by the
+            # follow-up alert's "Asked for price: YES" line, and issuing a
+            # sales task for every "rate?" would bury the real requests.
+            if _quote_now:
+                notify_owner(bairavi.compose_quotation_signal(
+                    sender, followup, user_text, known, _quote_goal))
             return
 
         parsed = bairavi.parse(user_text)
