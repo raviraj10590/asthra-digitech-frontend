@@ -33,22 +33,21 @@ because the next field to be forgotten would not have been purpose.
 
 SCOPE — one defect at a time
 ----------------------------
-A SEPARATE defect, not fixed here: a bare place name is not recognised as a
-delivery location. `parse_followup("ಗುಜರಾತ್")["delivery_location"]` is None,
-and so is the Latin "Gujarat" — _DELIVERY_STRICT_RE requires a colon or an
-explicit "deliver to/at". So the literal production sequence CANNOT assert
-`delivery == Gujarat`; asserting it would require fixing location extraction
-in the same change, which is exactly what this task forbids.
+This file owns the STATE invariant. Bare-place-name recognition was a second,
+separate defect and is fixed in test_bairavi_delivery_location.py.
 
-The two are therefore tested apart:
+While that defect was open, this file pinned its behaviour
+(`parse_followup("ಗುಜರಾತ್")["delivery_location"] is None`) with a note saying
+the test SHOULD fail once bare names became readable. It did exactly that, on
+the first run after fix #2, and was replaced by the positive assertion — which
+is the whole reason for pinning current behaviour rather than omitting it.
 
-  * ReplayOfTheProductionFailure uses the verbatim messages and asserts the
-    regression itself — purpose must never return to outstanding. Delivery
-    stays outstanding there, which is the OTHER defect, asserted as the
-    current documented behaviour so that fixing it will announce itself here.
-  * DeliveryUsesTheExistingMechanism uses a delivery shape the extractor
-    already reads, so state monotonicity is proven for delivery too without
-    touching the extractor.
+  * ReplayOfTheProductionFailure replays the verbatim messages and asserts
+    the state invariant: purpose and quantity must never return to
+    outstanding. It now also asserts the conversation completes.
+  * DeliveryUsesTheExistingMechanism uses the colon/preposition shapes that
+    always worked, so monotonicity for delivery is proven independently of
+    the bare-answer path.
 
 Offline: no network, no provider, no database.
 """
@@ -179,20 +178,33 @@ class ReplayOfTheProductionFailure(unittest.TestCase):
         marker = b.flow_marker(self.turns[-1]["awaiting"])
         self.assertNotIn(b.AWAITING_PURPOSE, b.marker_awaiting(marker))
 
-    # ── the SEPARATE defect, pinned as current behaviour ────────────────
-    def test_a_bare_place_name_still_does_not_establish_delivery(self):
-        """NOT fixed in this task, and asserted so the fix announces itself.
+    # ── the second defect, now FIXED — this test was pinned to the old
+    #    behaviour and fired the moment it changed, exactly as intended ────
+    def test_the_bare_place_name_NOW_establishes_delivery(self):
+        """Fix #2. The bare answer is read because the previous reply's
+        transcript marker said it had asked for delivery.
 
-        _DELIVERY_STRICT_RE needs a colon or an explicit 'deliver to/at',
-        because a bare word in a follow-up cannot be told apart from an
-        application, a company or a person — and a guessed address is a lorry
-        sent to the wrong district (AC-07). When bare place names become
-        readable, this test SHOULD fail and be replaced by the assertion that
-        delivery == Gujarat.
+        Verbatim, not transliterated: the Brain owns no place-name mapping,
+        so 'ಗುಜರಾತ್' stays 'ಗುಜರಾತ್'. See the module note in
+        test_bairavi_delivery_location.py.
         """
+        self.assertEqual(self.turns[3]["state"]["delivery_location"], "ಗುಜರಾತ್")
+        self.assertNotIn(b.AWAITING_DELIVERY, self.turns[3]["awaiting"])
+
+    def test_without_the_delivery_context_a_bare_name_is_still_unread(self):
+        """The gate, not a gazetteer: out of context it means nothing."""
         self.assertIsNone(b.parse_followup("ಗುಜರಾತ್")["delivery_location"])
         self.assertIsNone(b.parse_followup("Gujarat")["delivery_location"])
-        self.assertIn(b.AWAITING_DELIVERY, self.turns[-1]["awaiting"])
+
+    def test_the_whole_production_sequence_now_completes(self):
+        """The conversation that produced 'You mad' now asks for nothing by
+        the time the place is given."""
+        self.assertEqual(self.turns[3]["awaiting"], ())
+        self.assertEqual(self.turns[4]["awaiting"], ())
+        final = self.turns[-1]["state"]
+        self.assertEqual(final["application"], "AGRICULTURE")
+        self.assertEqual(final["quantity"], 1)
+        self.assertEqual(final["delivery_location"], "ಗುಜರಾತ್")
 
 
 # ══════════════════════════════════════════════════════════════════════════

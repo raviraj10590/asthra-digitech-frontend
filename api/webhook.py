@@ -5336,7 +5336,12 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         # greeting again. This is also where the answers the first reply asked
         # for finally land instead of being discarded.
         if _in_flow and not bairavi.is_lead_form(user_text):
-            followup = bairavi.parse_followup(user_text)
+            # THE QUESTION WE LAST ASKED, so a bare one-word answer to it is
+            # readable. Without this "ಗುಜರಾತ್" — a direct answer to "where
+            # should we deliver?" — parsed as nothing, and the customer was
+            # asked a fourth time.
+            followup = bairavi.parse_followup(
+                user_text, bairavi.awaiting_from_history(ctx["history"]))
             # WHAT THE FORM ALREADY ANSWERED, recovered from the transcript.
             # Without it the follow-up is stateless and would ask again for a
             # delivery place the customer gave in their first message — the

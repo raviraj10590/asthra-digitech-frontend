@@ -595,12 +595,103 @@ _PRICE_ASK = ("rate", "price", "cost", "quotation", "quote", "ದರ", "ಬೆ�
               "eshtu", "estu", "ಎಷ್ಟು")
 
 
-def parse_followup(text: str) -> dict:
+# ── A BARE ANSWER TO THE DELIVERY QUESTION ────────────────────────────────
+#
+# On 2026-09-20 the bot asked where to deliver. The customer answered
+# "ಗುಜರಾತ್", then "Gujarat", and neither registered: _DELIVERY_STRICT_RE
+# requires a colon or an explicit "deliver to/at", so a one-word reply — the
+# way people actually answer a question — read as nothing. They were asked a
+# fourth time and wrote "You mad".
+#
+# THE CONTEXT COMES FROM THE TRANSCRIPT, NOT FROM A LIST OF PLACES. The reply
+# that asked the question already recorded what it was waiting for
+# (flow_marker -> "awaiting=delivery"), and marker_awaiting() already reads it
+# back for the hourly nudge. So "was the previous turn a delivery question?"
+# is a fact this module can consult, and no gazetteer of states and cities is
+# needed to answer it. That matters: the only geography the Brain owns is the
+# Karnataka `constituencies` table, which is a POLITICAL dataset behind a
+# network call, has no Gujarat in it, and would make this pure module
+# impure. It is deliberately not used here.
+#
+# WITHOUT that context a bare place name stays unreadable, exactly as before —
+# "Gujarat" in the middle of a conversation about capacity is not an address.
+_BARE_ANSWER_MAX_WORDS = 4
+_BARE_ANSWER_MAX_CHARS = 40
+
+# Short replies that are NOT an answer to "where?". Recording one of these as
+# an address is the AC-07 failure in its most expensive form: a lorry sent to
+# "ok". Kept deliberately broad — a rejected answer costs one more question,
+# a wrong one costs a delivery.
+_ACKNOWLEDGEMENTS = ("ok", "okay", "k", "hmm", "thanks", "thank you", "ok sir",
+                     "sure", "fine", "ಸರಿ", "ಆಯ್ತು", "ಧನ್ಯವಾದ", "ಥ್ಯಾಂಕ್ಸ್",
+                     "no", "illa", "ಇಲ್ಲ", "haan", "ha", "yes", "yep")
+
+# Words that make a place name a STATEMENT about a place rather than an answer
+# naming one. "I am from Gujarat" says where the customer is, not where the
+# transformer goes, and the two are routinely different.
+_NOT_A_BARE_ANSWER = ("from", "ಇಂದ", "ನಾನು", "ನಮ್ಮ", "my", "our", "i", "we",
+                      "am", "is", "are", "near", "ಹತ್ತಿರ", "not", "ಅಲ್ಲ",
+                      "why", "what", "how", "ಯಾಕೆ", "ಏನು")
+
+
+def _bare_delivery_answer(text: str):
+    """The customer's own words as the delivery place, or None.
+
+    Only ever called when the previous reply asked for delivery. Even then it
+    is conservative by design: everything it cannot confidently read as an
+    answer returns None, which re-asks the question. AC-07 — a blank field is
+    correct, a confidently wrong address is not.
+
+    Returns the text VERBATIM. No transliteration and no canonical form,
+    because the Brain has no place-name mapping to canonicalise against (see
+    the module note above) and inventing one here would be a geography policy
+    nobody has decided.
+    """
+    raw = (text or "").strip(" \t\n.,!:-")
+    if not raw or len(raw) > _BARE_ANSWER_MAX_CHARS:
+        return None
+    if len(raw.split()) > _BARE_ANSWER_MAX_WORDS:
+        return None
+    low = raw.lower()
+
+    # A question is not an answer — "Gujarat price?" asks something else.
+    if "?" in raw:
+        return None
+    if any(w in low for w in _PRICE_ASK):
+        return None
+    # An acknowledgement, a yes/no, or "same place" — the last of which is
+    # already recorded as a confirmation rather than an address.
+    if low in _ACKNOWLEDGEMENTS or any(w == low for w in _SAME_PLACE):
+        return None
+    if any(w in low for w in _SAME_PLACE):
+        return None
+    # A statement about a place, not an answer naming one.
+    if any(_label_matches(low, w) for w in _NOT_A_BARE_ANSWER):
+        return None
+    # Another field's answer that happens to be short. Purpose, capacity and
+    # quantity all have their own extractors and must not be read as a place.
+    if any(needle in low for needle, _ in _APPLICATIONS):
+        return None
+    if capacity_kva(raw) is not None or _QTY_RE.search(low):
+        return None
+    # Must contain an actual letter — a number or emoji is not a place.
+    if not re.search(r"[^\W\d_]", raw):
+        return None
+    return raw
+
+
+def parse_followup(text: str, awaiting=()) -> dict:
     """Quantity, application and whether a price was asked. None when unread.
 
     Deliberately NOT a general extractor. It reads the two fields the first
     reply asked for and nothing else; everything it cannot read confidently
     stays None and the owner alert prints TBD.
+
+    `awaiting` is what the PREVIOUS reply asked for, from its transcript
+    marker. Optional and additive: omitted, this behaves exactly as before.
+    Supplied with AWAITING_DELIVERY, a bare one-word answer to the delivery
+    question is finally readable — which is how customers actually answer,
+    and the reason one of them had to say it four times.
     """
     low = (text or "").lower()
     cap = capacity_kva(text)
@@ -638,6 +729,13 @@ def parse_followup(text: str) -> dict:
         if candidate and not any(w == candidate.lower() for w in _SAME_PLACE) \
                 and re.search(r"[^\W\d_]", candidate):
             dl = candidate
+    # THE ANSWER TO THE QUESTION WE JUST ASKED. Only consulted when the
+    # strict shapes found nothing and the previous reply did ask for delivery,
+    # so a place named in any other context is still not treated as an
+    # address.
+    if dl is None and AWAITING_DELIVERY in (awaiting or ()):
+        dl = _bare_delivery_answer(text)
+
     mentioned = bool(_DELIVERY_MENTION_RE.search(text or ""))
 
     # "Same place" answers the question without naming anywhere: it points at
@@ -814,13 +912,24 @@ def established_from_history(history) -> dict:
     no state, it reads what was already there.
     """
     state = {f: None for f in _PERSISTENT_FIELDS}
+    # What the reply BEFORE each customer turn was waiting for, carried
+    # forward as the walk proceeds. Without this the history replay would read
+    # a bare "ಗುಜರಾತ್" as nothing while the live turn reads it as an address,
+    # and the two would disagree about the same conversation.
+    awaiting = ()
     for msg in list(history or []):        # OLDEST FIRST — merge forward
-        if msg.get("role") != "user":
-            continue
+        role = msg.get("role")
         text = msg.get("content") or ""
+        if role == "assistant":
+            if FLOW_MARKER in text:
+                awaiting = marker_awaiting(text)
+            continue
+        if role != "user":
+            continue
         # A form answers different questions from a chat reply, so each is
         # read by its own extractor. Neither is trusted to invent a field.
-        turn = parse(text) if is_lead_form(text) else parse_followup(text)
+        turn = (parse(text) if is_lead_form(text)
+                else parse_followup(text, awaiting))
         state = merged_state(state, turn)
     return state
 
@@ -909,6 +1018,24 @@ def marker_awaiting(content: str) -> tuple:
     raw = text.split("awaiting=", 1)[1].split()[0]
     valid = (AWAITING_DELIVERY, AWAITING_PURPOSE)
     return tuple(f for f in raw.split(",") if f in valid)
+
+
+def awaiting_from_history(history) -> tuple:
+    """What the most recent Bairavi reply said it was waiting for.
+
+    The conversational context a bare answer needs, taken from the transcript
+    the flow already writes — no new storage, and the same marker the hourly
+    nudge reads. Returns () when the last Bairavi reply was waiting for
+    nothing, or when this conversation has no Bairavi reply yet: in both cases
+    a bare place name is correctly left unread.
+    """
+    for msg in reversed(list(history or [])):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content") or ""
+        if FLOW_MARKER in content:
+            return marker_awaiting(content)
+    return ()
 
 
 def compose_followup_reply(followup: dict, known: dict = None) -> str:
