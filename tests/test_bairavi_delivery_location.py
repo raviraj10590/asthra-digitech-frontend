@@ -115,8 +115,33 @@ ASKED_BOTH = (b.AWAITING_DELIVERY, b.AWAITING_PURPOSE)
 ASKED_PURPOSE_ONLY = (b.AWAITING_PURPOSE,)
 
 
+PHONE = "910000000000"
+
+
 def delivery(text, awaiting=ASKED_DELIVERY):
     return b.parse_followup(text, awaiting)["delivery_location"]
+
+
+def conversation(*messages):
+    """Replay a thread through the real history shape, with the assistant's
+    flow marker between turns exactly as the webhook writes it.
+
+    One implementation, used by every class below — the replay was previously
+    inline in a single setUp, and a second copy would be a second truth about
+    how a turn is computed.
+    """
+    hist, turns = [], []
+    for text in messages:
+        asked = b.awaiting_from_history(hist)
+        known = b.established_from_history(hist)
+        followup = b.parse_followup(text, asked)
+        awaiting = b.outstanding(followup, known)
+        turns.append({"text": text, "asked": asked, "known": known,
+                      "followup": followup, "awaiting": awaiting,
+                      "state": b.merged_state(known, followup)})
+        hist.append({"role": "user", "content": text})
+        hist.append({"role": "assistant", "content": b.flow_marker(awaiting)})
+    return turns
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -313,22 +338,7 @@ class TheProductionConversationCompletes(unittest.TestCase):
     SEQUENCE = ("೨೪ kv", "೧ beku", "ಕೃಷಿ", "ಗುಜರಾತ್", "Gujarat")
 
     def setUp(self):
-        self.hist = []
-        self.turns = []
-        for text in self.SEQUENCE:
-            awaiting_before = b.awaiting_from_history(self.hist)
-            known = b.established_from_history(self.hist)
-            followup = b.parse_followup(text, awaiting_before)
-            awaiting = b.outstanding(followup, known)
-            self.turns.append({
-                "text": text, "asked": awaiting_before,
-                "state": b.merged_state(known, followup),
-                "awaiting": awaiting,
-                "followup": followup, "known": known,
-            })
-            self.hist.append({"role": "user", "content": text})
-            self.hist.append({"role": "assistant",
-                              "content": b.flow_marker(awaiting)})
+        self.turns = conversation(*self.SEQUENCE)
 
     def test_delivery_was_being_asked_when_the_place_arrived(self):
         self.assertIn(b.AWAITING_DELIVERY, self.turns[3]["asked"])
@@ -459,6 +469,200 @@ class AwaitingIsReadFromTheTranscript(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════
 # 6 · NO GEOGRAPHY WAS HARDCODED OR FETCHED
 # ══════════════════════════════════════════════════════════════════════════
+
+class ABareAnswerMustActUALLYLookLikeAPlace(unittest.TestCase):
+    """THE REVIEW BLOCKER, closed.
+
+    The first version of this filter rejected acknowledgements, pronouns and
+    other parsed fields, and let through every OTHER kind of non-answer. Asked
+    where to deliver, a customer replying "ತಕ್ಷಣ" (immediately), "call me",
+    "idk", "later" or "sir" had it recorded as the delivery ADDRESS. The
+    monotonicity invariant then made it permanent and the quotation signal
+    declared the requirement set complete with "Delivery to: ತಕ್ಷಣ" — AC-07's
+    confidently-wrong field in one turn, and a regression against production,
+    which simply kept asking.
+
+    "You mad" — the customer's actual words on 2026-09-20, the message that
+    started this whole workstream — was being stored as a delivery address.
+
+    Three of the rejected classes are consulted through tables that already
+    existed (_TIMING_URGENCY, _PRICE_ASK, _ASTHRA_EXIT); only four needed new
+    vocabulary, and those are linguistic categories, not business policy. No
+    gazetteer, transliteration or canonical form was introduced.
+    """
+
+    # Every case the review enumerated, as data so none can be quietly
+    # dropped from the suite.
+    NOT_PLACES = ("ತಕ್ಷಣ", "urgent", "soon", "asap", "call me", "ಕರೆ ಮಾಡಿ",
+                  "later", "ಗೊತ್ತಿಲ್ಲ", "sir", "hello", "idk", "You mad",
+                  "quotation ಬೇಕು")
+
+    def test_none_of_the_reported_non_places_becomes_an_address(self):
+        for word in self.NOT_PLACES:
+            with self.subTest(word=word):
+                self.assertIsNone(delivery(word), word)
+
+    def test_the_whole_reported_list_is_covered(self):
+        """Guards the list above against being trimmed."""
+        self.assertEqual(len(self.NOT_PLACES), 13)
+
+    # ── by semantic class, so a partial fix cannot pass ──────────────────
+    def test_urgency_is_not_a_place(self):
+        """Answers "when", not "where". ತಕ್ಷಣ and urgent come from
+        _TIMING_URGENCY, which already defined them."""
+        for word in ("ತಕ್ಷಣ", "urgent", "immediate", "soon", "asap", "later",
+                     "today", "tomorrow", "ಇವತ್ತು", "ನಾಳೆ"):
+            with self.subTest(word=word):
+                self.assertIsNone(delivery(word), word)
+
+    def test_a_request_to_be_contacted_is_not_a_place(self):
+        for word in ("call me", "call back", "callback", "ಕರೆ ಮಾಡಿ",
+                     "phone me", "whatsapp me", "ಫೋನ್ ಮಾಡಿ"):
+            with self.subTest(word=word):
+                self.assertIsNone(delivery(word), word)
+
+    def test_uncertainty_is_not_a_place(self):
+        """A refusal to answer is not an answer."""
+        for word in ("idk", "dunno", "maybe", "not sure", "no idea",
+                     "dont know", "don't know", "ಗೊತ್ತಿಲ್ಲ", "ತಿಳಿದಿಲ್ಲ"):
+            with self.subTest(word=word):
+                self.assertIsNone(delivery(word), word)
+
+    def test_a_greeting_or_term_of_address_is_not_a_place(self):
+        for word in ("hi", "hello", "hey", "ನಮಸ್ಕಾರ", "sir", "madam", "sar",
+                     "bro", "boss", "anna", "ಸರ್"):
+            with self.subTest(word=word):
+                self.assertIsNone(delivery(word), word)
+
+    def test_a_second_person_statement_is_not_a_place(self):
+        for phrase in ("You mad", "you there", "your office", "u ok"):
+            with self.subTest(phrase=phrase):
+                self.assertIsNone(delivery(phrase), phrase)
+
+    def test_a_price_or_quotation_ask_is_not_a_place(self):
+        for word in ("quotation ಬೇಕು", "rate", "ದರ", "quote", "price list"):
+            with self.subTest(word=word):
+                self.assertIsNone(delivery(word), word)
+
+    def test_another_asthra_service_is_not_a_place(self):
+        """A transformer buyer asking about a website is not naming a site."""
+        for word in ("website", "logo", "ವೆಬ್‌ಸೈಟ್"):
+            with self.subTest(word=word):
+                self.assertIsNone(delivery(word), word)
+
+    def test_the_same_classes_as_BARE_SINGLE_WORDS_are_rejected(self):
+        """Found by a mutation that widened the phrase test and did not fail:
+        "call me" was rejected while a bare "call" became an address. "ಕಳಿಸಿ"
+        (send) was the worst — already a _DELIVERY_MENTION_RE word, so it set
+        delivery_mentioned AND delivery_location to the verb itself."""
+        for word in ("call", "phone", "message", "whatsapp", "contact",
+                     "meet", "visit", "send", "ಕರೆ", "ಫೋನ್", "ಕಳಿಸಿ",
+                     "done", "ready", "fast", "any", "yes sir"):
+            with self.subTest(word=word):
+                self.assertIsNone(delivery(word), word)
+
+    def test_a_delivery_VERB_alone_never_becomes_the_address(self):
+        """ಕಳಿಸಿ means "send". It answers that they want delivery, not where.
+        It may still set delivery_mentioned — that is the correct channel for
+        "they responded but named no place"."""
+        parsed = b.parse_followup("ಕಳಿಸಿ", ASKED_DELIVERY)
+        self.assertIsNone(parsed["delivery_location"])
+        self.assertTrue(parsed["delivery_mentioned"])
+
+    # ── the guard must not eat real places ──────────────────────────────
+    def test_real_places_still_pass_the_new_guard(self):
+        for place in ("ಗುಜರಾತ್", "Mysuru", "ಮೈಸೂರು", "Bengaluru", "ಬೆಂಗಳೂರು",
+                      "Gujarat", "Hubli", "Hubli Dharwad", "Belgaum",
+                      "Gandhinagar", "Tumkur", "ಪುತ್ತೂರು"):
+            with self.subTest(place=place):
+                self.assertEqual(delivery(place), place, place)
+
+    def test_place_names_CONTAINING_a_rejected_word_still_pass(self):
+        """Why the single words are compared against the WHOLE message and
+        not matched as substrings: word-boundary matching on "anna" would
+        reject Anna Nagar, and on "hi" would reject Hirekerur."""
+        for place in ("Anna Nagar", "Hirekerur", "Sirsi", "Hospet",
+                      "Kalaburagi"):
+            with self.subTest(place=place):
+                self.assertEqual(delivery(place), place, place)
+
+    def test_the_strict_shapes_are_untouched_by_the_guard(self):
+        self.assertEqual(b.parse_followup("delivery to Hubli")[
+            "delivery_location"], "Hubli")
+        self.assertEqual(b.parse_followup("ಡೆಲಿವರಿ: ಗುಜರಾತ್")[
+            "delivery_location"], "ಗುಜರಾತ್")
+
+    def test_a_strict_shape_naming_an_urgency_word_is_still_honoured(self):
+        """The guard applies to BARE answers only. If the customer explicitly
+        writes "delivery to <x>", they have told us x is the place."""
+        self.assertEqual(delivery("delivery to soon"), "soon")
+
+    # ── the end-to-end regression the review demanded ───────────────────
+    def test_the_full_chain_no_longer_poisons_the_qualification(self):
+        turns = conversation("100 kva", "2 units", "ಕೃಷಿ", "ತಕ್ಷಣ",
+                             "quotation ಬೇಕು")
+        final = turns[-1]
+        self.assertEqual(final["state"]["capacity_kva"], 100)
+        self.assertEqual(final["state"]["quantity"], 2)
+        self.assertEqual(final["state"]["application"], "AGRICULTURE")
+        self.assertIsNone(final["state"]["delivery_location"])
+        self.assertIn(b.AWAITING_DELIVERY, final["awaiting"])
+
+    def test_the_requirement_set_is_NOT_declared_complete(self):
+        from bic import goals as _g
+        goal = _g.lookup(b.QUOTATION_GOAL_ID)
+        turns = conversation("100 kva", "2 units", "ಕೃಷಿ", "ತಕ್ಷಣ",
+                             "quotation ಬೇಕು")
+        final = turns[-1]
+        self.assertIn(b.AWAITING_DELIVERY,
+                      b.missing_requirements(goal, final["state"]))
+        signal = b.compose_quotation_signal(
+            PHONE, final["followup"], final["text"], final["known"], goal)
+        self.assertIn("Still missing", signal)
+        self.assertNotIn("Every requirement this bot can collect", signal)
+
+    def test_the_owner_is_never_told_the_urgency_word_is_the_address(self):
+        from bic import goals as _g
+        goal = _g.lookup(b.QUOTATION_GOAL_ID)
+        turns = conversation("100 kva", "2 units", "ಕೃಷಿ", "ತಕ್ಷಣ",
+                             "quotation ಬೇಕು")
+        final = turns[-1]
+        signal = b.compose_quotation_signal(
+            PHONE, final["followup"], final["text"], final["known"], goal)
+        self.assertNotIn("Delivery to: ತಕ್ಷಣ", signal)
+        self.assertIn("TBD", signal)
+
+    def test_the_bot_asks_for_the_delivery_place_again(self):
+        """The whole point: a non-answer must re-ask, not be accepted."""
+        turns = conversation("100 kva", "2 units", "ಕೃಷಿ", "ತಕ್ಷಣ")
+        reply = b.compose_followup_reply(turns[-1]["followup"],
+                                         turns[-1]["known"])
+        self.assertIn(b.question_for(b.AWAITING_DELIVERY), reply)
+
+    def test_the_original_production_sequence_is_unaffected(self):
+        """The guard must not undo fix #2's actual win."""
+        turns = conversation("24 kVA", "1 beku", "ಕೃಷಿ", "ಗುಜರಾತ್", "Gujarat")
+        final = turns[-1]["state"]
+        self.assertEqual(final["capacity_kva"], 24)
+        self.assertEqual(final["quantity"], 1)
+        self.assertEqual(final["application"], "AGRICULTURE")
+        self.assertEqual(final["delivery_location"], "ಗುಜರಾತ್")
+        self.assertEqual(b.sku_status(final["capacity_kva"]), b.VERIFY)
+        self.assertEqual(turns[-1]["awaiting"], ())
+
+    def test_no_place_vocabulary_was_introduced_by_the_guard(self):
+        """The fix adds semantic classes, not a gazetteer."""
+        literals = literal_strings()
+        for place in ("Gujarat", "Mysuru", "Bengaluru", "Hubli", "Mysore",
+                      "Bangalore", "ಗುಜರಾತ್", "ಮೈಸೂರು", "Karnataka"):
+            self.assertNotIn(place, literals, f"{place} was hardcoded")
+
+    def test_the_urgency_class_is_read_from_the_EXISTING_table(self):
+        """Not duplicated. If _TIMING_URGENCY changes, this guard follows."""
+        self.assertTrue(any(n == "ತಕ್ಷಣ" for n, _ in b._TIMING_URGENCY))
+        self.assertNotIn("ತಕ್ಷಣ", b._NOT_A_PLACE_EXACT)
+        self.assertNotIn("urgent", b._NOT_A_PLACE_EXACT)
+
 
 class TheWebhookActuallyPassesTheContext(unittest.TestCase):
     """The extraction is correct only if the caller supplies the context.

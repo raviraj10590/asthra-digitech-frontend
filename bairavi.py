@@ -676,7 +676,69 @@ _ACKNOWLEDGEMENTS = ("ok", "okay", "k", "hmm", "thanks", "thank you", "ok sir",
 # transformer goes, and the two are routinely different.
 _NOT_A_BARE_ANSWER = ("from", "ಇಂದ", "ನಾನು", "ನಮ್ಮ", "my", "our", "i", "we",
                       "am", "is", "are", "near", "ಹತ್ತಿರ", "not", "ಅಲ್ಲ",
-                      "why", "what", "how", "ಯಾಕೆ", "ಏನು")
+                      "why", "what", "how", "ಯಾಕೆ", "ಏನು",
+                      # SECOND PERSON, added after review: "You mad" — the
+                      # customer's actual words on 2026-09-20 — was being
+                      # recorded as a delivery address. A sentence about a
+                      # person is not a place, and no place name begins "you".
+                      "you", "your", "u", "ನೀವು", "ನಿಮ್ಮ")
+
+
+# ── SEMANTIC CLASSES THAT ARE NOT A PLACE ─────────────────────────────────
+#
+# THE REVIEW BLOCKER. The first version of this filter rejected only
+# acknowledgements, pronouns and other parsed fields, and let through every
+# OTHER kind of non-answer. Asked where to deliver, a customer replying
+# "ತಕ್ಷಣ" (immediately), "call me", "idk", "later" or "sir" had that recorded
+# as the delivery ADDRESS. The monotonicity invariant then made it permanent,
+# and the quotation signal reported the requirement set complete with
+# "Delivery to: ತಕ್ಷಣ" — AC-07's confidently-wrong field, reached in one turn,
+# and a regression against production, which simply kept asking.
+#
+# REUSED, NOT REINVENTED. Three of these classes are already vocabulary in
+# this module and are consulted through their existing tables:
+#
+#   urgency          _TIMING_URGENCY   ("ತಕ್ಷಣ", "urgent", "immediate",
+#                                       "information", "price list", …)
+#   price/quotation  _PRICE_ASK
+#   another service  _ASTHRA_EXIT
+#   confirmation     _SAME_PLACE
+#
+# Only the four below had no table. They are LINGUISTIC categories — how
+# people decline to answer a question — not business policy, and they
+# introduce no place vocabulary of any kind. There is still no gazetteer, no
+# transliteration and no canonical form anywhere in this module.
+#
+# MATCHED AS A WHOLE MESSAGE, not as a substring, because several are also
+# fragments of real place names: word-boundary matching on "anna" would
+# reject Anna Nagar, and on "hi" would reject Hirekerur. A bare answer is
+# short by construction, so exact comparison is the precise test.
+_NOT_A_PLACE_EXACT = (
+    # urgency the timing table does not carry
+    "soon", "asap", "later", "today", "tomorrow", "quick", "quickly",
+    "ಇವತ್ತು", "ನಾಳೆ",
+    # uncertainty — a refusal to answer, not an answer
+    "idk", "dunno", "maybe", "ಗೊತ್ತಿಲ್ಲ", "ತಿಳಿದಿಲ್ಲ",
+    # greeting and terms of address
+    "hi", "hello", "hey", "ನಮಸ್ಕಾರ", "sir", "madam", "sar", "bro", "boss",
+    "anna", "ಸರ್", "ಅಣ್ಣ",
+    # The SAME four classes as single bare words. Found by a mutation that
+    # widened the phrase test and did not fail: "call me" was rejected while
+    # a bare "call" was stored as an address. "ಕಳಿಸಿ" (send) was the worst of
+    # them — it is already a _DELIVERY_MENTION_RE word, so it set
+    # delivery_mentioned AND delivery_location to the verb itself.
+    "call", "phone", "message", "whatsapp", "contact", "meet", "visit",
+    "send", "ಕರೆ", "ಫೋನ್", "ಕಳಿಸಿ", "ತಲುಪಿಸಿ",
+    "done", "ready", "fast", "any", "ok sir", "yes sir",
+)
+
+# Phrases that cannot occur inside a place name, so these may be matched
+# anywhere in the message rather than only as the whole of it.
+_NOT_A_PLACE_PHRASE = (
+    "call me", "call back", "callback", "phone me", "whatsapp me",
+    "message me", "ಕರೆ ಮಾಡಿ", "ಫೋನ್ ಮಾಡಿ",
+    "dont know", "don't know", "do not know", "not sure", "no idea",
+)
 
 
 def _bare_delivery_answer(text: str):
@@ -718,6 +780,20 @@ def _bare_delivery_answer(text: str):
     if any(needle in low for needle, _ in _APPLICATIONS):
         return None
     if capacity_kva(raw) is not None or _QTY_RE.search(low):
+        return None
+    # URGENCY, from the table that already defines it. "ತಕ್ಷಣ" answers "when
+    # do you need it", which is a different question from "where".
+    if any(_label_matches(low, needle) for needle, _ in _TIMING_URGENCY):
+        return None
+    # Another Asthra service — a transformer buyer asking about a website is
+    # not naming a delivery site.
+    if any(_label_matches(low, w) for w in _ASTHRA_EXIT):
+        return None
+    # The four classes with no existing table: a whole-message comparison for
+    # the single words, and an anywhere match for the phrases.
+    if low in _NOT_A_PLACE_EXACT:
+        return None
+    if any(p in low for p in _NOT_A_PLACE_PHRASE):
         return None
     # Must contain an actual letter — a number or emoji is not a place.
     if not re.search(r"[^\W\d_]", raw):
