@@ -709,8 +709,18 @@ _SAME_PLACE = ("same place", "same address", "same location", "same",
 PRICE_REQUEST = "PRICE_REQUEST"
 QUOTATION_REQUEST = "QUOTATION_REQUEST"
 
+# WHAT WAS MISSING. On 2026-09-21 a customer asked for the "Amount" and it
+# was not read as a price question at all. "ಎಷ್ಟು" was already here, but it
+# does not cover "ಎಷ್ಟಾಗುತ್ತೆ" — the two differ after "ಟ", so the substring
+# test never matched the form people actually type.
+#
+# DELIBERATELY NOT ADDED: a bare "ಎಷ್ಟು" is already here and already
+# ambiguous ("ಎಷ್ಟು units ಬೇಕು?" is the bot's own question), so no further
+# bare quantity word joins it. Every term below can only be about money.
 _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
-                "eshtu", "estu", "ಎಷ್ಟು")
+                "eshtu", "estu", "ಎಷ್ಟು",
+                "amount", "how much", "howmuch", "kitna", "kitne",
+                "ಎಷ್ಟಾಗುತ್ತೆ", "ಎಷ್ಟಾಗುತ್ತದೆ", "ಎಷ್ಟು ರೂ", "ಮೊತ್ತ")
 # Already the bot's own words for this: the follow-up button is titled
 # "📋 ಕೋಟೇಶನ್" and its id is "quotation".
 _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")

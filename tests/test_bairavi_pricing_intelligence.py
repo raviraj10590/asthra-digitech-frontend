@@ -679,3 +679,86 @@ class PhaseBIsAbsent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# THE WORDS CUSTOMERS ACTUALLY USE FOR MONEY  (added 2026-09-22)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TheVocabularyCoversHowPeopleAsk(unittest.TestCase):
+    """On 2026-09-21 a customer asked for the "Amount" and it was not read as
+    a price question at all.
+
+    "ಎಷ್ಟು" was already in the table but does not cover "ಎಷ್ಟಾಗುತ್ತೆ": the two
+    diverge after "ಟ", so the substring test never matched the form people
+    actually type.
+    """
+
+    def test_amount_is_a_price_question(self):
+        for text in ("Amount?", "what is the amount", "amount sir",
+                     "ಮೊತ್ತ ಎಷ್ಟು"):
+            with self.subTest(text=text):
+                self.assertTrue(b.parse_followup(text)["asked_price"], text)
+
+    def test_how_much_is_a_price_question(self):
+        for text in ("how much", "How much sir?", "howmuch"):
+            with self.subTest(text=text):
+                self.assertTrue(b.parse_followup(text)["asked_price"], text)
+
+    def test_hindi_kitna_is_a_price_question(self):
+        for text in ("kitna hai", "kitne rupees"):
+            with self.subTest(text=text):
+                self.assertTrue(b.parse_followup(text)["asked_price"], text)
+
+    def test_the_kannada_forms_are_price_questions(self):
+        for text in ("ಎಷ್ಟಾಗುತ್ತೆ?", "ಎಷ್ಟಾಗುತ್ತದೆ", "ಎಷ್ಟು ರೂ ಆಗುತ್ತದೆ"):
+            with self.subTest(text=text):
+                self.assertTrue(b.parse_followup(text)["asked_price"], text)
+
+    def test_these_are_a_price_ask_not_a_quotation_request(self):
+        """A price question wants a number; a quotation request starts a
+        document. The distinction drives the owner signal, so the new terms
+        must land on the right side of it."""
+        for text in ("Amount?", "how much", "ಎಷ್ಟಾಗುತ್ತೆ"):
+            with self.subTest(text=text):
+                self.assertEqual(b.commercial_intent(text), b.PRICE_REQUEST)
+
+    def test_no_price_figure_is_ever_produced(self):
+        """The reason the vocabulary can be widened safely: recognising the
+        question changes only which answer is given, and that answer still
+        contains no number."""
+        reply = b.compose_followup_reply(b.parse_followup("Amount?"), {})
+        self.assertNotIn("₹", reply)
+        for token in ("68,244", "68244"):
+            self.assertNotIn(token, reply)
+
+    def test_a_qualification_answer_is_not_a_price_question(self):
+        for text in ("agriculture", "kushtagi", "2 units", "Kadaba near tumkur",
+                     "ತುಮಕೂರು ಜಿಲ್ಲೆ ಗುಬ್ಬಿ ತಾಲ್ಲೂಕು", "Mount Road Chennai"):
+            with self.subTest(text=text):
+                self.assertFalse(b.parse_followup(text)["asked_price"], text)
+
+    def test_an_address_still_reads_after_the_vocabulary_grew(self):
+        """A price word anywhere in the text disqualifies it as an address, so
+        widening the table could have cost real addresses. It did not."""
+        asked = (b.AWAITING_DELIVERY,)
+        for text in ("kushtagi", "Kadaba near tumkur", "Mount Road Chennai",
+                     "ತುಮಕೂರು ಜಿಲ್ಲೆ ಗುಬ್ಬಿ ತಾಲ್ಲೂಕು"):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    b.parse_followup(text, awaiting=asked)["delivery_location"],
+                    text)
+
+    def test_the_substring_collision_is_known_and_accepted(self):
+        """DOCUMENTED, not desirable. _PRICE_ASK is matched as a substring on
+        purpose -- that is what makes "pricing" match "price" -- so a place
+        name containing one of these words reads as a price question. No
+        Indian place name is known to collide, and missing every real
+        "Amount?" is the worse trade. Recorded here so the behaviour is not
+        rediscovered as a surprise."""
+        self.assertTrue(b.parse_followup("Amount Road")["asked_price"])
+        # The upside of the same rule: plurals and inflections come free.
+        self.assertTrue(b.parse_followup("prices")["asked_price"])
+        self.assertTrue(b.parse_followup("rates")["asked_price"])
+        # And the limit of it: "pricing" does NOT contain "price".
+        self.assertFalse(b.parse_followup("pricing")["asked_price"])
