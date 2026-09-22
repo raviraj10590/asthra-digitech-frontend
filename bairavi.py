@@ -822,6 +822,136 @@ def approval_answer_kn(asked) -> str:
     return "\n".join(parts)
 
 
+# ── QUESTIONS THIS LAYER CAN ANSWER ──────────────────────────────────────
+#
+# THE COMPLAINT, 2026-09-22, from the owner after testing the bot as a
+# customer: "namma brain saakstu buddivantike irodu yaake simple question gu
+# answer madoke oddadtide?" — the Brain has plenty of intelligence, why does
+# it struggle to answer a simple question?
+#
+# The cause is in api/webhook.py: once in_transformer_flow() is true, every
+# message goes to this module's deterministic composer and the AI is never
+# reached. That gate exists for a good reason — the AI answered fifteen of
+# sixteen transformer buyers with Asthra's digital-marketing menu, and there
+# is no authoritative Bairavi price or specification source — so the fix is
+# NOT to hand the flow to the model. An intelligent answer with no evidence
+# behind it is exactly the ₹68,244 failure this module was built to prevent.
+#
+# The fix is to give the flow real facts. Everything below is either already
+# approved customer-facing copy (the opening reply says who and where we are)
+# or owner-stated evidence, and each answer is generated from one table so
+# the bot can never say more than has been established.
+#
+# A question with no evidence behind it is answered honestly — an engineer
+# will reply — AND flagged to the owner, instead of receiving the receipt
+# that ignored it in production.
+
+QUESTION_NAME = "their_name"
+QUESTION_WHO = "who_we_are"
+QUESTION_RANGE = "what_we_make"
+QUESTION_DELIVERY_AREA = "delivery_area"
+QUESTION_UNANSWERED = "unanswered"
+
+# DELIVERY REACH — owner-stated, 2026-09-20, in the owner's own words:
+# "sadyakke delivery irodu mescom limit in 2 month etaire karnataka delivery
+# ide futute entire india delivey plan ide" — delivery is currently limited to
+# the MESCOM area; the whole of Karnataka in two months; all India planned.
+#
+# THE MONTH COUNT IS DELIBERATELY NOT QUOTED TO THE CUSTOMER. "Two months"
+# was true on the day it was said and becomes a false promise the moment it
+# is still being sent a year later, with nothing in the code to notice. The
+# serving area today does not decay, so that is what the customer is told,
+# and a specific place is confirmed by a human. The owner's exact words and
+# date stay here.
+_DELIVERY_NOW_KN = ("ಈಗ ನಾವು *MESCOM* ವ್ಯಾಪ್ತಿಯಲ್ಲಿ ಡೆಲಿವರಿ ಮಾಡುತ್ತಿದ್ದೇವೆ. "
+                    "ಕರ್ನಾಟಕದ ಉಳಿದ ಭಾಗಗಳಿಗೆ ವಿಸ್ತರಿಸುತ್ತಿದ್ದೇವೆ.")
+
+_ASK_NAME = ("my name", "ನನ್ನ ಹೆಸರು", "who am i", "ನಾನು ಯಾರು",
+             "nanna hesaru", "hesaru gotta")
+_ASK_WHO = ("who are you", "who is this", "your company", "about your company",
+            "about you", "company details", "where are you", "your address",
+            "your factory", "ನಿಮ್ಮ ಕಂಪನಿ", "ನೀವು ಯಾರು", "ಎಲ್ಲಿದೆ",
+            "ನಿಮ್ಮ ವಿಳಾಸ", "ಫ್ಯಾಕ್ಟರಿ")
+_ASK_RANGE = ("what do you make", "what do you manufacture", "which models",
+              "what models", "your range", "available sizes", "which kva",
+              "what kva", "which capacity", "your products",
+              "ಯಾವ ಮಾಡೆಲ್", "ನಿಮ್ಮ range", "ಎಷ್ಟು kva ಇದೆ", "ಉತ್ಪನ್ನ")
+_ASK_DELIVERY_AREA = ("do you deliver", "can you deliver", "deliver to",
+                      "delivery available", "do you supply", "supply to",
+                      "outside karnataka", "other state", "all india",
+                      "ಡೆಲಿವರಿ ಇದೆಯಾ", "ಡೆಲಿವರಿ ಮಾಡುತ್ತೀರಾ", "ಕಳಿಸುತ್ತೀರಾ",
+                      "ಸಪ್ಲೈ ಮಾಡುತ್ತೀರಾ")
+
+
+def customer_question(text: str):
+    """Which answerable question this message asks, or None.
+
+    QUESTION_UNANSWERED means it IS a question and none of the evidenced
+    answers fit — which is a different outcome from None, and the one the
+    owner needs to see.
+    """
+    low = (text or "").lower()
+    for tag, vocabulary in ((QUESTION_NAME, _ASK_NAME),
+                            (QUESTION_DELIVERY_AREA, _ASK_DELIVERY_AREA),
+                            (QUESTION_RANGE, _ASK_RANGE),
+                            (QUESTION_WHO, _ASK_WHO)):
+        if any(w in low for w in vocabulary):
+            return tag
+    # A question mark is the only general signal available. Kannada questions
+    # often carry no punctuation at all, so this under-detects on purpose:
+    # a missed question falls through to the reply it would have got anyway.
+    if "?" in (text or ""):
+        return QUESTION_UNANSWERED
+    return None
+
+
+def _range_line_kn() -> str:
+    """Built from the catalogue so the sentence cannot drift from the code."""
+    offered = " / ".join(f"{k} kVA" for k in CATALOGUE_KVA)
+    line = f"ನಮ್ಮ standard range: *{offered}*."
+    if PLANNED_KVA:
+        planned = " / ".join(f"{k} kVA" for k in PLANNED_KVA)
+        line += f" ({planned} ಯೋಜನೆಯಲ್ಲಿದೆ.)"
+    return line
+
+
+def answer_question_kn(tag, known: dict = None) -> str:
+    """The evidenced answer, or an honest referral. Never an invented fact."""
+    known = known or {}
+    if tag == QUESTION_NAME:
+        name = known.get("name")
+        if name:
+            return f"ಹೌದು 🙏 ನಿಮ್ಮ ಹೆಸರು *{name}*."
+        return ("ಕ್ಷಮಿಸಿ — ನಿಮ್ಮ ಹೆಸರು ಇನ್ನೂ ನಮ್ಮ ಬಳಿ ಇಲ್ಲ. "
+                "ತಿಳಿಸಿದರೆ ದಾಖಲಿಸುತ್ತೇವೆ.")
+    if tag == QUESTION_WHO:
+        return ("*Bairavi Trans Solutions* — oil-immersed 3-phase "
+                "distribution transformer ತಯಾರಕರು, Kadaba, ದಕ್ಷಿಣ ಕನ್ನಡ.\n"
+                + _range_line_kn())
+    if tag == QUESTION_RANGE:
+        return _range_line_kn()
+    if tag == QUESTION_DELIVERY_AREA:
+        return (_DELIVERY_NOW_KN + " ನಿಮ್ಮ ಸ್ಥಳಕ್ಕೆ ಸಾಧ್ಯವೇ ಎಂದು ನಮ್ಮ "
+                "engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
+    return ("ಈ ಪ್ರಶ್ನೆಗೆ ನಮ್ಮ engineer ಖಚಿತವಾಗಿ ಉತ್ತರಿಸುತ್ತಾರೆ — "
+            "ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ಅವರಿಗೆ ತಲುಪಿಸಿದ್ದೇವೆ 🙏")
+
+
+def unanswered_question(followup: dict) -> bool:
+    """Did this message ask something the bot could not answer?
+
+    ONE PREDICATE, TWO READERS: the reply decides whether to add a referral
+    and the owner alert decides whether to raise a flag, and they must agree.
+    They did not at first — "rate eshtu?" carries a question mark, so it was
+    tagged unanswered and the owner was told the question went unanswered,
+    while the reply had in fact answered it with the price referral.
+    """
+    if followup.get("customer_question") != QUESTION_UNANSWERED:
+        return False
+    return (followup.get("discom_approval_ask") is None
+            and not followup.get("asked_price"))
+
+
 def commercial_intent(text: str):
     """QUOTATION_REQUEST, PRICE_REQUEST, or None.
 
@@ -1235,7 +1365,10 @@ def parse_followup(text: str, awaiting=()) -> dict:
             "commercial_intent": commercial_intent(text),
             # None when no approval question was asked, which leaves every
             # reply exactly as it was.
-            "discom_approval_ask": discom_approval_ask(text)}
+            "discom_approval_ask": discom_approval_ask(text),
+            # None for an ordinary qualification answer, which is the common
+            # case and leaves every reply unchanged.
+            "customer_question": customer_question(text)}
 
 
 # ── Reply composition ─────────────────────────────────────────────────────
@@ -1344,9 +1477,13 @@ def compose_reply(parsed: dict) -> str:
 # established fact: a price asked four turns ago must not make every later
 # reply a price reply. Everything here, by contrast, stays true until the
 # customer says otherwise.
+# "name" joined this list so the customer's own name — which the ad form
+# already carries and `parse` already reads — survives past the first turn.
+# It was being extracted and then dropped, which is why the bot could not
+# answer "ನನ್ನ ಹೆಸರು ಗೊತ್ತಾ?" with something it already knew.
 _PERSISTENT_FIELDS = ("capacity_kva", "quantity", "application", "location",
                       "delivery_location", "delivery_same",
-                      "delivery_mentioned")
+                      "delivery_mentioned", "name")
 
 
 def merged_state(known: dict, turn: dict = None) -> dict:
@@ -1765,6 +1902,16 @@ def compose_followup_reply(followup: dict, known: dict = None,
         lines.append("\nDISCOM approval ಬಗ್ಗೆ:\n"
                      + approval_answer_kn(_approval))
 
+    # OTHER QUESTIONS WE HAVE EVIDENCE FOR. Skipped when the message is a
+    # price or approval question, because those have their own answers above
+    # and a customer asking one thing should not be answered twice.
+    _question = followup.get("customer_question")
+    if _question == QUESTION_UNANSWERED:
+        if unanswered_question(followup):
+            lines.append("\n" + answer_question_kn(_question, known))
+    elif _question is not None:
+        lines.append("\n" + answer_question_kn(_question, known))
+
     _intent = followup.get("commercial_intent")
     if followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
@@ -1889,6 +2036,11 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
         # "no" in almost every conversation. A buyer who asks this is
         # checking whether the transformer can be energised on their
         # network, and the owner should see it.
+        # A QUESTION THE BOT COULD NOT ANSWER. Printed only then, because
+        # that is the line a human has to act on: the customer asked
+        # something real and got a referral, not an answer.
+        + ("Asked a question we could not answer — please read their words\n"
+           if unanswered_question(followup) else "")
         + (("Asked about DISCOM approval: "
             + (", ".join(d.upper() for d in followup["discom_approval_ask"])
                or "not named")
