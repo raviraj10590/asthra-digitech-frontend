@@ -194,6 +194,49 @@ class TheTimeLogicStaysOutOfThePureModule(unittest.TestCase):
                       inspect.getsource(w.bairavi_awaiting))
 
 
+class TheTimestampNeverReachesAProvider(unittest.TestCase):
+    """The regression that adding created_at nearly shipped.
+
+    Both AI paths pour transcript rows straight into the message list, and
+    OpenAI rejects an unrecognised message property. The client reply would
+    have 400'd and fallen through to a fallback provider or the apology text
+    -- a silent downgrade of every AI answer, caused by a field added for an
+    unrelated reason.
+    """
+
+    def test_only_role_and_content_survive(self):
+        rows = [{"role": "user", "content": "hi", "created_at": "2026-09-22"},
+                {"role": "assistant", "content": "hello", "created_at": "x"}]
+        out = w._as_ai_messages(rows)
+        self.assertEqual(out, [{"role": "user", "content": "hi"},
+                               {"role": "assistant", "content": "hello"}])
+
+    def test_a_row_missing_role_or_content_is_dropped(self):
+        rows = [{"role": "user", "content": ""}, {"role": None, "content": "x"},
+                {"created_at": "x"}, {}]
+        self.assertEqual(w._as_ai_messages(rows), [])
+
+    def test_empty_input_is_safe(self):
+        for rows in ([], None):
+            with self.subTest(rows=rows):
+                self.assertEqual(w._as_ai_messages(rows), [])
+
+    def test_both_ai_paths_use_it(self):
+        """Asserted at the call sites: a path that forgets it sends the extra
+        key to the provider, and nothing else would notice."""
+        import inspect
+        self.assertIn("_as_ai_messages", inspect.getsource(w.generate_reply))
+        self.assertIn("_as_ai_messages",
+                      inspect.getsource(w.generate_owner_reply))
+
+    def test_the_gemini_payload_also_ignores_extra_keys(self):
+        """Belt and braces: the fallback provider's converter reads only role
+        and content, so a missed strip cannot leak through it either."""
+        payload = w._to_gemini_payload(
+            [{"role": "user", "content": "hi", "created_at": "x"}])
+        self.assertNotIn("created_at", str(payload))
+
+
 class TheHistoryCarriesTimestamps(unittest.TestCase):
 
     def test_the_context_builder_keeps_created_at(self):

@@ -1655,6 +1655,26 @@ def gemini_one_liner(image_bytes: bytes, mime: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # AI REPLY GENERATION
 # ══════════════════════════════════════════════════════════════════════════════
+def _as_ai_messages(rows) -> list:
+    """Transcript rows reduced to what a provider will accept.
+
+    ctx["history"] rows carry a created_at, which the awaiting-freshness rule
+    needs and which OpenAI rejects as an unrecognised message property. Both
+    AI paths pour history straight into the message list, so without this the
+    client reply would 400 and fall through to a fallback provider or the
+    apology text — a regression introduced by adding the timestamp, caught
+    before it shipped.
+
+    Only role and content survive, and a row missing either is dropped.
+    """
+    out = []
+    for row in rows or []:
+        role, content = row.get("role"), row.get("content")
+        if role and content:
+            out.append({"role": role, "content": content})
+    return out
+
+
 def generate_reply(phone: str, user_message: str, history: list = None, memory: dict = None) -> str:
     if history is None:  # rare path (unknown button) — fetch on demand
         history = fetch_context(phone)["history"]
@@ -1680,7 +1700,7 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
     # When memory holds a summary of older turns, only the most recent raw turns
     # are needed — the summary carries the rest, cutting tokens on long chats.
     keep = MEMORY_HISTORY_COMPRESS_AT if (memory and (memory.get("summary") or "").strip()) else 10
-    messages.extend(history[-keep:])
+    messages.extend(_as_ai_messages(history[-keep:]))
     messages.append({"role": "user", "content": user_message})
 
     return _generate_ai_reply(messages,
@@ -4558,7 +4578,7 @@ def generate_owner_reply(sender: str, role: str, label: str, user_text: str, his
     if snap:
         messages.append({"role": "system", "content": snap})
     messages.append({"role": "system", "content": OWNER_TURN_INSTRUCTIONS})
-    messages += recent
+    messages += _as_ai_messages(recent)
     messages.append({"role": "user", "content": user_text})
 
     # OWNER_TURN_MAX_TOKENS, not the provider default: this call returns a
