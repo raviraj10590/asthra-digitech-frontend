@@ -318,3 +318,206 @@ class TheGuardRunsBeforeAnythingIsSent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# THE OWNER'S SECOND TEST THREAD, 2026-09-22 23:56 onward  (first real
+# traffic on the model path)
+# ══════════════════════════════════════════════════════════════════════════
+
+class APhoneNumberIsNotAQuantity(unittest.TestCase):
+    """The worst of that thread. The owner sent their own number and the bot
+    replied "✅ ದಾಖಲಿಸಿದ್ದೇವೆ: *888 units*" -- the pattern takes at most three
+    digits and nothing stopped it biting the front off a ten-digit number.
+
+    Compounding: the model had just ASKED for a mobile number, while replying
+    to that very number. Rule 9 of the brief now forbids that ask.
+    """
+
+    def test_the_owners_own_number(self):
+        self.assertIsNone(b.parse_followup("8884448141")["quantity"])
+
+    def test_any_long_digit_run(self):
+        for text in ("9632934468", "+91 88844 48141", "+919632934468",
+                     "8217842452", "919964979374"):
+            with self.subTest(text=text):
+                self.assertIsNone(b.parse_followup(text)["quantity"], text)
+
+    def test_a_figure_after_a_plus_is_not_a_count(self):
+        self.assertIsNone(b.parse_followup("+91")["quantity"])
+
+    def test_a_real_quantity_still_reads(self):
+        for text, want in (("2 units", 2), ("888", 888), ("3", 3),
+                           ("100kv 2", 2), ("5 nos", 5)):
+            with self.subTest(text=text):
+                self.assertEqual(b.parse_followup(text)["quantity"], want)
+
+
+class ASentenceIsNotAnAddress(unittest.TestCase):
+    """Also from that thread: "Nimma company estu varshadinda ide" (how many
+    years has your company existed) was recorded as the delivery address.
+
+    Two causes, both fixed. The Latin spellings of pronouns and question
+    words that already existed in Kannada script were missing from
+    _NOT_A_BARE_ANSWER; and removing the length caps entirely left nothing to
+    stop a long sentence with no recognised word in it.
+    """
+
+    def test_the_three_production_sentences(self):
+        for text in ("Nanna hesaru gotta",
+                     "Nim boss jote matadbekuttu",
+                     "Nimma company estu varshadinda ide"):
+            with self.subTest(text=text):
+                self.assertIsNone(
+                    b.parse_followup(text, awaiting=ASKED)["delivery_location"],
+                    text)
+
+    def test_a_long_sentence_with_no_recognised_word_is_refused(self):
+        self.assertIsNone(b.parse_followup(
+            "100 hp pump ide yaava transformer hakbeku",
+            awaiting=ASKED)["delivery_location"])
+
+    def test_a_long_answer_with_an_address_marker_is_kept(self):
+        for text in ("Tumkur district Gubbi taluk Chelur hobli",
+                     "ತುಮಕೂರು ಜಿಲ್ಲೆ ಗುಬ್ಬಿ ತಾಲ್ಲೂಕು ಚೇಳೂರು ಹೋಬಳಿ ಕುಲುಮೆಗುಡ್ಲು ಗ್ರಾಮ"):
+            with self.subTest(text=text):
+                self.assertIsNotNone(
+                    b.parse_followup(text, awaiting=ASKED)["delivery_location"],
+                    text)
+
+    def test_the_shorter_real_addresses_are_untouched(self):
+        for text in ("Kadaba", "ಬೆಂಗಳೂರು", "Kadaba near tumkur",
+                     "Kadur (T) Turuvanahalli", "1st main road Rajajinagar",
+                     "Chelur inda 5 km Kulumegudlu",
+                     "Hubli Dharwad Bijapur Bidar Gadag"):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    b.parse_followup(text, awaiting=ASKED)["delivery_location"],
+                    text)
+
+    def test_the_long_answer_net_ISOLATED(self):
+        """Long, no address marker, and no word from any other list.
+
+        Mutation testing showed the three production sentences are each
+        caught TWICE -- once by the Latin pronoun/question words and once by
+        this net -- so removing either defence alone changed nothing. That
+        overlap is worth having, but it means the mechanisms have to be
+        tested apart from each other. This sentence is caught by the net and
+        by nothing else.
+        """
+        text = "please arrange good quality transformer soon for the farm"
+        self.assertGreater(len(text.split()), b._LONG_ANSWER_WORDS)
+        self.assertFalse(b._has_address_marker(text.lower()))
+        self.assertIsNone(
+            b.parse_followup(text, awaiting=ASKED)["delivery_location"])
+
+    def test_the_latin_pronouns_ISOLATED(self):
+        """Short enough that the long-answer net never runs, and carrying a
+        pronoun as its only listed word."""
+        for text in ("Nanna address", "Nimma address", "Naanu bartini",
+                     "Namma jaga", "Neevu heli"):
+            with self.subTest(text=text):
+                self.assertLessEqual(len(text.split()), b._LONG_ANSWER_WORDS)
+                self.assertIsNone(
+                    b.parse_followup(text, awaiting=ASKED)["delivery_location"],
+                    text)
+
+    def test_the_latin_question_words_ISOLATED(self):
+        """Same, for a question word."""
+        for text in ("Yaava transformer", "Estu aguttade"):
+            with self.subTest(text=text):
+                self.assertLessEqual(len(text.split()), b._LONG_ANSWER_WORDS)
+                self.assertIsNone(
+                    b.parse_followup(text, awaiting=ASKED)["delivery_location"],
+                    text)
+
+    def test_the_address_markers_are_structure_not_places(self):
+        """No gazetteer: the markers name the PARTS of an address."""
+        for place in ("tumkur", "bengaluru", "kadaba", "mysuru", "hubli",
+                      "ತುಮಕೂರು", "ಬೆಂಗಳೂರು", "ಕಡಬ"):
+            with self.subTest(place=place):
+                self.assertNotIn(place, b._ADDRESS_MARKER)
+
+    def test_a_marker_must_be_a_whole_word(self):
+        """"main" must not be found inside "remaining"."""
+        self.assertFalse(b._has_address_marker("remaining quantity pending"))
+        self.assertTrue(b._has_address_marker("1st main road"))
+
+
+class TheBriefStatesWhatWeAlreadyKnow(unittest.TestCase):
+
+    def test_it_forbids_asking_for_the_phone_number(self):
+        """The customer is speaking FROM the number. Asking for it produced
+        the 888-units defect."""
+        brief = b.model_brief_kn()
+        self.assertIn("ಫೋನ್ ನಂಬರ್ ಕೇಳಬೇಡಿ", brief)
+
+    def test_it_lists_the_established_facts(self):
+        brief = b.model_brief_kn({"name": "Raviraj", "capacity_kva": 25,
+                                  "application": "AGRICULTURE",
+                                  "location": "Kadaba"})
+        for value in ("Raviraj", "25", "AGRICULTURE", "Kadaba"):
+            with self.subTest(value=value):
+                self.assertIn(value, brief)
+
+    def test_an_unset_field_is_not_offered_as_a_blank(self):
+        brief = b.model_brief_kn({"name": "Raviraj"})
+        self.assertIn("Raviraj", brief)
+        self.assertNotIn("TBD", brief)
+        self.assertNotIn("None", brief)
+
+    def test_nothing_known_says_so_plainly(self):
+        self.assertIn("ಇನ್ನೂ ಏನೂ ತಿಳಿದಿಲ್ಲ", b.model_brief_kn())
+
+    def test_it_is_still_callable_with_no_argument(self):
+        """Additive: the signature change must not break any caller."""
+        self.assertTrue(b.model_brief_kn())
+
+    def test_the_known_facts_do_not_smuggle_a_forbidden_claim(self):
+        """A delivery_location is free text the customer wrote, so it reaches
+        the brief -- it must not be able to carry a price into it."""
+        brief = b.model_brief_kn({"delivery_location": "Kadaba"})
+        self.assertIsNone(b._REPLY_MONEY_RE.search(brief))
+
+
+class TheModelSeesConversationNotMarkers(unittest.TestCase):
+    """Every Bairavi assistant row in the transcript is a marker, not the
+    reply the customer received. Passing those as the model's own past turns
+    gave it internal tokens instead of memory: on 2026-09-22 it answered "I
+    do not know your name" three turns after the customer gave it.
+    """
+
+    def _messages_sent(self, history):
+        followup = parse("who are you?")
+        captured = {}
+
+        def fake(messages, apology, max_tokens=None):
+            captured["messages"] = messages
+            return "We are Bairavi Trans Solutions, Kadaba."
+
+        with mock.patch.object(w, "_generate_ai_reply", side_effect=fake):
+            w.bairavi_model_reply("919000000000", "who are you?", history,
+                                  followup, KNOWN)
+        return captured.get("messages", [])
+
+    def test_marker_rows_are_not_sent(self):
+        history = [{"role": "user", "content": "Raviraj"},
+                   {"role": "assistant",
+                    "content": b.flow_marker((b.AWAITING_DELIVERY,))}]
+        sent = self._messages_sent(history)
+        self.assertNotIn(b.FLOW_MARKER, str(sent))
+
+    def test_the_customers_own_words_are_kept(self):
+        history = [{"role": "user", "content": "Raviraj"},
+                   {"role": "assistant",
+                    "content": b.flow_marker((b.AWAITING_DELIVERY,))}]
+        self.assertIn("Raviraj", str(self._messages_sent(history)))
+
+    def test_the_brief_is_the_first_message(self):
+        sent = self._messages_sent([])
+        self.assertEqual(sent[0]["role"], "system")
+        self.assertIn("Bairavi", sent[0]["content"])
+
+    def test_the_brief_carries_the_known_state(self):
+        sent = self._messages_sent([])
+        self.assertIn("kushtagi", sent[0]["content"])

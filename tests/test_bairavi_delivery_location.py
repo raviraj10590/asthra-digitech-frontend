@@ -317,13 +317,24 @@ class ContextDecidesWhetherItIsAnAnswer(unittest.TestCase):
         self.assertEqual(delivery(text), text.strip())
         self.assertIn("ಜಿಲ್ಲೆ", delivery(text))
 
-    def test_the_length_limits_are_gone(self):
-        """They are not raised, renamed or bypassed -- they are removed. A
-        higher ceiling only moves the same failure to the next character."""
+    def test_the_flat_length_caps_are_gone(self):
+        """The old caps rejected every long answer, address or not, and are
+        removed. Length survives only as a net: a LONG answer must carry a
+        word that structures an address, because removing length entirely let
+        "Nimma company estu varshadinda ide" be stored as one.
+
+        Updated 2026-09-22: an earlier version of this test asserted that
+        length was not consulted at all, which stopped being true the day a
+        sentence got through.
+        """
         self.assertFalse(hasattr(b, "_BARE_ANSWER_MAX_CHARS"))
         self.assertFalse(hasattr(b, "_BARE_ANSWER_MAX_WORDS"))
-        import inspect
-        self.assertNotIn("len(raw)", inspect.getsource(b._is_place_like))
+        self.assertGreater(b._LONG_ANSWER_WORDS, 4)
+        self.assertGreater(b._LONG_ANSWER_CHARS, 40)
+        # A long answer WITH a marker is kept; without one it is refused.
+        self.assertTrue(delivery("Tumkur district Gubbi taluk Chelur hobli"))
+        self.assertIsNone(delivery(
+            "100 hp pump ide yaava transformer hakbeku"))
 
     def test_digits_or_emoji_alone_are_not_an_address(self):
         for word in ("123", "👍", "⛽", "..."):

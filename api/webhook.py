@@ -1671,8 +1671,17 @@ def bairavi_model_reply(phone: str, user_text: str, history: list,
     """
     if not bairavi.should_ask_model(followup, known):
         return ""
-    messages = ([{"role": "system", "content": bairavi.model_brief_kn()}]
-                + _as_ai_messages((history or [])[-8:])
+    # FLOW MARKERS ARE NOT CONVERSATION. Every Bairavi assistant row in the
+    # transcript is a marker like "[Bairavi transformer reply] awaiting=...",
+    # not the reply the customer actually received. Passing those as the
+    # model's own past turns gave it no memory of the conversation and a
+    # stream of internal tokens instead: on 2026-09-22 it answered "I do not
+    # know your name" three turns after the customer had given it.
+    _seen = [m for m in (history or [])
+             if bairavi.FLOW_MARKER not in (m.get("content") or "")]
+    messages = ([{"role": "system",
+                  "content": bairavi.model_brief_kn(known)}]
+                + _as_ai_messages(_seen[-8:])
                 + [{"role": "user", "content": user_text}])
     raw = _generate_ai_reply(messages, "",
                              max_tokens=BAIRAVI_MODEL_MAX_TOKENS)

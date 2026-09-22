@@ -586,6 +586,16 @@ def _read_quantity(low: str, cap=None):
         # matched nothing, leaving "st". An ordinal, a house number or a
         # model number is written without a space; a count is not.
         digits_end = m.start() + len(m.group("n"))
+        # PART OF A LONGER RUN OF DIGITS. The owner sent their own phone
+        # number, 8884448141, and it was recorded as "888 units" — the
+        # pattern takes at most three digits and there was nothing to stop
+        # it biting the front off a ten-digit number. A count is a whole
+        # number, not the first three digits of one.
+        if low[digits_end:digits_end + 1].isdigit():
+            continue
+        before = low[m.start() - 1] if m.start() else ""
+        if before == "+" or before.isdigit():
+            continue
         if not stated_unit and low[digits_end:digits_end + 1].isalpha():
             continue
         if not stated_unit:
@@ -1089,9 +1099,16 @@ def reply_violates_evidence(text: str):
     return None
 
 
-def model_brief_kn() -> str:
+def model_brief_kn(known: dict = None) -> str:
     """The system prompt for a Bairavi reply, built from the same tables the
-    deterministic answers use, so the two cannot disagree."""
+    deterministic answers use, so the two cannot disagree.
+
+    `known` is optional and additive. With it, the brief also states what
+    this conversation has ALREADY established — which stops the model asking
+    for things we hold. On 2026-09-22 it asked the owner for a name and a
+    mobile number while replying to that very mobile number, and the number
+    they sent back was then read as a quantity of 888 units.
+    """
     offered = " / ".join(f"{k} kVA" for k in CATALOGUE_KVA)
     planned = " / ".join(f"{k} kVA" for k in PLANNED_KVA)
     approved = ", ".join(d.upper() for d, v in _DISCOM_APPROVAL_STATED.items()
@@ -1116,8 +1133,33 @@ def model_brief_kn() -> str:
         "6. ಗೊತ್ತಿಲ್ಲದಿದ್ದರೆ: 'ನಮ್ಮ engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ' ಎಂದು ಹೇಳಿ.\n"
         "7. ಗ್ರಾಹಕ ಬರೆದ ಭಾಷೆಯಲ್ಲೇ ಉತ್ತರಿಸಿ. 2–4 ಸಾಲು, WhatsApp ಶೈಲಿ.\n"
         "8. Asthra DigiTech ನ ಸೇವೆಗಳ ಬಗ್ಗೆ ಮಾತನಾಡಬೇಡಿ — ಇದು "
-        "transformer ವಿಚಾರಣೆ."
+        "transformer ವಿಚಾರಣೆ.\n"
+        # THE NUMBER IS THE CONVERSATION. Asking a WhatsApp customer for
+        # their mobile number is asking for the thing they are speaking
+        # from, and on 2026-09-22 the reply to that ask was read as a
+        # quantity of 888 units.
+        "9. ಗ್ರಾಹಕರ WhatsApp ನಂಬರ್ ನಮ್ಮ ಬಳಿ ಈಗಾಗಲೇ ಇದೆ. "
+        "ಎಂದಿಗೂ ಫೋನ್ ನಂಬರ್ ಕೇಳಬೇಡಿ.\n"
+        "10. ಕೆಳಗೆ ಈಗಾಗಲೇ ತಿಳಿದಿರುವ ವಿವರ ಇದೆ — ಅದನ್ನು ಮತ್ತೆ ಕೇಳಬೇಡಿ."
+        + _known_lines_kn(known)
     )
+
+
+def _known_lines_kn(known: dict = None) -> str:
+    """What this conversation has already established, for the brief.
+
+    Only fields that are actually set, so the model is never handed a blank
+    to fill in or a "TBD" to repeat back at the customer.
+    """
+    known = known or {}
+    labels = (("name", "ಹೆಸರು"), ("capacity_kva", "ಸಾಮರ್ಥ್ಯ (kVA)"),
+              ("quantity", "ಎಷ್ಟು units"), ("application", "ಉದ್ದೇಶ"),
+              ("location", "ಸ್ಥಳ"), ("delivery_location", "ಡೆಲಿವರಿ ಸ್ಥಳ"))
+    lines = [f"   - {label}: {known[field]}"
+             for field, label in labels if known.get(field)]
+    if not lines:
+        return "\n   (ಇನ್ನೂ ಏನೂ ತಿಳಿದಿಲ್ಲ.)"
+    return "\n" + "\n".join(lines)
 
 
 def compose_model_reply(ai_text: str, followup: dict, known: dict = None):
@@ -1197,8 +1239,28 @@ _ACKNOWLEDGEMENTS = ("ok", "okay", "k", "hmm", "thanks", "thank you", "ok sir",
 # Words that make a place name a STATEMENT about a place rather than an answer
 # naming one. "I am from Gujarat" says where the customer is, not where the
 # transformer goes, and the two are routinely different.
+# THE SAME CLASSES, IN THE SCRIPT CUSTOMERS ACTUALLY TYPE. Every entry
+# below already had its Kannada-script counterpart in this list; the Latin
+# spellings were simply missing, so three real messages on 2026-09-22 were
+# recorded as delivery addresses:
+#
+#   "Nanna hesaru gotta"          (do you know my name)
+#   "Nim boss jote matadbekuttu"  (I want to talk to your boss)
+#   "Nimma company estu varshadinda ide"  (how many years has your company)
+#
+# Pronouns, question words and the copula — no place vocabulary, and each is
+# matched as a whole word, so no place name that merely contains one is
+# affected.
 _NOT_A_BARE_ANSWER = ("ನಾನು", "ನಮ್ಮ", "my", "our", "i", "we",
                       "am", "is", "are", "not", "ಅಲ್ಲ",
+                      # pronouns and possessives
+                      "nanna", "nannu", "naanu", "nanu", "namma",
+                      "nimma", "nim", "neevu", "nivu", "nange", "namge",
+                      # question words
+                      "yaaru", "yaava", "yava", "eshtu", "estu", "yake",
+                      "enu", "hege", "gotta", "gothaa",
+                      # copula and the commonest verbs
+                      "ide", "illa", "beku", "bekagide", "madi", "helli",
                       "why", "what", "how", "ಯಾಕೆ", "ಏನು",
                       # SECOND PERSON, added after review: "You mad" — the
                       # customer's actual words on 2026-09-20 — was being
@@ -1345,6 +1407,52 @@ _NOT_A_PLACE_PHRASE = (
 
 _TRIM = " \t\n.,!:-"
 
+# HOW LONG AN ANSWER MAY BE WITHOUT LOOKING LIKE AN ADDRESS.
+#
+# Removing the 40-character/4-word caps let a full address through, which is
+# what the owner asked for. It also let a whole SENTENCE through: on
+# 2026-09-22 "Nimma company estu varshadinda ide" (how many years has your
+# company existed) was recorded as the delivery address. The old caps would
+# have rejected it on the word count — so the caps were wrong about long
+# addresses and right about long sentences.
+#
+# Both, then. A short answer is judged as before, on the semantic filters
+# alone. A LONG answer must additionally carry a word that structures an
+# address: a district, a taluk, a village, a road. Those are address
+# STRUCTURE words, not place names — there is still no gazetteer here, and
+# "ತುಮಕೂರು", "Kadaba" and "Bengaluru" appear in no list.
+# SIX WORDS AND SIXTY CHARACTERS, chosen from the real answers rather than
+# picked. The pronoun and question-word list above does the semantic work;
+# this is only a net for long rambling text that happens to contain none of
+# those words. Set tighter, at four words, it rejected two genuine address
+# forms from production — "ಚೇಳೂರು ಇಂದ 5 ಕೀ ಮೀ" (5 km from Chelur) and
+# "Chelur inda 5 km Kulumegudlu" — which is the failure the caps caused in
+# the first place.
+_LONG_ANSWER_WORDS = 6
+_LONG_ANSWER_CHARS = 60
+
+_ADDRESS_MARKER = (
+    # Kannada administrative structure, which is how the 113-character
+    # production address was written
+    "ಜಿಲ್ಲೆ", "ತಾಲ್ಲೂಕು", "ತಾಲೂಕು", "ಹೋಬಳಿ", "ಗ್ರಾಮ", "ಹಳ್ಳಿ", "ನಗರ",
+    "ಪೋಸ್ಟ್", "ಬಡಾವಣೆ", "ರಸ್ತೆ", "ಕ್ರಾಸ್", "ಮುಖ್ಯರಸ್ತೆ",
+    # the same words as customers type them in Latin script
+    "district", "dist", "taluk", "taluq", "tq", "hobli", "village",
+    "post", "pin", "road", "cross", "main", "layout", "nagar", "nagara",
+    "colony", "extension", "circle", "street", "gram", "halli", "pura",
+)
+
+
+def _has_address_marker(low: str) -> bool:
+    """Does this text carry a word that structures an address?
+
+    ASCII markers are matched on word boundaries — "main" must not be found
+    inside "remaining" — and Kannada markers as substrings, as everywhere
+    else in this module.
+    """
+    return any(_label_matches(low, m) if m.isascii() else m in low
+               for m in _ADDRESS_MARKER)
+
 # WHERE ONE PART OF AN ANSWER ENDS AND THE NEXT BEGINS. Customers answer
 # several questions in one message, and the address is usually only part of
 # it. Splitting on the separators people actually type lets the address be
@@ -1358,26 +1466,33 @@ _SEGMENT_SPLIT = re.compile(r"[\n\r,;/|।]+|\.+(?=\s|$)")
 
 
 def _is_place_like(raw: str) -> bool:
-    """Could this text be the name of a place? Length is not consulted.
+    """Could this text be the name of a place?
 
-    THE LENGTH CAPS ARE GONE, and they were the defect. A 40-character,
-    4-word ceiling was standing in for "does this look like a place", and on
-    2026-09-22 it threw away the most complete address a customer can give:
+    LENGTH IS NO LONGER THE TEST, BUT IT IS STILL A NET. Two production
+    failures, a day apart, bound this from both sides.
+
+    A flat 40-character, 4-word ceiling was standing in for "does this look
+    like a place", and it threw away the most complete address a customer can
+    give:
 
         "ತುಮಕೂರು .ಜಿಲ್ಲೆ . ಗುಬ್ಬಿ ..ತಾಲ್ಲೂಕು... ಚೇಳೂರು ಹೋಬಳಿ. ಕುಲುಮೆಗುಡ್ಲು ಗ್ರಾಮ"
 
-    113 characters — district, taluk, hobli and village, spelled out, twice,
-    by a customer the bot then asked for the delivery place a fifth time.
-    Raising the ceiling only moves the failure to the next character, so the
-    ceiling is not the test. The owner's ruling on 2026-09-22 settles it:
-    record the address the customer gave, in full, and never lose the
-    district.
+    113 characters — district, taluk, hobli and village, spelled out twice by
+    a customer who was then asked a fifth time. Raising the ceiling only
+    moves that failure to the next character.
 
-    What replaces it is the semantic filtering that was always doing the real
-    work. None of it introduces place vocabulary: every rejection is either
-    another field's answer, or a linguistic category — a question, an
-    acknowledgement, a pronoun sentence, a refusal to answer. There is still
-    no gazetteer, no transliteration and no canonical form.
+    Removing it entirely then let a whole SENTENCE through: "Nimma company
+    estu varshadinda ide" (how many years has your company existed) was
+    recorded as the delivery address. So the caps were wrong about long
+    addresses and right about long sentences.
+
+    The semantic filters below do the real work, and none of them introduces
+    place vocabulary: every rejection is another field's answer or a
+    linguistic category — a question, an acknowledgement, a pronoun
+    sentence, a greeting, a refusal to answer. Length is consulted only at
+    the end, and only to require that a LONG answer carry a word which
+    structures an address (see _LONG_ANSWER_WORDS). There is still no
+    gazetteer, no transliteration and no canonical form.
     """
     low = raw.lower()
 
@@ -1451,6 +1566,11 @@ def _is_place_like(raw: str) -> bool:
     # Must contain an actual letter — a number or emoji is not a place.
     if not re.search(r"[^\W\d_]", raw):
         return False
+    # LONG ENOUGH TO BE A SENTENCE. See _LONG_ANSWER_WORDS: a long answer is
+    # accepted only when something in it structures an address.
+    if (len(raw.split()) > _LONG_ANSWER_WORDS
+            or len(raw) > _LONG_ANSWER_CHARS):
+        return _has_address_marker(low)
     return True
 
 
