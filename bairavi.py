@@ -721,6 +721,96 @@ _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
 _PRICE_ASK = _PRICE_WORDS + _QUOTATION_WORDS
 
 
+# ── DISCOM APPROVAL ───────────────────────────────────────────────────────
+#
+# On 2026-09-22 a customer asked "Sir, you have GESCOM approvel." and was
+# answered with "we have received your message" and the same form questions
+# again. A distribution-company approval question is not small talk: it is
+# the question a serious buyer asks, because an unapproved transformer cannot
+# be energised on that utility's network.
+#
+# THE STATUS BELOW IS OWNER-STATED EVIDENCE, 2026-09-22, in the owner's own
+# words: "mescom aproval aagide gescom bescom 3 month olgade aagutte anta
+# helbeku" — MESCOM approval is done; GESCOM and BESCOM will be done within
+# three months; say that.
+#
+# NOTHING IS EXTRAPOLATED. Only these three utilities have a stated status.
+# A question about any other one is answered with "our engineer will
+# confirm", because inventing an approval is exactly the class of claim the
+# evidence discipline forbids — the same rule that keeps a price out of this
+# module. If the owner's position changes, this table changes; the reply is
+# generated from it and nowhere else states it.
+_DISCOM_APPROVAL_STATED = {
+    "mescom": "APPROVED",
+    "gescom": "IN_PROGRESS",
+    "bescom": "IN_PROGRESS",
+}
+_DISCOM_IN_PROGRESS_ETA_KN = "3 ತಿಂಗಳೊಳಗೆ"
+
+# Recognition vocabulary only — which utility the customer typed. Karnataka's
+# distribution companies are proper nouns, and naming them here makes no
+# claim about Bairavi; every claim comes from the table above.
+_DISCOM_NAMES = ("mescom", "bescom", "gescom", "hescom", "cescom", "cesc",
+                 "kptcl", "ಎಸ್ಕಾಂ", "escom")
+
+# "approvel" is the customer's actual spelling, so this matches on the stem.
+_APPROVAL_ASK = ("approv", "ಅನುಮೋದನೆ", "ಅಪ್ರೂವ", "empanel",
+                 "vendor list", "registered vendor", "ಪರವಾನಗಿ")
+
+
+def discom_approval_ask(text: str):
+    """Which distribution companies an approval question named, or None.
+
+    Returns a tuple of canonical lowercase names, empty when approval was
+    asked about without naming one. None means no approval question at all,
+    which is the common case and leaves every reply unchanged.
+    """
+    low = (text or "").lower()
+    if not any(w in low for w in _APPROVAL_ASK):
+        return None
+    named = [d for d in _DISCOM_NAMES if d in low]
+    # "cesc" is a substring of "cescom", and "escom" of every one of them.
+    for broad, narrow in (("cesc", "cescom"), ("escom", "mescom"),
+                          ("escom", "bescom"), ("escom", "gescom"),
+                          ("escom", "hescom"), ("escom", "cescom")):
+        if narrow in named and broad in named:
+            named.remove(broad)
+    return tuple(named)
+
+
+def approval_answer_kn(asked) -> str:
+    """What to tell the customer about DISCOM approval, in the bot's register.
+
+    Generated from _DISCOM_APPROVAL_STATED, so the bot can never say more
+    than the owner has said. A utility with no stated status is routed to a
+    human rather than guessed at.
+    """
+    approved = [d for d in asked if _DISCOM_APPROVAL_STATED.get(d) == "APPROVED"]
+    pending = [d for d in asked
+               if _DISCOM_APPROVAL_STATED.get(d) == "IN_PROGRESS"]
+    unknown = [d for d in asked if d not in _DISCOM_APPROVAL_STATED]
+
+    # Asked without naming one: state everything that has a stated status.
+    if not asked:
+        approved = [d for d, v in _DISCOM_APPROVAL_STATED.items()
+                    if v == "APPROVED"]
+        pending = [d for d, v in _DISCOM_APPROVAL_STATED.items()
+                   if v == "IN_PROGRESS"]
+
+    parts = []
+    if approved:
+        parts.append("✅ *" + "*, *".join(d.upper() for d in approved)
+                     + "* approval ಆಗಿದೆ.")
+    if pending:
+        parts.append("*" + "*, *".join(d.upper() for d in pending) + "* — "
+                     + _DISCOM_IN_PROGRESS_ETA_KN + " ಆಗುತ್ತದೆ ಎಂದು "
+                     "ನಿರೀಕ್ಷಿಸುತ್ತಿದ್ದೇವೆ.")
+    if unknown:
+        parts.append("*" + "*, *".join(d.upper() for d in unknown) + "* ಬಗ್ಗೆ "
+                     "ನಮ್ಮ engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
+    return "\n".join(parts)
+
+
 def commercial_intent(text: str):
     """QUOTATION_REQUEST, PRICE_REQUEST, or None.
 
@@ -1061,7 +1151,10 @@ def parse_followup(text: str, awaiting=()) -> dict:
             # Unchanged meaning and unchanged readers: "did they raise money
             # at all". commercial_intent says WHICH ask it was.
             "asked_price": any(w in low for w in _PRICE_ASK),
-            "commercial_intent": commercial_intent(text)}
+            "commercial_intent": commercial_intent(text),
+            # None when no approval question was asked, which leaves every
+            # reply exactly as it was.
+            "discom_approval_ask": discom_approval_ask(text)}
 
 
 # ── Reply composition ─────────────────────────────────────────────────────
@@ -1519,6 +1612,13 @@ def compose_followup_reply(followup: dict, known: dict = None,
     else:
         lines.append("✅ ಧನ್ಯವಾದ — ನಿಮ್ಮ ಸಂದೇಶ ಸಿಕ್ಕಿದೆ.")
 
+    # THE QUESTION THEY ASKED, ANSWERED. A DISCOM approval question used to
+    # get "we have received your message" and the form questions again.
+    _approval = followup.get("discom_approval_ask")
+    if _approval is not None:
+        lines.append("\nDISCOM approval ಬಗ್ಗೆ:\n"
+                     + approval_answer_kn(_approval))
+
     _intent = followup.get("commercial_intent")
     if followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
@@ -1631,7 +1731,15 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
         # had already been told.
         + f"Application: {val(merged_state(known, followup).get('application'))}\n"
         f"Asked for price: {'YES' if followup['asked_price'] else 'no'}\n"
-        f"\nTheir words: {(text or '').strip()[:300]}\n"
+        # Only printed when asked, so the alert does not grow a line that is
+        # "no" in almost every conversation. A buyer who asks this is
+        # checking whether the transformer can be energised on their
+        # network, and the owner should see it.
+        + (("Asked about DISCOM approval: "
+            + (", ".join(d.upper() for d in followup["discom_approval_ask"])
+               or "not named")
+            + "\n") if followup.get("discom_approval_ask") is not None else "")
+        + f"\nTheir words: {(text or '').strip()[:300]}\n"
         "\nNo price, delivery date or certificate was quoted to the customer."
     )
 
