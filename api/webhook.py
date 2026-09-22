@@ -5357,9 +5357,13 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                     _quote_goal = bic_goals.lookup(bairavi.QUOTATION_GOAL_ID)
                 except Exception as e:
                     print(f"BAIRAVI_GOAL_LOOKUP_FAILED type={type(e).__name__}")
-            send_text(sender,
-                      bairavi.compose_followup_reply(followup, known,
-                                                     _quote_goal))
+            # last_reply_fingerprint lets compose_followup_reply notice it
+            # is about to send the identical block twice in a row; the reply
+            # that actually went out is then recorded in the marker below.
+            _reply = bairavi.compose_followup_reply(
+                followup, known, _quote_goal,
+                bairavi.last_reply_fingerprint(ctx["history"]))
+            send_text(sender, _reply)
             # The marker records WHAT this reply is still waiting for, so the
             # hourly sweep can ask again without any new storage.
             # WRITTEN BEFORE the alerts below so a notify failure cannot
@@ -5374,7 +5378,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                  bairavi.flow_marker(
                      bairavi.outstanding(followup, known),
                      quote_signalled=_quote_now
-                     or bairavi.quote_already_signalled(ctx["history"])))])
+                     or bairavi.quote_already_signalled(ctx["history"]),
+                     reply=_reply))])
             warn_if_transcript_lost(sender, _saved, "Bairavi follow-up reply")
             # EVERY follow-up is forwarded, not only the ones that parse.
             #

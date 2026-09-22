@@ -532,8 +532,23 @@ class Structure(unittest.TestCase):
                 imports |= {a.name.split(".")[0] for a in n.names}
             elif isinstance(n, ast.ImportFrom):
                 imports.add((n.module or "").split(".")[0])
-        self.assertEqual(imports, {"re"},
+        # hashlib joined `re` when replies grew a fingerprint, so the next
+        # turn can tell "the same reply again" from "a different reply". It
+        # is stdlib, pure computation, and touches no network or filesystem,
+        # which is what this test is defending. The list stays closed: any
+        # OTHER import still fails here.
+        self.assertEqual(imports, {"hashlib", "re"},
                          f"bairavi.py must stay pure; got {imports}")
+
+    def test_the_fingerprint_is_the_only_reason_for_hashlib(self):
+        """Keeps the exception narrow: hashlib may be used to identify a
+        reply and for nothing else."""
+        import inspect
+        uses = [name for name in dir(b)
+                if callable(getattr(b, name, None))
+                and getattr(b, name, None).__module__ == b.__name__
+                and "hashlib" in (inspect.getsource(getattr(b, name)) or "")]
+        self.assertEqual(uses, ["reply_fingerprint"])
 
     def test_no_provider_call_is_involved(self):
         mod = io.open(os.path.join(os.path.dirname(__file__), "..",

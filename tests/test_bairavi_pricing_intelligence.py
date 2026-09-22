@@ -633,8 +633,14 @@ class TheWebhookRaisesTheSignalCorrectly(unittest.TestCase):
                  and isinstance(n.func, ast.Attribute)
                  and n.func.attr == "compose_followup_reply"]
         self.assertEqual(len(calls), 1)
-        self.assertEqual(len(calls[0].args), 3,
+        self.assertEqual(len(calls[0].args), 4,
                          "the goal definition is not passed to the reply")
+        # ARG 3 IS THE GOAL, ARG 4 THE PREVIOUS REPLY'S FINGERPRINT. Both are
+        # asserted at the call site because a mutation that drops either one
+        # changes nothing any unit test of bairavi.py can see -- the reply
+        # composes fine without them, it is simply worse.
+        self.assertEqual(calls[0].args[2].id, "_quote_goal")
+        self.assertEqual(calls[0].args[3].func.attr, "last_reply_fingerprint")
 
 
 class PhaseBIsAbsent(unittest.TestCase):

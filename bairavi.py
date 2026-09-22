@@ -80,6 +80,7 @@ NO I/O, NO MODEL, NO NETWORK. Pure functions over text, so the reply a customer
 sees is decided by code that can be read and tested rather than generated.
 """
 
+import hashlib
 import re
 
 # ── Catalogue · Module 03 §1.0a ───────────────────────────────────────────
@@ -1509,7 +1510,44 @@ def question_for(field: str, known: dict = None) -> str:
 QUOTE_SIGNALLED = "quote_signalled=1"
 
 
-def flow_marker(awaiting=(), quote_signalled: bool = False) -> str:
+def reply_fingerprint(text: str) -> str:
+    """A short stable identity for a reply body.
+
+    Ten hex characters of a digest, which is plenty to tell "the same reply
+    again" from "a different reply" and short enough to sit in a transcript
+    marker. Whitespace-insensitive at the edges only — the body itself must
+    match exactly, because two replies that differ by one asked field are
+    genuinely different replies.
+    """
+    return hashlib.sha256((text or "").strip().encode("utf-8")).hexdigest()[:10]
+
+
+def marker_reply(content: str):
+    """The fingerprint a transcript row records for its reply, or None."""
+    text = content or ""
+    if FLOW_MARKER not in text or "reply=" not in text:
+        return None
+    return text.split("reply=", 1)[1].split()[0] or None
+
+
+def last_reply_fingerprint(history):
+    """The fingerprint of the most recent Bairavi reply, or None.
+
+    Read from the transcript the flow already writes, like every other piece
+    of this module's state — no new table, and no in-process memory, which a
+    serverless function does not keep between invocations anyway.
+    """
+    for msg in reversed(list(history or [])):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content") or ""
+        if FLOW_MARKER in content:
+            return marker_reply(content)
+    return None
+
+
+def flow_marker(awaiting=(), quote_signalled: bool = False,
+                reply: str = None) -> str:
     """The transcript row written for a Bairavi reply.
 
     Carries what the reply is waiting for, so an hour later something can
@@ -1528,6 +1566,11 @@ def flow_marker(awaiting=(), quote_signalled: bool = False) -> str:
         parts.append(f"awaiting={','.join(awaiting)}")
     if quote_signalled:
         parts.append(QUOTE_SIGNALLED)
+    # The reply's own identity, so the next turn can tell whether it is about
+    # to send the same thing again. Appended last and parsed by prefix, so
+    # every existing reader is unaffected.
+    if reply:
+        parts.append(f"reply={reply_fingerprint(reply)}")
     return " ".join(parts)
 
 
@@ -1575,8 +1618,31 @@ def awaiting_from_history(history) -> tuple:
     return ()
 
 
+def compose_short_reask(followup: dict, known: dict = None) -> str:
+    """The reply when the full one would be sent twice in a row, verbatim.
+
+    Six real conversations in the 21 days to 2026-09-22 received the same
+    reply twice within 65 seconds, three times in one case. The stateless
+    design chose that on purpose — "a customer who twice says something
+    unreadable is therefore asked twice" — and for the QUESTION that is
+    right. Sending the identical 324-character block again is not: the
+    customer already has it on screen, and a bot that repeats itself reads
+    as broken.
+
+    So the question is still asked, and only the question. Built from
+    question_for(), which already owns the wording for every field, so this
+    introduces no new customer-facing sentence beyond one short line.
+    """
+    fields = outstanding(followup, known)
+    if not fields:
+        return ("🙏 ಧನ್ಯವಾದ — ನಮ್ಮ *Bairavi Trans Solutions* ತಂಡ "
+                "ಶೀಘ್ರದಲ್ಲೇ ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಾರೆ.")
+    return "🙏 ಇಷ್ಟು ಮಾತ್ರ ಬೇಕು:\n" + question_for(fields[0], known)
+
+
 def compose_followup_reply(followup: dict, known: dict = None,
-                           goal_def: dict = None) -> str:
+                           goal_def: dict = None,
+                           last_fingerprint: str = None) -> str:
     """The reply to a message inside an existing transformer conversation.
 
     NOT the opening reply. Re-greeting someone mid-conversation and re-listing
@@ -1684,7 +1750,15 @@ def compose_followup_reply(followup: dict, known: dict = None,
 
     lines.append("\nನಮ್ಮ *Bairavi Trans Solutions* ತಂಡ ಶೀಘ್ರದಲ್ಲೇ "
                  "ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಾರೆ 🙏")
-    return "\n".join(lines)
+    full = "\n".join(lines)
+
+    # THE SAME REPLY TWICE IN A ROW. Checked here, at the single place the
+    # reply is built, so no caller can send a repeat by forgetting to ask.
+    # `last_fingerprint` is the previous reply's identity from the
+    # transcript marker; omitted, this behaves exactly as before.
+    if last_fingerprint and reply_fingerprint(full) == last_fingerprint:
+        return compose_short_reask(followup, known)
+    return full
 
 
 def _quantity_line(followup: dict, known: dict = None) -> str:
