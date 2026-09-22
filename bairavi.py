@@ -559,6 +559,46 @@ _QTY_RE = re.compile(
     r"|ನಗ(?![\u0C80-\u0CFF])"
     r")?", re.IGNORECASE)
 
+
+def _read_quantity(low: str, cap=None):
+    """How many units this text states, or None.
+
+    ONE READER, TWO CALLERS. `parse_followup` needs the number; the delivery
+    filter needs only to know whether there IS one, because a quantity answer
+    is not a place. They used to disagree: the filter tested the raw regex,
+    which matched any bare figure, so "ಚೇಳೂರು ಇಂದ 5 ಕೀ ಮೀ" looked like a
+    quantity answer and the address inside it was thrown away.
+    """
+    for m in _QTY_RE.finditer(low):
+        n = int(m.group("n"))
+        if not (0 < n <= 999) or n == cap:
+            continue
+        # AN EXPLICIT UNIT WORD WINS. If the customer named the unit
+        # themselves — "2 units", "2 ಯುನಿಟ್" — the figure is a count and
+        # nothing after it can change that. Found by a mutation: without
+        # this, "2 ಯುನಿಟ್ ಕೀ ಮೀ" returned NO quantity, because the match
+        # consumed the unit word and the measurement test then read the
+        # "ಕೀ ಮೀ" that followed it. The customer had said "units" out loud.
+        stated_unit = m.group().strip()[len(m.group("n")):].strip()
+        # GLUED TO A WORD WE DO NOT RECOGNISE. "1st main road" was reading
+        # as one unit, because the figure matched and the optional unit word
+        # matched nothing, leaving "st". An ordinal, a house number or a
+        # model number is written without a space; a count is not.
+        digits_end = m.start() + len(m.group("n"))
+        if not stated_unit and low[digits_end:digits_end + 1].isalpha():
+            continue
+        if not stated_unit:
+            # WHAT FOLLOWS A BARE FIGURE. The old test looked five characters
+            # past the match for "kv" only, which is why "15 hp" and
+            # "5 ಕೀ ಮೀ" got through. The table is consulted at the start of
+            # the remaining text, so "15 hp" is a rating and "15 units" is
+            # still fifteen.
+            rest = low[m.end():].lstrip(" \t.-")
+            if any(rest.startswith(u) for u in _MEASUREMENT_UNIT):
+                continue
+        return n
+    return None
+
 # Application vocabulary, English and Kannada. An allowlist: an unrecognised
 # purpose stays None rather than being guessed, because "what it is for"
 # drives qualification and a wrong value is worse than a blank one.
@@ -632,8 +672,20 @@ _DELIVERY_MENTION_RE = re.compile(
 # "Same place", said in reply to "is the delivery address the same?". Only
 # meaningful as a confirmation — it carries no place of its own, so the owner
 # reads it against the project location the form already captured.
+# CONFIRMATION, NOT AN ADDRESS. Two real customers on 2026-09-22 had the
+# word "yes" recorded as the place to deliver to:
+#
+#   "Houdu"  -> delivery location "Houdu"   (ಹೌದು, in Latin letters)
+#   "ಸೇಮ್"    -> delivery location "ಸೇಮ್"     ("same", in Kannada letters)
+#
+# Both spellings of both words were missing: the tuple already carried
+# "ಹೌದು" in Kannada and "same" in Latin, so each word was recognised in
+# exactly one of the two scripts customers actually type. This is the
+# same mixed-script vocabulary the tuple always was — not a
+# transliteration mechanism, and no place names are involved.
 _SAME_PLACE = ("same place", "same address", "same location", "same",
-               "ಅದೇ ಸ್ಥಳ", "ಅದೇ", "ಹೌದು", "yes same", "same only")
+               "ಸೇಮ್", "ಅದೇ ಸ್ಥಳ", "ಅದೇ", "ಹೌದು", "houdu", "howdu",
+               "yes same", "same only")
 
 # ── COMMERCIAL INTENT: TWO DIFFERENT ASKS ─────────────────────────────────
 #
@@ -706,8 +758,11 @@ def commercial_intent(text: str):
 #
 # WITHOUT that context a bare place name stays unreadable, exactly as before —
 # "Gujarat" in the middle of a conversation about capacity is not an address.
-_BARE_ANSWER_MAX_WORDS = 4
-_BARE_ANSWER_MAX_CHARS = 40
+#
+# THE TWO LENGTH LIMITS THAT USED TO LIVE HERE ARE GONE. _BARE_ANSWER_MAX_WORDS
+# (4) and _BARE_ANSWER_MAX_CHARS (40) were a stand-in for "does this look like
+# a place", and on 2026-09-22 they rejected a 113-character address that named
+# district, taluk, hobli and village. See _is_place_like.
 
 # Short replies that are NOT an answer to "where?". Recording one of these as
 # an address is the AC-07 failure in its most expensive form: a lorry sent to
@@ -720,14 +775,32 @@ _ACKNOWLEDGEMENTS = ("ok", "okay", "k", "hmm", "thanks", "thank you", "ok sir",
 # Words that make a place name a STATEMENT about a place rather than an answer
 # naming one. "I am from Gujarat" says where the customer is, not where the
 # transformer goes, and the two are routinely different.
-_NOT_A_BARE_ANSWER = ("from", "ಇಂದ", "ನಾನು", "ನಮ್ಮ", "my", "our", "i", "we",
-                      "am", "is", "are", "near", "ಹತ್ತಿರ", "not", "ಅಲ್ಲ",
+_NOT_A_BARE_ANSWER = ("ನಾನು", "ನಮ್ಮ", "my", "our", "i", "we",
+                      "am", "is", "are", "not", "ಅಲ್ಲ",
                       "why", "what", "how", "ಯಾಕೆ", "ಏನು",
                       # SECOND PERSON, added after review: "You mad" — the
                       # customer's actual words on 2026-09-20 — was being
                       # recorded as a delivery address. A sentence about a
                       # person is not a place, and no place name begins "you".
                       "you", "your", "u", "ನೀವು", "ನಿಮ್ಮ")
+
+# POSITION, NOT PRESENCE. These four were in the list above, rejected
+# wherever they appeared, to catch "from Gujarat" — a statement about where
+# the customer IS rather than where the transformer goes. But they are also
+# how Indian addresses are built, and on 2026-09-22 that cost two real
+# addresses:
+#
+#   "Kadaba near tumkur"           rejected — and it IS the address
+#   "ಚೇಳೂರು ಇಂದ 5 ಕೀ ಮೀ. ..."       rejected — and it IS the address
+#
+# Both readings are right about their own case, and what separates them is
+# where the word sits. Leading, it introduces an origin: "from Gujarat".
+# Inside, it locates one part of an address against another: "Kadaba near
+# tumkur". So these are rejected only at the START of the answer.
+#
+# Deliberately conservative at the margin: a bare "near tumkur" is still
+# rejected and the question is asked again, which costs one message.
+_LOCATIVE_PREFIX = ("from", "near", "ಇಂದ", "ಹತ್ತಿರ")
 
 
 # ── SEMANTIC CLASSES THAT ARE NOT A PLACE ─────────────────────────────────
@@ -776,6 +849,13 @@ _NOT_A_PLACE_EXACT = (
     "call", "phone", "message", "whatsapp", "contact", "meet", "visit",
     "send", "ಕರೆ", "ಫೋನ್", "ಕಳಿಸಿ", "ತಲುಪಿಸಿ",
     "done", "ready", "fast", "any", "ok sir", "yes sir",
+    # WHAT KIND OF SITE IT IS, not where it is. A real customer answered
+    # "layout" on 2026-09-22 — describing a residential layout — and had
+    # it recorded as the delivery address. These are only ever rejected
+    # as the WHOLE answer: "Vidyaranyapura layout" is a real place and
+    # still reads, because the comparison is exact.
+    "layout", "site", "plot", "farm", "land", "village", "city", "town",
+    "ಸೈಟ್", "ಜಮೀನು", "ಗ್ರಾಮ", "ಹಳ್ಳಿ", "ನಗರ",
 )
 
 # Phrases that cannot occur inside a place name, so these may be matched
@@ -787,65 +867,144 @@ _NOT_A_PLACE_PHRASE = (
 )
 
 
-def _bare_delivery_answer(text: str):
-    """The customer's own words as the delivery place, or None.
+_TRIM = " \t\n.,!:-"
 
-    Only ever called when the previous reply asked for delivery. Even then it
-    is conservative by design: everything it cannot confidently read as an
-    answer returns None, which re-asks the question. AC-07 — a blank field is
-    correct, a confidently wrong address is not.
+# WHERE ONE PART OF AN ANSWER ENDS AND THE NEXT BEGINS. Customers answer
+# several questions in one message, and the address is usually only part of
+# it. Splitting on the separators people actually type lets the address be
+# kept while the rest is passed to the extractors that own it.
+#
+# A full stop only separates when whitespace or the end follows it, so a
+# decimal and an initial stay intact. "।" is the Devanagari danda, which
+# appears in Kannada typing on some keyboards.
+_SEGMENT_SPLIT = re.compile(r"[\n\r,;/|।]+|\.+(?=\s|$)")
 
-    Returns the text VERBATIM. No transliteration and no canonical form,
-    because the Brain has no place-name mapping to canonicalise against (see
-    the module note above) and inventing one here would be a geography policy
-    nobody has decided.
+
+
+def _is_place_like(raw: str) -> bool:
+    """Could this text be the name of a place? Length is not consulted.
+
+    THE LENGTH CAPS ARE GONE, and they were the defect. A 40-character,
+    4-word ceiling was standing in for "does this look like a place", and on
+    2026-09-22 it threw away the most complete address a customer can give:
+
+        "ತುಮಕೂರು .ಜಿಲ್ಲೆ . ಗುಬ್ಬಿ ..ತಾಲ್ಲೂಕು... ಚೇಳೂರು ಹೋಬಳಿ. ಕುಲುಮೆಗುಡ್ಲು ಗ್ರಾಮ"
+
+    113 characters — district, taluk, hobli and village, spelled out, twice,
+    by a customer the bot then asked for the delivery place a fifth time.
+    Raising the ceiling only moves the failure to the next character, so the
+    ceiling is not the test. The owner's ruling on 2026-09-22 settles it:
+    record the address the customer gave, in full, and never lose the
+    district.
+
+    What replaces it is the semantic filtering that was always doing the real
+    work. None of it introduces place vocabulary: every rejection is either
+    another field's answer, or a linguistic category — a question, an
+    acknowledgement, a pronoun sentence, a refusal to answer. There is still
+    no gazetteer, no transliteration and no canonical form.
     """
-    raw = (text or "").strip(" \t\n.,!:-")
-    if not raw or len(raw) > _BARE_ANSWER_MAX_CHARS:
-        return None
-    if len(raw.split()) > _BARE_ANSWER_MAX_WORDS:
-        return None
     low = raw.lower()
 
     # A question is not an answer — "Gujarat price?" asks something else.
     if "?" in raw:
-        return None
+        return False
     if any(w in low for w in _PRICE_ASK):
-        return None
+        return False
     # An acknowledgement, a yes/no, or "same place" — the last of which is
     # already recorded as a confirmation rather than an address.
     if low in _ACKNOWLEDGEMENTS or any(w == low for w in _SAME_PLACE):
-        return None
+        return False
     if any(w in low for w in _SAME_PLACE):
-        return None
+        return False
     # A statement about a place, not an answer naming one.
     if any(_label_matches(low, w) for w in _NOT_A_BARE_ANSWER):
-        return None
-    # Another field's answer that happens to be short. Purpose, capacity and
-    # quantity all have their own extractors and must not be read as a place.
+        return False
+    # An origin, not a destination — but only when it leads (see the note on
+    # _LOCATIVE_PREFIX).
+    first = low.split()[0] if low.split() else ""
+    if first in _LOCATIVE_PREFIX or any(low.startswith(w)
+                                        for w in _LOCATIVE_PREFIX):
+        return False
+    # Another field's answer. Purpose, capacity and quantity all have their
+    # own extractors and must not be read as a place.
     if any(needle in low for needle, _ in _APPLICATIONS):
-        return None
-    if capacity_kva(raw) is not None or _QTY_RE.search(low):
-        return None
+        return False
+    if capacity_kva(raw) is not None:
+        return False
+    # A QUANTITY ANSWER IS NOT A PLACE. Through the shared reader, not the
+    # raw pattern: the raw pattern matched any bare figure, so
+    # "ಚೇಳೂರು ಇಂದ 5 ಕೀ ಮೀ" read as a quantity answer and the address inside
+    # it was discarded. The reader knows 5 km is a distance and 15 hp a
+    # rating, so those now reach the address.
+    #
+    # KNOWN LIMITATION, chosen deliberately. A readable quantity ANYWHERE in
+    # the text disqualifies it, so an address whose house number stands alone
+    # — "No.5 Gandhi Road", "12 Hosur Road" — is rejected and the question
+    # is asked again. Narrowing this to "the text is nothing but a figure"
+    # was tried and reverted: it made "೧ beku" ("I want 1") read as the
+    # delivery address, which is AC-07's confidently-wrong field. A re-ask
+    # costs one message; a wrong address costs a delivery. Ordinals and
+    # glued house numbers ("1st main road", "2nd cross") are unaffected,
+    # because _read_quantity does not read a figure glued to a word.
+    if _read_quantity(low) is not None:
+        return False
+    # A BARE MEASUREMENT IS NOT A PLACE EITHER. "15 hp" passes every other
+    # filter — it is correctly not a quantity, and it does contain a letter —
+    # so segmenting "Hiladahalli. Ranibennur. ... 25 kv. 15 hp" kept the
+    # motor rating as part of the address. Found while testing the segment
+    # capture, not in production, but it is the same class of wrong field.
+    figure = re.match(r"^\s*(\d{1,4})\s*(.+)$", low.strip(_TRIM))
+    if figure and figure.group(2).strip(_TRIM) in _MEASUREMENT_UNIT:
+        return False
     # URGENCY, from the table that already defines it. "ತಕ್ಷಣ" answers "when
     # do you need it", which is a different question from "where".
     if any(_label_matches(low, needle) for needle, _ in _TIMING_URGENCY):
-        return None
+        return False
     # Another Asthra service — a transformer buyer asking about a website is
     # not naming a delivery site.
     if any(_label_matches(low, w) for w in _ASTHRA_EXIT):
-        return None
-    # The four classes with no existing table: a whole-message comparison for
-    # the single words, and an anywhere match for the phrases.
+        return False
+    # The classes with no existing table: a whole-answer comparison for the
+    # single words, and an anywhere match for the phrases.
     if low in _NOT_A_PLACE_EXACT:
-        return None
+        return False
     if any(p in low for p in _NOT_A_PLACE_PHRASE):
-        return None
+        return False
     # Must contain an actual letter — a number or emoji is not a place.
     if not re.search(r"[^\W\d_]", raw):
-        return None
-    return raw
+        return False
+    return True
 
+
+def _bare_delivery_answer(text: str):
+    """The customer's own words as the delivery place, or None.
+
+    Only ever called when the previous reply asked for delivery. Everything
+    it cannot read as an answer returns None, which re-asks the question.
+    AC-07 — a blank field is correct, a confidently wrong address is not.
+
+    Returns the text VERBATIM whenever the whole message is an address, so a
+    full address is recorded exactly as the customer wrote it, district and
+    all. Only when the message carries OTHER answers too is it reduced, to
+    the parts that can be an address — because a customer who writes
+    "Kadaba near tumkur / Agriculture use / 1 unit" has given the address,
+    and rejecting the whole message over the other two lines loses it.
+
+    No transliteration and no canonical form: the Brain has no place-name
+    mapping to canonicalise against, and inventing one here would be a
+    geography policy nobody has decided.
+    """
+    raw = (text or "").strip(_TRIM)
+    if not raw:
+        return None
+    if _is_place_like(raw):
+        return raw
+    kept = [seg for seg in (part.strip(_TRIM)
+                            for part in _SEGMENT_SPLIT.split(raw))
+            if seg and _is_place_like(seg)]
+    if not kept:
+        return None
+    return ", ".join(kept)
 
 def parse_followup(text: str, awaiting=()) -> dict:
     """Quantity, application and whether a price was asked. None when unread.
@@ -863,38 +1022,9 @@ def parse_followup(text: str, awaiting=()) -> dict:
     low = (text or "").lower()
     cap = capacity_kva(text)
 
-    # A CAPACITY IS NOT A QUANTITY, and this guard had a hole. It tested the
-    # span for "kva" only, so once "kv" became readable as a capacity,
-    # "100 kv" parsed as 100 UNITS — the single most damaging misread
-    # available here, and one this change would have introduced. Testing for
-    # "kv" covers both spellings, and a figure that IS the capacity is
-    # excluded outright.
-    #
-    # Scanning every match rather than only the first also means "250kv 3
-    # units" now yields 3 instead of giving up at 250.
-    qty = None
-    for m in _QTY_RE.finditer(low):
-        n = int(m.group("n"))
-        if not (0 < n <= 999) or n == cap:
-            continue
-        # AN EXPLICIT UNIT WORD WINS. If the customer named the unit
-        # themselves — "2 units", "2 ಯುನಿಟ್" — the figure is a count and
-        # nothing after it can change that. Found by a mutation: without
-        # this, "2 ಯುನಿಟ್ ಕೀ ಮೀ" returned NO quantity, because the match
-        # consumed the unit word and the measurement test then read the
-        # "ಕೀ ಮೀ" that followed it. The customer had said "units" out loud.
-        stated_unit = m.group().strip()[len(m.group("n")):].strip()
-        if not stated_unit:
-            # WHAT FOLLOWS A BARE FIGURE. The old test looked five characters
-            # past the match for "kv" only, which is why "15 hp" and
-            # "5 ಕೀ ಮೀ" got through. The table is consulted at the start of
-            # the remaining text, so "15 hp" is a rating and "15 units" is
-            # still fifteen.
-            rest = low[m.end():].lstrip(" \t.-")
-            if any(rest.startswith(u) for u in _MEASUREMENT_UNIT):
-                continue
-        qty = n
-        break
+    # A capacity is not a quantity, and neither is a distance or a motor
+    # rating. _read_quantity owns that rule and the delivery filter shares it.
+    qty = _read_quantity(low, cap)
     app = None
     for needle, value in _APPLICATIONS:
         if needle in low:

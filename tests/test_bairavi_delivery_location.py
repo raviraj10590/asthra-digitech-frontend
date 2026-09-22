@@ -286,29 +286,44 @@ class ContextDecidesWhetherItIsAnAnswer(unittest.TestCase):
         self.assertIsNone(delivery(
             "our line is far from the town so we need a TC in Gujarat"))
 
-    def test_too_many_words_is_not_an_address_EVEN_WITH_NO_STOPWORDS(self):
-        """Isolates the word limit. Every token here is a plausible place and
-        none is a disqualifying word, so only _BARE_ANSWER_MAX_WORDS can
-        reject it — the sentence test above is also caught by "from"/"we",
-        which left this guard unverified."""
-        five_short_words = "Hubli Dharwad Bijapur Bidar Gadag"
-        self.assertEqual(len(five_short_words.split()), 5)
-        self.assertLessEqual(len(five_short_words), b._BARE_ANSWER_MAX_CHARS)
-        self.assertIsNone(delivery(five_short_words))
+    def test_a_long_address_with_no_stopwords_IS_an_address(self):
+        """REPLACES two tests that asserted the opposite.
 
-    def test_too_many_characters_is_not_an_address(self):
-        """Isolates the character limit: within the word limit, over the
-        character limit, and carrying no disqualifying word."""
-        long_but_few_words = "Gandhinagar Ahmedabad Gandhinagar Ahmedabad"
-        self.assertLessEqual(len(long_but_few_words.split()),
-                             b._BARE_ANSWER_MAX_WORDS)
-        self.assertGreater(len(long_but_few_words), b._BARE_ANSWER_MAX_CHARS)
-        self.assertIsNone(delivery(long_but_few_words))
+        A 40-character, 4-word ceiling used to reject these. It was standing
+        in for "does this look like a place", and on 2026-09-22 it rejected
+        the most complete address a customer can give. The owner's ruling
+        that day: record the address the customer gave, in full, and never
+        lose the district. So length is no longer consulted, and the tests
+        that isolated the two limits are gone with them -- kept here as a
+        record of what changed and why, because both cases now assert the
+        opposite of what they used to.
+        """
+        for text in ("Hubli Dharwad Bijapur Bidar Gadag",
+                     "Gandhinagar Ahmedabad Gandhinagar Ahmedabad"):
+            with self.subTest(text=text):
+                self.assertEqual(delivery(text), text)
 
-    def test_the_two_limits_are_genuinely_different_guards(self):
-        """Guards the two tests above against being accidentally redundant."""
-        self.assertLess(b._BARE_ANSWER_MAX_WORDS, 10)
-        self.assertLess(b._BARE_ANSWER_MAX_CHARS, 100)
+    def test_the_full_kannada_address_is_kept_verbatim(self):
+        """The production answer, 113 characters, given twice by a customer
+        who was then asked for the delivery place a fifth time.
+
+        Recorded exactly as typed -- district, taluk, hobli and village --
+        because the owner's ruling is that a full address is recorded in
+        full, and because this module has no canonical form to rewrite it
+        into.
+        """
+        text = ("ತುಮಕೂರು .ಜಿಲ್ಲೆ .              ಗುಬ್ಬಿ ..ತಾಲ್ಲೂಕು..."
+                "                              ಚೇಳೂರು ಹೋಬಳಿ. ಕುಲುಮೆಗುಡ್ಲು ಗ್ರಾಮ")
+        self.assertEqual(delivery(text), text.strip())
+        self.assertIn("ಜಿಲ್ಲೆ", delivery(text))
+
+    def test_the_length_limits_are_gone(self):
+        """They are not raised, renamed or bypassed -- they are removed. A
+        higher ceiling only moves the same failure to the next character."""
+        self.assertFalse(hasattr(b, "_BARE_ANSWER_MAX_CHARS"))
+        self.assertFalse(hasattr(b, "_BARE_ANSWER_MAX_WORDS"))
+        import inspect
+        self.assertNotIn("len(raw)", inspect.getsource(b._is_place_like))
 
     def test_digits_or_emoji_alone_are_not_an_address(self):
         for word in ("123", "👍", "⛽", "..."):

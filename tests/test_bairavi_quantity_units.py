@@ -189,11 +189,16 @@ class TheTableIsVocabularyNotGeography(unittest.TestCase):
         self.assertIn("kva", b._MEASUREMENT_UNIT)
 
     def test_the_span_hack_is_gone(self):
-        """The measurement table is the single place this rule lives."""
+        """The measurement table is the single place this rule lives, and it
+        lives in the shared reader -- both parse_followup and the delivery
+        filter consult it, so they cannot disagree about whether a figure is
+        a count."""
         import inspect
-        src = inspect.getsource(b.parse_followup)
+        src = inspect.getsource(b._read_quantity)
         self.assertIn("_MEASUREMENT_UNIT", src)
         self.assertNotIn('"kv" in span', src)
+        self.assertIn("_read_quantity", inspect.getsource(b.parse_followup))
+        self.assertIn("_read_quantity", inspect.getsource(b._is_place_like))
 
 
 class QuantityStaysTheOwnersDefault(unittest.TestCase):
