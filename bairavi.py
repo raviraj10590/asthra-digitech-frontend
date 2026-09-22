@@ -903,6 +903,60 @@ _NOT_A_BARE_ANSWER = ("ನಾನು", "ನಮ್ಮ", "my", "our", "i", "we",
 # rejected and the question is asked again, which costs one message.
 _LOCATIVE_PREFIX = ("from", "near", "ಇಂದ", "ಹತ್ತಿರ")
 
+# ── A GREETING IS NOT AN ADDRESS, HOWEVER IT IS SPELLED ───────────────────
+#
+# On 2026-09-22 the owner messaged the bot as a customer and the first two
+# things they wrote were recorded as the place to deliver to:
+#
+#   "Hii"      -> delivery location "Hii"
+#   "Namaste"  -> delivery location "Namaste"
+#
+# "hi", "hello" and "ನಮಸ್ಕಾರ" were already rejected. The comparison is
+# whole-answer and exact — which it must be, since "hi" is the start of
+# Hirekerur — so every other spelling walked straight through. The damage
+# compounds: with delivery filled, nothing was outstanding, so every reply
+# for the rest of that conversation was a receipt with no question in it,
+# and a real "ಬೆಂಗಳೂರು" two turns later was ignored because the bot was no
+# longer waiting for anywhere.
+#
+# WHY A STEM LIST AND NOT MORE LITERALS. "Hii", "Hiii" and "Hellooo" are one
+# spelling habit, not three words, so runs of a repeated letter are
+# collapsed before comparing. That is spelling normalisation within one
+# script — it maps nothing between scripts, builds no place vocabulary, and
+# is not the transliteration this module is forbidden to invent. Kannada
+# greetings are listed as themselves.
+_GREETING = (
+    "hi", "helo", "hey", "ha", "hai", "hlo", "hola",
+    "namaste", "namaskara", "namaskar", "namste",
+    "ನಮಸ್ಕಾರ", "ನಮಸ್ತೆ", "ನಮಸ್ಕಾರಗಳು",
+    "good morning", "good evening", "good afternoon", "gm", "ge",
+)
+
+
+def _collapse_runs(text: str) -> str:
+    """"hiii" -> "hi", "hellooo" -> "helo". One habit, not many words."""
+    out = []
+    for ch in text:
+        if not out or out[-1] != ch:
+            out.append(ch)
+    return "".join(out)
+
+
+def _is_greeting(low: str) -> bool:
+    """Is this whole answer nothing but a greeting?
+
+    Whole-answer only, like the table it serves: "Hirekerur" contains "hi"
+    and is a real place, so a substring test here would reject it.
+
+    No trimming here. A first version stripped punctuation again, and a
+    mutation removing that strip failed no test — because _TRIM has already
+    taken it off upstream, in _bare_delivery_answer and for every segment,
+    and a "?" is rejected before this is reached. It was dead code, so it is
+    gone rather than left as an untested branch.
+    """
+    squeezed = _collapse_runs(low)
+    return any(squeezed == _collapse_runs(g) for g in _GREETING)
+
 
 # ── SEMANTIC CLASSES THAT ARE NOT A PLACE ─────────────────────────────────
 #
@@ -1069,6 +1123,8 @@ def _is_place_like(raw: str) -> bool:
     # single words, and an anywhere match for the phrases.
     if low in _NOT_A_PLACE_EXACT:
         return False
+    if _is_greeting(low):
+        return False
     if any(p in low for p in _NOT_A_PLACE_PHRASE):
         return False
     # Must contain an actual letter — a number or emoji is not a place.
@@ -1098,11 +1154,25 @@ def _bare_delivery_answer(text: str):
     raw = (text or "").strip(_TRIM)
     if not raw:
         return None
-    if _is_place_like(raw):
+    segments = [seg for seg in (part.strip(_TRIM)
+                                for part in _SEGMENT_SPLIT.split(raw)) if seg]
+    kept = [seg for seg in segments if _is_place_like(seg)]
+    # VERBATIM ONLY WHEN THE WHOLE MESSAGE IS AN ADDRESS. Both conditions are
+    # needed: the message as a whole must read as a place, and so must every
+    # part of it. "Hii, Bengaluru" passes the first test — nothing in it
+    # disqualifies the string — and would have been stored complete with the
+    # greeting. Requiring every segment to qualify keeps a full address
+    # exactly as typed and still drops a greeting the customer put in front
+    # of it.
+    # DEFENCE IN DEPTH, and honestly labelled. No input currently
+    # distinguishes the two conditions: for the whole message to fail while
+    # every segment passes, a disqualifying phrase would have to span a
+    # separator, and the separators are what prevent that. Proven by
+    # mutation — dropping the first conjunct failed no test. It is kept
+    # because the whole-message test is the one that reads across segment
+    # boundaries, and a structural test asserts both are still here.
+    if _is_place_like(raw) and len(kept) == len(segments):
         return raw
-    kept = [seg for seg in (part.strip(_TRIM)
-                            for part in _SEGMENT_SPLIT.split(raw))
-            if seg and _is_place_like(seg)]
     if not kept:
         return None
     return ", ".join(kept)

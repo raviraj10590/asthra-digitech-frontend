@@ -264,3 +264,105 @@ class StillNoGeography(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AGreetingIsNotAnAddress(unittest.TestCase):
+    """The owner messaged the bot as a customer on 2026-09-22 and the first
+    two things they wrote became the delivery location:
+
+        "Hii"      -> delivery location "Hii"
+        "Namaste"  -> delivery location "Namaste"
+
+    "hi", "hello" and "ನಮಸ್ಕಾರ" were already rejected. The comparison is
+    whole-answer and exact -- which it has to be, since "hi" begins
+    Hirekerur -- so every other spelling walked through.
+
+    THE DAMAGE COMPOUNDED. With delivery filled, nothing was outstanding, so
+    every reply for the rest of that conversation was a receipt with no
+    question in it, and a real "ಬೆಂಗಳೂರು" two turns later was ignored
+    because the bot was no longer waiting for anywhere.
+    """
+
+    def test_the_two_production_messages(self):
+        self.assertIsNone(delivery("Hii"))
+        self.assertIsNone(delivery("Namaste"))
+
+    def test_a_repeated_letter_is_one_spelling_habit_not_many_words(self):
+        for text in ("Hii", "Hiii", "Hiiii", "Hellooo", "Helloo"):
+            with self.subTest(text=text):
+                self.assertIsNone(delivery(text), text)
+
+    def test_the_spellings_that_already_worked_still_work(self):
+        for text in ("hi", "hello", "hey", "ನಮಸ್ಕಾರ"):
+            with self.subTest(text=text):
+                self.assertIsNone(delivery(text), text)
+
+    def test_other_greeting_spellings(self):
+        for text in ("Helo", "Hai", "hlo", "namaskara", "namaskar",
+                     "ನಮಸ್ತೆ", "Good morning", "good evening", "GM"):
+            with self.subTest(text=text):
+                self.assertIsNone(delivery(text), text)
+
+    def test_trailing_punctuation_does_not_smuggle_one_through(self):
+        for text in ("Hii!!", "Namaste.", "hello?", "Hi ."):
+            with self.subTest(text=text):
+                self.assertIsNone(delivery(text), text)
+
+    def test_a_PLACE_that_begins_like_a_greeting_still_reads(self):
+        """The reason the test is whole-answer. Every one of these is a real
+        Karnataka place and every one of them must survive."""
+        for text in ("Hirekerur", "Hassan", "Haveri", "Hospet", "Hubli",
+                     "Harihar", "Honnavar", "Hangal", "ಹಾವೇರಿ", "ಹಾಸನ"):
+            with self.subTest(text=text):
+                self.assertEqual(delivery(text), text)
+
+    def test_a_greeting_followed_by_a_real_address_keeps_the_address(self):
+        """Segment capture still applies: the greeting is dropped, the place
+        is kept."""
+        self.assertEqual(delivery("Hii, Bengaluru"), "Bengaluru")
+
+    def test_the_conversation_recovers_instead_of_dead_ending(self):
+        """The compounding failure, asserted end to end: a greeting must
+        leave delivery outstanding so the next real place name is read."""
+        asked = (b.AWAITING_DELIVERY,)
+        greeting = b.parse_followup("Hii", awaiting=asked)
+        self.assertIn(b.AWAITING_DELIVERY, b.outstanding(greeting, {}))
+        city = b.parse_followup("ಬೆಂಗಳೂರು", awaiting=asked)
+        self.assertEqual(city["delivery_location"], "ಬೆಂಗಳೂರು")
+
+    def test_the_greeting_table_holds_no_place_names(self):
+        for place in ("hassan", "haveri", "hubli", "hospet", "hirekerur",
+                      "bengaluru", "ಬೆಂಗಳೂರು", "ಹಾಸನ"):
+            with self.subTest(place=place):
+                self.assertNotIn(place, b._GREETING)
+
+    def test_punctuation_is_stripped_before_this_is_reached(self):
+        """_TRIM handles it upstream, so _is_greeting does no trimming of its
+        own. Asserted so the redundancy is not reintroduced."""
+        import inspect
+        self.assertNotIn("strip(", inspect.getsource(b._is_greeting))
+        for text in ("Hii!!", "Namaste.", "Hi .", "hello?"):
+            with self.subTest(text=text):
+                self.assertIsNone(delivery(text), text)
+
+    def test_verbatim_requires_both_conditions(self):
+        """A structural assertion, because no input distinguishes them.
+
+        For the whole message to fail while every segment passes, a
+        disqualifying phrase would have to span a separator -- and the
+        separators are what prevent that. Mutation testing confirmed
+        dropping the whole-message test fails nothing. It is kept as defence
+        in depth for cross-boundary matches, so this test holds it in place
+        rather than letting it quietly disappear.
+        """
+        import inspect
+        src = inspect.getsource(b._bare_delivery_answer)
+        self.assertIn("_is_place_like(raw) and len(kept) == len(segments)", src)
+
+    def test_run_collapsing_is_within_one_script_only(self):
+        """It normalises spelling, it does not map between scripts -- which
+        is the transliteration this module may not invent."""
+        self.assertEqual(b._collapse_runs("hiii"), "hi")
+        self.assertEqual(b._collapse_runs("aabbcc"), "abc")
+        self.assertEqual(b._collapse_runs("ನಮಸ್ಕಾರ"), "ನಮಸ್ಕಾರ")
+        self.assertEqual(b._collapse_runs(""), "")
