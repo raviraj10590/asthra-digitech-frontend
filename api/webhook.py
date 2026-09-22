@@ -1655,6 +1655,40 @@ def gemini_one_liner(image_bytes: bytes, mime: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # AI REPLY GENERATION
 # ══════════════════════════════════════════════════════════════════════════════
+# Short on purpose: the brief asks for 2-4 WhatsApp lines, and a long
+# generated answer in this flow is a longer surface for an unevidenced claim.
+BAIRAVI_MODEL_MAX_TOKENS = 400
+
+
+def bairavi_model_reply(phone: str, user_text: str, history: list,
+                        followup: dict, known: dict):
+    """A generated Bairavi answer that passed the evidence guard, or "".
+
+    Asked only where the deterministic composer has nothing to say, and every
+    word checked before it is returned. "" means fall back to the
+    deterministic reply — a refusal, a provider failure and a disabled model
+    all take the same safe path.
+    """
+    if not bairavi.should_ask_model(followup, known):
+        return ""
+    messages = ([{"role": "system", "content": bairavi.model_brief_kn()}]
+                + _as_ai_messages((history or [])[-8:])
+                + [{"role": "user", "content": user_text}])
+    raw = _generate_ai_reply(messages, "",
+                             max_tokens=BAIRAVI_MODEL_MAX_TOKENS)
+    if not raw:
+        print("BAIRAVI_MODEL_NO_REPLY — falling back to the composed reply")
+        return ""
+    reply, reason = bairavi.compose_model_reply(raw, followup, known)
+    if reply is None:
+        # Counted and named, never silently swallowed. The phone is reduced
+        # to its last four digits and the refused text is NOT printed.
+        print(f"BAIRAVI_MODEL_REFUSED reason={reason!r} "
+              f"phone=...{str(phone)[-4:]}")
+        return ""
+    return reply
+
+
 def _as_ai_messages(rows) -> list:
     """Transcript rows reduced to what a provider will accept.
 
@@ -5502,6 +5536,15 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             _reply = bairavi.compose_followup_reply(
                 followup, known, _quote_goal,
                 bairavi.last_reply_fingerprint(ctx["history"]))
+            # THE MODEL, WHERE THE COMPOSER HAS NOTHING. Price, DISCOM
+            # approval, the catalogue, delivery reach and every qualification
+            # answer are still answered from evidence above; this covers what
+            # used to get a receipt. "" keeps the composed reply, so a
+            # refusal or a provider failure is not a worse conversation.
+            _model = bairavi_model_reply(sender, user_text, ctx["history"],
+                                         followup, known)
+            if _model:
+                _reply = _model
             send_text(sender, _reply)
             # The marker records WHAT this reply is still waiting for, so the
             # hourly sweep can ask again without any new storage.

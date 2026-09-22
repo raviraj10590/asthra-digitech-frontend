@@ -718,8 +718,17 @@ QUOTATION_REQUEST = "QUOTATION_REQUEST"
 # DELIBERATELY NOT ADDED: a bare "ಎಷ್ಟು" is already here and already
 # ambiguous ("ಎಷ್ಟು units ಬೇಕು?" is the bot's own question), so no further
 # bare quantity word joins it. Every term below can only be about money.
+# WHAT CAME OUT, 2026-09-22. The bare words for "how much" — "ಎಷ್ಟು",
+# "eshtu", "estu" — are also the words for "HOW MANY", and this module's own
+# question is "ಎಷ್ಟು *units* ಬೇಕು?". They matched every counting question:
+# "ನಿಮ್ಮ ಕಂಪನಿ ಎಷ್ಟು ವರ್ಷದಿಂದ ಇದೆ?" (how many years have you existed?) read as
+# a request for a price, which answered a question nobody asked and blocked
+# the answer to the real one.
+#
+# The compound forms stay, because each of them can only be about money:
+# "ಎಷ್ಟಾಗುತ್ತೆ" (how much will it come to), "ಎಷ್ಟು ರೂ". And a bare "ಎಷ್ಟು" next
+# to "ಬೆಲೆ" or "ದರ" is still caught, by those words.
 _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
-                "eshtu", "estu", "ಎಷ್ಟು",
                 "amount", "how much", "howmuch", "kitna", "kitne",
                 "ಎಷ್ಟಾಗುತ್ತೆ", "ಎಷ್ಟಾಗುತ್ತದೆ", "ಎಷ್ಟು ರೂ", "ಮೊತ್ತ")
 # Already the bot's own words for this: the follow-up button is titled
@@ -950,6 +959,188 @@ def unanswered_question(followup: dict) -> bool:
         return False
     return (followup.get("discom_approval_ask") is None
             and not followup.get("asked_price"))
+
+
+# ── WHEN THE MODEL MAY SPEAK, AND WHAT IT MAY NOT SAY ─────────────────────
+#
+# THE OWNER, 2026-09-22: "adru check maadidaga sariyagi uttara kodtilla
+# munche asthra ge clear answers bartittu" — it still does not answer
+# properly; Asthra used to give clear answers. Asked twice now, so the model
+# comes into this flow.
+#
+# WHAT MADE THAT UNSAFE BEFORE was not the model's fluency, it was that
+# nothing checked what came back. The model answered fifteen of sixteen
+# transformer buyers with Asthra's digital-marketing menu, and the standing
+# rule at the top of this module lists what has no evidence behind it: price,
+# lead time, BEE rating, certifications, losses, impedance, dimensions,
+# conductor sizes, any GTP value.
+#
+# So this adds the missing half: the model is asked ONLY where the
+# deterministic composer has nothing, and every word it returns is checked
+# against that list before a customer sees it. A reply that trips the check is
+# discarded, not edited — and the honest referral goes out instead.
+#
+# The model is NEVER asked when an evidenced answer exists. Price, DISCOM
+# approval, the catalogue, delivery reach and the qualification questions all
+# answer themselves, and a fluent paraphrase of a fact is a chance to get the
+# fact wrong.
+
+
+def should_ask_model(followup: dict, known: dict = None) -> bool:
+    """True when the composer has nothing to say and a human question remains.
+
+    Deliberately narrow. Every branch that CAN answer from evidence keeps
+    answering from evidence.
+    """
+    # PRICE AND APPROVAL STAY DETERMINISTIC. Both are hard evidence rules
+    # with carefully worded answers, and a fluent paraphrase of "we cannot
+    # quote a figure" is a chance to quote one.
+    if followup.get("asked_price"):
+        return False
+    if followup.get("discom_approval_ask") is not None:
+        return False
+    # THE OTHER QUESTIONS GO TO THE MODEL FIRST, and their evidenced answers
+    # become the fallback rather than the first responder. A keyword match is
+    # not the same as understanding the question: "ನಿಮ್ಮ ಕಂಪನಿ ಎಷ್ಟು ವರ್ಷದಿಂದ
+    # ಇದೆ?" matched the who-we-are answer, which says where we are and what
+    # we make and never mentions years. The model has those same facts in its
+    # brief, so it can answer the question that was actually asked and fall
+    # back to "our engineer will confirm" for the part it does not know.
+    # Something was read from this message, so the reply has real content and
+    # the qualification is moving. No need for a model.
+    for field in ("capacity_kva", "quantity", "application",
+                  "delivery_location"):
+        if followup.get(field):
+            return False
+    if followup.get("delivery_same"):
+        return False
+    return True
+
+
+# WHAT A GENERATED REPLY MAY NOT CONTAIN. ASCII terms are matched on word
+# boundaries through _label_matches, because "bis" sits inside "business" and
+# a substring test would reject an ordinary sentence. Kannada terms are
+# substring-matched, as everywhere else in this module.
+_REPLY_BANNED_TERMS = (
+    ("iso", "a certification"),
+    ("bis", "a certification"),
+    ("bee", "a certification"),
+    ("ce mark", "a certification"),
+    ("is 1180", "a certification"),
+    ("warranty", "a warranty"),
+    ("guarantee", "a warranty"),
+    ("ವಾರಂಟಿ", "a warranty"),
+    ("ಗ್ಯಾರಂಟಿ", "a warranty"),
+    ("impedance", "a specification"),
+    ("no-load loss", "a specification"),
+    ("load loss", "a specification"),
+    ("gtp", "a specification"),
+    ("discount", "a commercial term"),
+    ("ರಿಯಾಯಿತಿ", "a commercial term"),
+)
+
+# A figure next to money, or the symbol itself. The bare words for "price"
+# are allowed: "ಬೆಲೆ engineer ತಿಳಿಸುತ್ತಾರೆ" says nothing and is the answer we
+# want. A NUMBER beside them is the claim.
+_REPLY_MONEY_RE = re.compile(
+    r"₹"
+    # ASCII money words take a word boundary.
+    r"|\b(?:rs|inr)\b\.?\s*\d"
+    r"|\d\s*(?:rs|inr|rupees?|lakhs?|crores?)\b"
+    # KANNADA MONEY WORDS TAKE NONE. A trailing \b cannot match after "ರೂ":
+    # it ends in a combining vowel sign, which is not a \w character, so
+    # there is no \w/non-\w transition to anchor on — the same class of bug
+    # that silently disabled the Kannada unit words in _QTY_RE. "ಸುಮಾರು
+    # 50000 ರೂ" was therefore not read as a price.
+    r"|\d\s*(?:ರೂ|ಲಕ್ಷ|ಕೋಟಿ)",
+    re.IGNORECASE)
+
+# A figure next to a unit of time, which is a lead-time or delivery-date
+# claim. kVA figures are untouched because no time unit follows them.
+_REPLY_LEADTIME_RE = re.compile(
+    r"\d+\s*(?:day|days|week|weeks|month|months|ದಿನ|ವಾರ|ತಿಂಗಳ)",
+    re.IGNORECASE)
+
+
+def reply_violates_evidence(text: str):
+    """Why this generated reply may not be sent, or None if it may.
+
+    Returns a short reason, so a refusal can be logged and counted rather
+    than silently swallowed.
+    """
+    raw = text or ""
+    low = raw.lower()
+    if not raw.strip():
+        return "empty"
+    if _REPLY_MONEY_RE.search(raw):
+        return "a price"
+    if _REPLY_LEADTIME_RE.search(raw):
+        return "a delivery time"
+    for term, reason in _REPLY_BANNED_TERMS:
+        if term.isascii():
+            if _label_matches(low, term):
+                return reason
+        elif term in low:
+            return reason
+    # A capacity we do not offer, stated as if we do.
+    for figure in re.findall(r"(\d{2,4})\s*k\s*v\s*a", low):
+        if int(figure) not in CATALOGUE_KVA and int(figure) not in PLANNED_KVA:
+            return "a rating we do not offer"
+    return None
+
+
+def model_brief_kn() -> str:
+    """The system prompt for a Bairavi reply, built from the same tables the
+    deterministic answers use, so the two cannot disagree."""
+    offered = " / ".join(f"{k} kVA" for k in CATALOGUE_KVA)
+    planned = " / ".join(f"{k} kVA" for k in PLANNED_KVA)
+    approved = ", ".join(d.upper() for d, v in _DISCOM_APPROVAL_STATED.items()
+                         if v == "APPROVED")
+    pending = ", ".join(d.upper() for d, v in _DISCOM_APPROVAL_STATED.items()
+                        if v == "IN_PROGRESS")
+    return (
+        "ನೀವು *Bairavi Trans Solutions* ನ WhatsApp ಸಹಾಯಕ. "
+        "ನಾವು oil-immersed 3-phase distribution transformer ತಯಾರಕರು, "
+        "Kadaba, ದಕ್ಷಿಣ ಕನ್ನಡ.\n"
+        f"ನಮ್ಮ standard range: {offered}. ಯೋಜನೆಯಲ್ಲಿ: {planned}.\n"
+        f"DISCOM approval: {approved} ಆಗಿದೆ; {pending} ನಿರೀಕ್ಷೆಯಲ್ಲಿ.\n"
+        "ಡೆಲಿವರಿ: ಈಗ MESCOM ವ್ಯಾಪ್ತಿ; ಕರ್ನಾಟಕದ ಉಳಿದ ಭಾಗಗಳಿಗೆ ವಿಸ್ತರಣೆ ಆಗುತ್ತಿದೆ.\n"
+        "\n"
+        "ನಿಯಮಗಳು — ಇವು ಕಡ್ಡಾಯ:\n"
+        "1. ಬೆಲೆ, ದರ, ಯಾವುದೇ ಹಣದ ಅಂಕಿ ಎಂದಿಗೂ ಹೇಳಬೇಡಿ.\n"
+        "2. ಡೆಲಿವರಿ ಎಷ್ಟು ದಿನ/ವಾರ/ತಿಂಗಳು ಎಂದು ಹೇಳಬೇಡಿ.\n"
+        "3. ISO / BIS / BEE / certificate / warranty / guarantee ಬಗ್ಗೆ "
+        "ಏನೂ ಹೇಳಬೇಡಿ.\n"
+        "4. Technical spec (loss, impedance, ಅಳತೆ, ತೂಕ, GTP) ಹೇಳಬೇಡಿ.\n"
+        "5. ಮೇಲಿನ range ನಲ್ಲಿ ಇಲ್ಲದ kVA ಇದೆ ಎಂದು ಹೇಳಬೇಡಿ.\n"
+        "6. ಗೊತ್ತಿಲ್ಲದಿದ್ದರೆ: 'ನಮ್ಮ engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ' ಎಂದು ಹೇಳಿ.\n"
+        "7. ಗ್ರಾಹಕ ಬರೆದ ಭಾಷೆಯಲ್ಲೇ ಉತ್ತರಿಸಿ. 2–4 ಸಾಲು, WhatsApp ಶೈಲಿ.\n"
+        "8. Asthra DigiTech ನ ಸೇವೆಗಳ ಬಗ್ಗೆ ಮಾತನಾಡಬೇಡಿ — ಇದು "
+        "transformer ವಿಚಾರಣೆ."
+    )
+
+
+def compose_model_reply(ai_text: str, followup: dict, known: dict = None):
+    """(reply, refusal_reason) for a generated answer.
+
+    The guard runs FIRST, so a reply that states a price or a certification
+    never reaches a customer — it is discarded whole rather than edited,
+    because a sentence with the claim removed is a sentence whose meaning
+    nobody checked.
+
+    When it passes, the outstanding qualification question is appended. The
+    model answers what was asked; the flow still gets what it needs, and the
+    conversation does not stall just because the customer changed the
+    subject for one turn.
+    """
+    reason = reply_violates_evidence(ai_text)
+    if reason:
+        return None, reason
+    lines = [(ai_text or "").strip()]
+    fields = outstanding(followup, known)
+    if fields:
+        lines.append("\n" + question_for(fields[0], known))
+    return "\n".join(lines), None
 
 
 def commercial_intent(text: str):
