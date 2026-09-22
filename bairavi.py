@@ -510,8 +510,54 @@ def in_transformer_flow(history) -> bool:
 # The two fields the ad form never carries and the first reply asks for. The
 # answers arrived and were thrown away; now they are read.
 
+# A NUMBER FOLLOWED BY A UNIT OF MEASUREMENT IS NOT A COUNT.
+#
+# The unit word here is optional, and must stay optional: a customer
+# asked "how many?" answers "2", and that 2 is a real order. But with
+# nothing else to stop it, ANY one-to-three digit number in the message
+# became the quantity. Two real conversations on 2026-09-22:
+#
+#   "25 kv. 15 hp"                 -> 15 units   (15 hp is the PUMP motor)
+#   "ಚೇಳೂರು ಇಂದ 5 ಕೀ ಮೀ"            ->  5 units   (5 km is a DISTANCE)
+#
+# Quantity is the number a quotation is multiplied by, so this is the
+# most expensive misread available here — the second customer was
+# quoted for five transformers while describing how far away the village
+# was. The fix is narrow on purpose: a figure is rejected only when the
+# text right after it names a unit that CANNOT be a count. Everything
+# else parses exactly as before.
+#
+# This names no places and adds no geography.
+_MEASUREMENT_UNIT = (
+    # motor rating — the one that produced "15 units"
+    "hp", "bhp", "ಎಚ್\u200cಪಿ", "ಎಚ್ ಪಿ",
+    # distance — the one that produced "5 units"
+    "km", "kms", "ಕಿಮೀ", "ಕೀ ಮೀ", "ಕಿ ಮೀ", "ಕಿಲೋಮೀಟರ್", "ಕೀಮೀ",
+    "meter", "metre", "mtr", "ft", "feet", "ಅಡಿ", "ಮೀಟರ್",
+    # electrical — kv/kva were already handled by an ad-hoc span test,
+    # which this table replaces
+    "kv", "kva", "kw", "kwh", "mva", "volt", "volts", "amp", "amps",
+    "hz", "phase", "ಫೇಸ್",
+    # land area, common in an agricultural enquiry
+    "acre", "acres", "guntha", "gunta", "ಎಕರೆ", "ಗುಂಟೆ",
+)
+
+# WHY EACH ALTERNATIVE CARRIES ITS OWN LOOKAHEAD, not one trailing \b:
+# Python's \b is a \w/non-\w transition, and the Kannada virama
+# (U+0CCD, the last character of "ಯುನಿಟ್") is a combining mark, which is
+# not \w. A trailing \b can therefore never match after it, so the two
+# Kannada unit words never actually matched — a latent bug masked by the
+# optional suffix, since the bare number matched instead.
 _QTY_RE = re.compile(
-    r"\b(\d{1,3})\s*(?:units?|nos?|pcs?|pieces?|ಯುನಿಟ್|ನಗ)?\b", re.IGNORECASE)
+    r"\b(?P<n>\d{1,3})\s*(?:"
+    r"units?(?![a-z])|nos?(?![a-z])|pcs?(?![a-z])|pieces?(?![a-z])"
+    # Permissive: Kannada inflects, and "2 ಯುನಿಟ್ಗಳು" is the natural
+    # plural. A number immediately before this stem is a count.
+    r"|ಯುನಿಟ್"
+    # Strict: "ನಗ" is a prefix of "ನಗರ" (city), which appears in real
+    # addresses, so it must be the whole word.
+    r"|ನಗ(?![\u0C80-\u0CFF])"
+    r")?", re.IGNORECASE)
 
 # Application vocabulary, English and Kannada. An allowlist: an unrecognised
 # purpose stays None rather than being guessed, because "what it is for"
@@ -828,10 +874,25 @@ def parse_followup(text: str, awaiting=()) -> dict:
     # units" now yields 3 instead of giving up at 250.
     qty = None
     for m in _QTY_RE.finditer(low):
-        n = int(m.group(1))
-        span = low[m.start():m.start() + len(m.group()) + 5]
-        if "kv" in span or not (0 < n <= 999) or n == cap:
+        n = int(m.group("n"))
+        if not (0 < n <= 999) or n == cap:
             continue
+        # AN EXPLICIT UNIT WORD WINS. If the customer named the unit
+        # themselves — "2 units", "2 ಯುನಿಟ್" — the figure is a count and
+        # nothing after it can change that. Found by a mutation: without
+        # this, "2 ಯುನಿಟ್ ಕೀ ಮೀ" returned NO quantity, because the match
+        # consumed the unit word and the measurement test then read the
+        # "ಕೀ ಮೀ" that followed it. The customer had said "units" out loud.
+        stated_unit = m.group().strip()[len(m.group("n")):].strip()
+        if not stated_unit:
+            # WHAT FOLLOWS A BARE FIGURE. The old test looked five characters
+            # past the match for "kv" only, which is why "15 hp" and
+            # "5 ಕೀ ಮೀ" got through. The table is consulted at the start of
+            # the remaining text, so "15 hp" is a rating and "15 units" is
+            # still fifteen.
+            rest = low[m.end():].lstrip(" \t.-")
+            if any(rest.startswith(u) for u in _MEASUREMENT_UNIT):
+                continue
         qty = n
         break
     app = None
