@@ -814,9 +814,62 @@ def fetch_context(phone: str) -> dict:
     # Keep up to 20 turns available. Callers slice to what they actually want —
     # generate_reply (client) still takes 8-10, so this costs clients nothing;
     # it exists so owner mode can use a deeper window.
-    ctx["history"] = [{"role": r["role"], "content": r["content"]}
+    # created_at rides along so a caller can ask HOW OLD a turn is. Additive:
+    # every existing reader takes role/content and ignores the extra key.
+    ctx["history"] = [{"role": r["role"], "content": r["content"],
+                       "created_at": r.get("created_at", "")}
                       for r in reversed(convo)][-20:]
     return ctx
+
+# A PENDING QUESTION GOES STALE. Decided 2026-09-22 after the owner
+# messaged the bot as a customer: a delivery question asked TWO DAYS earlier
+# was still "live", so the greeting that opened the new conversation was read
+# as the answer to it.
+#
+# Twelve hours, and the number is a trade, not a guess. A real answer to
+# "where should we deliver?" arrives the same day or the next morning — the
+# window has to cover an overnight gap, which is ordinary for a farmer. Past
+# that, a bare word is far more likely to be someone starting a fresh
+# conversation than someone answering yesterday's question.
+#
+# WHEN IT IS WRONG IT COSTS ONE TURN. An expired question is not forgotten:
+# it is still outstanding, so the reply asks it again and the customer's next
+# message is read normally. That is the cheap direction to be wrong in. The
+# expensive direction is what happened in production — a greeting stored as a
+# delivery address, which then made the field established, emptied the
+# outstanding set, and turned every later reply into a receipt with no
+# question in it.
+#
+# FLOW MEMBERSHIP IS NOT BOUNDED BY THIS. Someone who enquired about a
+# transformer is still a transformer lead tomorrow; only the pending QUESTION
+# expires.
+AWAITING_MAX_AGE_HOURS = 12
+
+
+def bairavi_awaiting(history) -> tuple:
+    """What the last Bairavi reply is still waiting for, if it is recent.
+
+    The time comparison lives here rather than in bairavi.py, which imports
+    only `re` and `hashlib` and stays a pure text module.
+    """
+    rows = list(history or [])
+    for msg in reversed(rows):
+        if msg.get("role") != "assistant":
+            continue
+        if bairavi.FLOW_MARKER not in (msg.get("content") or ""):
+            continue
+        # The most recent Bairavi reply. Its age decides, and a missing or
+        # unparseable timestamp counts as stale — the fail-safe direction,
+        # since the cost is one extra question.
+        if not _within_hours(msg.get("created_at") or "",
+                             AWAITING_MAX_AGE_HOURS):
+            return ()
+        break
+    # Reading the marker itself stays in bairavi.py, which owns the format
+    # and is tested against it directly. This adds the time bound and
+    # nothing else.
+    return bairavi.awaiting_from_history(rows)
+
 
 def warn_if_transcript_lost(phone: str, outcome: str, what: str) -> None:
     """Tell the owner when a turn failed to persist. Observability, not repair.
@@ -5407,7 +5460,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # should we deliver?" — parsed as nothing, and the customer was
             # asked a fourth time.
             followup = bairavi.parse_followup(
-                user_text, bairavi.awaiting_from_history(ctx["history"]))
+                user_text, bairavi_awaiting(ctx["history"]))
             # WHAT THE FORM ALREADY ANSWERED, recovered from the transcript.
             # Without it the follow-up is stateless and would ask again for a
             # delivery place the customer gave in their first message — the

@@ -710,11 +710,19 @@ class TheWebhookActuallyPassesTheContext(unittest.TestCase):
                          "parse_followup was called without the awaiting "
                          "context — a bare place name will not be read")
 
-    def test_that_context_comes_from_awaiting_from_history(self):
+    def test_that_context_comes_from_the_TIME_BOUNDED_reader(self):
+        """It must be bairavi_awaiting, not awaiting_from_history directly.
+
+        The unbounded reader treats a question asked days ago as still live.
+        On 2026-09-22 that made the greeting opening a new conversation read
+        as the answer to a two-day-old delivery question. The webhook wrapper
+        adds the age check; calling the pure reader here would silently
+        reintroduce the defect, so the call site is pinned.
+        """
         import ast as _ast
         second = self._followup_call()[0].args[1]
         self.assertIsInstance(second, _ast.Call)
-        self.assertEqual(second.func.attr, "awaiting_from_history")
+        self.assertEqual(second.func.id, "bairavi_awaiting")
 
 
 class NoPlaceVocabularyWasIntroduced(unittest.TestCase):
