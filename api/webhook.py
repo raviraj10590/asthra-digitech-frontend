@@ -2092,7 +2092,10 @@ def sync_lead_to_crm(phone: str, data: dict):
         else:
             r = requests.post(
                 f"{CRM_SUPABASE_URL}/rest/v1/clients",
-                headers={**_crm_headers(), "Prefer": "return=minimal"},
+                # return=representation, not minimal: the new row's id is
+                # needed immediately to adopt the messages that arrived
+                # before it existed (see _crm_adopt_orphan_messages).
+                headers={**_crm_headers(), "Prefer": "return=representation"},
                 json={
                     "user_id": CRM_OWNER_USER_ID,
                     "name": data.get("name") or f"WhatsApp Lead {phone}",
@@ -2110,8 +2113,71 @@ def sync_lead_to_crm(phone: str, data: dict):
             if not r.ok:
                 print(f"CRM_LEAD_INSERT_FAILED status={r.status_code} "
                       f"phone=...{str(phone)[-4:]}")
+            else:
+                _crm_adopt_orphan_messages(phone, _crm_new_client_id(r))
     except Exception as e:
         print(f"sync_lead_to_crm error: {e}")
+
+def _crm_new_client_id(response):
+    """The id of the client row we just created, or None.
+
+    Tolerant on purpose: a body that is not the expected list of one object
+    simply yields None, and the adoption below is then skipped. Creating the
+    lead is the important half and must not fail because of this.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    if isinstance(body, dict):
+        body = [body]
+    if not isinstance(body, list) or not body or not isinstance(body[0], dict):
+        return None
+    return body[0].get("id") or None
+
+
+def _crm_adopt_orphan_messages(phone: str, client_id):
+    """Link the messages that arrived before this client row existed.
+
+    WHY THEY EXIST. The CRM links a message to a client with a BEFORE INSERT
+    trigger that looks the phone up in `clients`. For a brand-new lead the
+    first message IS the thing that creates the lead, so it arrives before
+    any client row exists and the trigger has nothing to find. On
+    2026-09-22 every one of eight conversations had exactly its first two
+    messages unlinked — and one of those two is the Meta ad form submission,
+    the single most information-dense message in the thread. Opening that
+    lead in the CRM did not show it.
+
+    ONLY ON CREATION, and that bound is what keeps this safe. It runs in the
+    branch where this phone had no client row at all, so the rows it can
+    touch are this conversation's own opening messages. It is not a
+    backfill: a phone that already has a client row goes down the other
+    branch and is never touched — which also excludes the one duplicated
+    phone, where two client rows exist and the CRM has deliberately refused
+    to guess which one owns the thread.
+
+    Narrow by construction: `client_id is null` plus that exact phone, so it
+    can never move a message from one client to another.
+    """
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY) or not client_id:
+        return
+    try:
+        r = requests.patch(
+            f"{CRM_SUPABASE_URL}/rest/v1/whatsapp_messages",
+            headers={**_crm_headers(), "Prefer": "return=minimal"},
+            params={"phone": f"eq.{phone}", "client_id": "is.null"},
+            json={"client_id": client_id},
+            timeout=3,
+        )
+        if not r.ok:
+            print(f"CRM_ADOPT_FAILED status={r.status_code} "
+                  f"phone=...{str(phone)[-4:]}")
+    except Exception as e:
+        # Never fail the turn over this. The lead is created either way and
+        # the messages stay readable by phone.
+        print(f"CRM_ADOPT_ERROR type={type(e).__name__} "
+              f"phone=...{str(phone)[-4:]}")
+
 
 def send_text(to: str, message: str):
     """Returns the channel result so stage ⑫ can OBSERVE it.
