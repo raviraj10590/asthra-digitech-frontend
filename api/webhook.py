@@ -142,7 +142,14 @@ OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-5.4").strip()
 # for the actual reply — an empty reply is a real failure mode here, verified
 # live. Hence its own, larger budget.
 DEEPSEEK_API_KEY    = os.environ.get("DEEPSEEK_API_KEY", "")
-DEEPSEEK_MODEL      = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro").strip()
+# deepseek-flash is DeepSeek-V4.1-Flash, the owner's choice on 2026-09-23.
+# DeepSeek's own docs (api-docs.deepseek.com/news/news260910): "Set your model
+# to deepseek-flash." They also say that since 2026-09-14 every deepseek-v4-pro
+# request has ALREADY been routed to V4.1-Flash, "until V4.1-Pro launches" —
+# so this bot was running Flash through a temporary alias that would silently
+# switch model on DeepSeek's schedule. Naming it removes that surprise.
+# Unset in Vercel, so this default is what production uses.
+DEEPSEEK_MODEL      = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash").strip()
 DEEPSEEK_BASE_URL   = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 DEEPSEEK_MAX_TOKENS = int(os.environ.get("DEEPSEEK_MAX_TOKENS", "1200"))
 

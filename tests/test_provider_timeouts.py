@@ -320,7 +320,9 @@ class NothingElseChanged(unittest.TestCase):
         self.assertEqual(set(w._PROVIDERS), {"deepseek", "openai", "gemini"})
 
     def test_11_model_selection_is_unchanged(self):
-        self.assertEqual(w.DEEPSEEK_MODEL, "deepseek-v4-pro")
+        # V4.1-Flash, named explicitly (2026-09-23). deepseek-v4-pro was a
+        # temporary alias DeepSeek routes to Flash until V4.1-Pro launches.
+        self.assertEqual(w.DEEPSEEK_MODEL, "deepseek-flash")
         import inspect
         self.assertIn("model=OPENAI_CHAT_MODEL",
                       inspect.getsource(w._call_openai))
