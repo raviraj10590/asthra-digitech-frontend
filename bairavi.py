@@ -1087,6 +1087,8 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
         return False
     if followup.get("discom_approval_ask") is not None:
         return False
+    if followup.get("is_ack"):
+        return False
     # THE OTHER QUESTIONS GO TO THE MODEL FIRST, and their evidenced answers
     # become the fallback rather than the first responder. A keyword match is
     # not the same as understanding the question: "ನಿಮ್ಮ ಕಂಪನಿ ಎಷ್ಟು ವರ್ಷದಿಂದ
@@ -1721,7 +1723,19 @@ def _bare_delivery_answer(text: str):
         return None
     return ", ".join(kept)
 
-def parse_followup(text: str, awaiting=()) -> dict:
+# YES, TO "SAME PLACE?". When the project location is known, the delivery
+# question is asked as a confirmation — "ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳಕ್ಕೆ ಆ — bammanjogi?"
+# — and the natural answer is "Ok". On 2026-09-23 a customer answered exactly
+# that and was not understood: "ok" is rejected as an address (correctly) and
+# was not a same-place word, so the bot re-introduced the company and asked
+# the identical question again. Only as the WHOLE answer, only when delivery
+# is awaited, and only when there is a location to be the same as.
+_AFFIRMATIONS = ("ok", "okay", "ok sir", "k", "yes", "yes sir", "yeah", "yep",
+                 "haan", "ha", "ಸರಿ", "ಆಯ್ತು", "correct", "right", "👍",
+                 "ಹೌದು", "houdu", "howdu")
+
+
+def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     """Quantity, application and whether a price was asked. None when unread.
 
     Deliberately NOT a general extractor. It reads the two fields the first
@@ -1777,10 +1791,19 @@ def parse_followup(text: str, awaiting=()) -> dict:
     # the project location the form already captured, so it is recorded as a
     # confirmation rather than as an address.
     same = any(w in low for w in _SAME_PLACE) if not dl else False
+    bare = low.strip(_TRIM)
+    if (not dl and not same and AWAITING_DELIVERY in (awaiting or ())
+            and (known or {}).get("location") and bare in _AFFIRMATIONS):
+        same = True
+    # A bare acknowledgement or greeting says nothing a model can answer, and
+    # asking one produced a paragraph re-introducing the company to someone
+    # who had just typed "Ok".
+    is_ack = bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or _is_greeting(bare)
 
     return {"quantity": qty, "application": app, "capacity_kva": cap,
             "delivery_location": dl, "delivery_same": same,
             "delivery_mentioned": mentioned,
+            "is_ack": is_ack,
             # Unchanged meaning and unchanged readers: "did they raise money
             # at all". commercial_intent says WHICH ask it was.
             "asked_price": any(w in low for w in _PRICE_ASK),
@@ -1977,7 +2000,7 @@ def established_from_history(history) -> dict:
         # A form answers different questions from a chat reply, so each is
         # read by its own extractor. Neither is trusted to invent a field.
         turn = (parse(text) if is_lead_form(text)
-                else parse_followup(text, awaiting))
+                else parse_followup(text, awaiting, known=state))
         state = merged_state(state, turn)
     return state
 

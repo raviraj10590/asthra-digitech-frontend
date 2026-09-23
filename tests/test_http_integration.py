@@ -388,12 +388,16 @@ class HttpRouting(unittest.TestCase):
         self.assertEqual(e["sent"], [])
 
     def test_duplicate_delivery_is_suppressed(self):
-        """Meta retries. The same text within the window must not be answered twice."""
+        """Meta retries. The same text within the window must not be answered twice.
+
+        A long message, because since 2026-09-23 short repeats ("Ok", "Hi")
+        are treated as a person repeating themselves, not a retry."""
+        text = "what is the price for a website with 10 pages and a blog?"
         ctx = {"history": [], "paused": False, "vip_alerted": False,
                "lead_alerted": False, "recent_sys": [],
-               "last_user": {"content": "website price?",
+               "last_user": {"content": text,
                              "created_at": "2099-01-01T00:00:00+00:00"}}
-        resp, e = post(wa_payload(CLIENT, "website price?"),
+        resp, e = post(wa_payload(CLIENT, text),
                        stubs=[mock.patch.object(w, "fetch_context", lambda s: ctx)])
         self.assertEqual(resp.status, 200)
         self.assertEqual(e["sent"], [], "duplicate webhook was answered twice")

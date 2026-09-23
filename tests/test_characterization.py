@@ -159,9 +159,19 @@ class TestPureHelpers(unittest.TestCase):
         self.assertEqual(sorted(names), ["deepseek", "gemini", "openai"])
 
     def test_duplicate_webhook_detection(self):
-        ctx = {"last_user": {"content": "hello", "created_at": w._now_iso()}}
-        self.assertTrue(w.is_duplicate_webhook(ctx, "hello"))
-        self.assertFalse(w.is_duplicate_webhook(ctx, "something else"))
+        long = "I need a quotation for a 63 kVA transformer at Tumkur"
+        ctx = {"last_user": {"content": long, "created_at": w._now_iso()}}
+        self.assertTrue(w.is_duplicate_webhook(ctx, long))
+        self.assertFalse(w.is_duplicate_webhook(ctx, "something else entirely"))
+
+    def test_a_short_repeat_is_a_person_not_a_retry(self):
+        """2026-09-23: a customer typed "Ok" twice, eighteen seconds apart, and
+        the second got no reply at all. Updated from a version of the test
+        above that used "hello" — the exact case this rule now answers."""
+        for short in ("Ok", "hello", "Hi", "1", "ಸರಿ", "yes", "Agriculture"):
+            with self.subTest(short=short):
+                ctx = {"last_user": {"content": short, "created_at": w._now_iso()}}
+                self.assertFalse(w.is_duplicate_webhook(ctx, short))
 
 
 class TestMemoryHelpers(unittest.TestCase):

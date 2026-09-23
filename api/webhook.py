@@ -1141,8 +1141,22 @@ def upsert_lead(phone: str, data: dict):
         print(f"LEAD_CRM_SYNC_FAILED phone=...{phone[-4:]} reason={why} "
               f"stored={stored}")
 
+# SHORT MESSAGES ARE PEOPLE. The durable wamid claim already stops Meta's
+# retries; this content check exists only for the rare re-send Meta gives a
+# NEW wamid. But on 2026-09-23 it also swallowed a real customer who typed
+# "Ok" twice, eighteen seconds apart — the second was treated as a retry and
+# got no reply at all, with the lifecycle marked COMPLETED. People repeat
+# "Ok", "Hi", "1" and "ಸರಿ" constantly; nobody retypes a long message
+# identically inside a minute. And if a short re-send does slip through, the
+# repeat-reply guard turns the second answer into a one-line re-ask — a much
+# smaller harm than silence.
+_DEDUPE_MIN_CHARS = 20
+
+
 def is_duplicate_webhook(ctx: dict, text: str) -> bool:
-    """Meta retries webhooks — identical text within 60s is a retry, not a person."""
+    """Meta retries webhooks — identical LONG text within 60s is a retry."""
+    if len((text or "").strip()) <= _DEDUPE_MIN_CHARS:
+        return False
     last = ctx.get("last_user") or {}
     return last.get("content") == text and _within_hours(last.get("created_at", ""), 1 / 60)
 
@@ -5582,13 +5596,15 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # readable. Without this "ಗುಜರಾತ್" — a direct answer to "where
             # should we deliver?" — parsed as nothing, and the customer was
             # asked a fourth time.
-            followup = bairavi.parse_followup(
-                user_text, bairavi_awaiting(ctx["history"]))
             # WHAT THE FORM ALREADY ANSWERED, recovered from the transcript.
             # Without it the follow-up is stateless and would ask again for a
             # delivery place the customer gave in their first message — the
-            # same discourtesy that lost the first fifteen leads.
+            # same discourtesy that lost the first fifteen leads. Computed
+            # FIRST now, because reading "Ok" as "yes, deliver to the same
+            # place" needs to know there is a place.
             known = bairavi.established_from_history(ctx["history"])
+            followup = bairavi.parse_followup(
+                user_text, bairavi_awaiting(ctx["history"]), known=known)
             # WHAT A QUOTATION REQUIRES, taken from the Brain's own goal
             # registry rather than restated in the Bairavi layer. Injected as
             # data so bairavi.py keeps no dependency on the bic package and
