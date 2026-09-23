@@ -85,7 +85,10 @@ class PausePrecedenceIsStructural(unittest.TestCase):
 
     def test_the_required_order_holds(self):
         """menu -> PAUSED -> business -> off-topic -> the rest."""
-        self.assertLess(position_of("is_menu_request"),
+        # The menu escape is identified by menu_reset_wanted since
+        # 2026-09-23, when greetings from a transformer lead stopped counting
+        # as a menu request. The ORDER it asserts is unchanged.
+        self.assertLess(position_of("menu_reset_wanted"),
                         position_of('ctx["paused"]'))
         self.assertLess(position_of('ctx["paused"]'),
                         position_of("bairavi.looks_like_transformer_enquiry"))
@@ -102,7 +105,7 @@ class PausePrecedenceIsStructural(unittest.TestCase):
                           if "user_text" in t or "bairavi." in t]
         self.assertTrue(content_driven, "no content-driven branches found")
         for i, t in content_driven:
-            if "is_menu_request" in t:
+            if "menu_reset_wanted" in t:
                 continue          # the customer's own escape hatch
             self.assertGreater(i, pause,
                                f"content-driven branch above the pause: {t!r}")
@@ -132,7 +135,7 @@ class PausePrecedenceIsStructural(unittest.TestCase):
     def test_only_the_menu_escape_may_precede_the_pause(self):
         before = [t for _ln, t in branch_order()[:position_of('ctx["paused"]')]]
         for t in before:
-            self.assertTrue("is_menu_request" in t or "BIC_AVAILABLE" in t,
+            self.assertTrue("menu_reset_wanted" in t or "BIC_AVAILABLE" in t,
                             f"{t!r} must not precede the pause check")
 
 

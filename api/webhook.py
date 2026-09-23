@@ -389,6 +389,25 @@ def is_off_topic(text: str) -> bool:
 
 # ── Menu escape hatch: these reset any stuck conversation back to the menu.
 MENU_KEYWORDS = ['menu', 'ಮೆನು', 'services', 'ಸೇವೆ', 'start', 'main menu', 'home', 'restart']
+# IN A TRANSFORMER CONVERSATION, ONLY AN EXPLICIT REQUEST RESETS IT. On
+# 2026-09-23 a Bairavi lead said "Hi" and was answered "ನಾನು ಆಸ್ತ್ರ AI —
+# ನಿಮ್ಮ ಡಿಜಿಟಲ್ ಮಾರ್ಕೆಟಿಂಗ್ ಸಹಾಯಕ": the menu reset runs before the Bairavi
+# branch, and a greeting counts as a menu request. That is the original
+# failure this whole flow exists to prevent — fifteen of sixteen transformer
+# buyers were once sent Asthra's services menu. "home", "services" and
+# "start" are ordinary answers from a transformer customer too.
+_EXPLICIT_MENU = ('menu', 'ಮೆನು', 'main menu', 'restart')
+
+
+def menu_reset_wanted(text: str, history) -> bool:
+    """Should this message reset the chat to Asthra's services menu?"""
+    if not is_menu_request(text):
+        return False
+    if bairavi.in_transformer_flow(history):
+        return (text or "").lower().strip() in _EXPLICIT_MENU
+    return True
+
+
 def is_menu_request(text: str) -> bool:
     t = text.lower().strip()
     return t in MENU_KEYWORDS or t in ('hi', 'hello', 'ಹಾಯ್', 'ನಮಸ್ಕಾರ')
@@ -5479,7 +5498,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
     is_new_contact = not ctx["history"] and not ctx.get("degraded")
 
     # ── Menu escape hatch: reset any stuck chat to the services menu ──
-    if is_menu_request(user_text) and not is_new_contact:
+    if menu_reset_wanted(user_text, ctx["history"]) and not is_new_contact:
         # Decision Record witness (3C rung 3). A deterministic predicate settled
         # this turn — recorded here rather than inferred later from the absence
         # of an AI call, because absence has several possible causes.

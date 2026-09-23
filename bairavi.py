@@ -479,7 +479,7 @@ def _form_location(value):
     if not value:
         return None, None
     low = value.lower()
-    app = next((a for needle, a in _APPLICATIONS if needle in low), None)
+    app = _application_of(low)
     if _is_place_like(value.strip(_TRIM)):
         return value, app
     return None, app
@@ -708,6 +708,24 @@ _APPLICATIONS = (
 # is applied where a number is needed, and every place it surfaces says it was
 # assumed.
 DEFAULT_QUANTITY = 1
+
+# WHOLE WORD ONLY. On 2026-09-23 "Ev ge" (for EV) was not read as a purpose,
+# because only "charging" and "ev station" were known. "ev" cannot join the
+# substring list above: it sits inside Devanahalli, Bevinahalli, every, never
+# and level, and would read half the map as a charging station.
+_APPLICATIONS_WHOLE_WORD = (("ev", "EV_CHARGING"),)
+
+
+def _application_of(low: str):
+    """The purpose this text states, or None. The single reader for it."""
+    for needle, value in _APPLICATIONS:
+        if needle in low:
+            return value
+    for needle, value in _APPLICATIONS_WHOLE_WORD:
+        if _label_matches(low, needle):
+            return value
+    return None
+
 
 # Offered to the customer verbatim. Kept next to _APPLICATIONS so the list we
 # SHOW can never drift from the list we can READ — the 2026-09-17 enquiry was
@@ -1106,6 +1124,12 @@ _REPLY_BANNED_TERMS = (
     ("load loss", "a specification"),
     ("gtp", "a specification"),
     ("discount", "a commercial term"),
+    # SIZING. "100 kVA transformer ... EV charging ಗೆ suitable ಆಗಿದೆ" went to a
+    # customer on 2026-09-23. Whether a rating carries a load depends on the
+    # load, which nobody here has measured; that judgement is the engineer's.
+    ("suitable", "a sizing claim"), ("sufficient", "a sizing claim"),
+    ("enough for", "a sizing claim"), ("ಸೂಕ್ತ", "a sizing claim"),
+    ("ಸಾಕಾಗುತ್ತದೆ", "a sizing claim"), ("ಸಾಕಾಗುತ್ತೆ", "a sizing claim"),
     ("ರಿಯಾಯಿತಿ", "a commercial term"),
 )
 
@@ -1200,7 +1224,9 @@ def model_brief_kn(known: dict = None) -> str:
         # quantity of 888 units.
         "9. ಗ್ರಾಹಕರ WhatsApp ನಂಬರ್ ನಮ್ಮ ಬಳಿ ಈಗಾಗಲೇ ಇದೆ. "
         "ಎಂದಿಗೂ ಫೋನ್ ನಂಬರ್ ಕೇಳಬೇಡಿ.\n"
-        "10. ಕೆಳಗೆ ಈಗಾಗಲೇ ತಿಳಿದಿರುವ ವಿವರ ಇದೆ — ಅದನ್ನು ಮತ್ತೆ ಕೇಳಬೇಡಿ."
+        "10. ಕೆಳಗೆ ಈಗಾಗಲೇ ತಿಳಿದಿರುವ ವಿವರ ಇದೆ — ಅದನ್ನು ಮತ್ತೆ ಕೇಳಬೇಡಿ.\n"
+        "11. ಯಾವ kVA ಯಾವ load ಗೆ ಸೂಕ್ತ/ಸಾಕು ಎಂದು ಹೇಳಬೇಡಿ — ಅದು engineer "
+        "ನಿರ್ಧಾರ."
         + _known_lines_kn(known)
     )
 
@@ -1316,6 +1342,13 @@ _NOT_A_BARE_ANSWER = ("ನಾನು", "ನಮ್ಮ", "my", "our", "i", "we",
                       # pronouns and possessives
                       "nanna", "nannu", "naanu", "nanu", "namma",
                       "nimma", "nim", "neevu", "nivu", "nange", "namge",
+                      # SECOND PERSON, the informal forms. "Ninage huccha" (you
+                      # are mad) was stored as a delivery address on
+                      # 2026-09-23, and because established facts never
+                      # erase, the bot stopped asking where to deliver for the
+                      # rest of that conversation.
+                      "ninage", "ninge", "ninna", "ninnu", "neenu", "ninu",
+                      "nin", "nimge", "nimage",
                       # question words
                       "yaaru", "yaava", "yava", "eshtu", "estu", "yake",
                       "enu", "hege", "gotta", "gothaa",
@@ -1454,6 +1487,9 @@ _NOT_A_PLACE_EXACT = (
     # still reads, because the comparison is exact.
     "layout", "site", "plot", "farm", "land", "village", "city", "town",
     "home", "house",
+    # ABUSE IS NOT AN ADDRESS — the same reasoning as a refusal to answer.
+    "huccha", "huchcha", "ಹುಚ್ಚ", "mad", "stupid", "idiot", "waste",
+    "fraud", "fake",
     "ಸೈಟ್", "ಜಮೀನು", "ಗ್ರಾಮ", "ಹಳ್ಳಿ", "ನಗರ",
 )
 
@@ -1585,7 +1621,7 @@ def _is_place_like(raw: str) -> bool:
         return False
     # Another field's answer. Purpose, capacity and quantity all have their
     # own extractors and must not be read as a place.
-    if any(needle in low for needle, _ in _APPLICATIONS):
+    if _application_of(low) is not None:
         return False
     if capacity_kva(raw) is not None:
         return False
@@ -1704,11 +1740,7 @@ def parse_followup(text: str, awaiting=()) -> dict:
     # A capacity is not a quantity, and neither is a distance or a motor
     # rating. _read_quantity owns that rule and the delivery filter shares it.
     qty = _read_quantity(low, cap)
-    app = None
-    for needle, value in _APPLICATIONS:
-        if needle in low:
-            app = value
-            break
+    app = _application_of(low)
     # WHERE TO DELIVER. An explicit delivery word is required: a bare place
     # name in a follow-up cannot be told apart from an application, a company
     # or a person, and a guessed delivery address is a lorry sent to the wrong
