@@ -766,7 +766,16 @@ def fetch_context(phone: str) -> dict:
             headers=_supa_headers("count=exact"),
             params={
                 "phone":  f"eq.{phone}",
-                "order":  "created_at.desc",
+                # id breaks the tie. save_messages writes the customer's row
+                # and the reply's marker in one insert, so they share the same
+                # created_at to the millisecond, and ordering by time alone
+                # left their order to chance. When the marker sorted first,
+                # the history replay read the customer's answer against the
+                # NEXT question instead of the one it answered: on 2026-09-23
+                # "Gokak" was acknowledged as the delivery place and then
+                # asked for again one turn later. ids are assigned in insert
+                # order, so the customer's row always precedes its marker.
+                "order":  "created_at.desc,id.desc",
                 # 45 rows because this window also carries system markers
                 # (BOT_PAUSED, PENDING_CONFIRM, OWNER_MEMORY::, alert flags);
                 # after filtering those out, ~20 real turns still remain.
@@ -1657,7 +1666,12 @@ def gemini_one_liner(image_bytes: bytes, mime: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # Short on purpose: the brief asks for 2-4 WhatsApp lines, and a long
 # generated answer in this flow is a longer surface for an unevidenced claim.
-BAIRAVI_MODEL_MAX_TOKENS = 400
+# 1200, not 400. The primary provider is a reasoning model whose thinking
+# is billed against the same budget, and 400 left too little for the answer:
+# replies stopped mid-sentence. The brief still asks for 2-4 lines, and a cut
+# reply is now refused outright (see _LAST_AI_TRUNCATED), so a larger ceiling
+# cannot produce a longer message — only a finished one.
+BAIRAVI_MODEL_MAX_TOKENS = 1200
 
 
 def bairavi_model_reply(phone: str, user_text: str, history: list,
@@ -1687,6 +1701,12 @@ def bairavi_model_reply(phone: str, user_text: str, history: list,
                              max_tokens=BAIRAVI_MODEL_MAX_TOKENS)
     if not raw:
         print("BAIRAVI_MODEL_NO_REPLY — falling back to the composed reply")
+        return ""
+    if _LAST_AI_TRUNCATED["value"]:
+        # Refused whole, like a guard failure. Half a sentence is worse than
+        # the composed reply, which always finishes its thought.
+        print(f"BAIRAVI_MODEL_REFUSED reason='truncated' "
+              f"phone=...{str(phone)[-4:]}")
         return ""
     reply, reason = bairavi.compose_model_reply(raw, followup, known)
     if reply is None:
@@ -1806,6 +1826,7 @@ def generate_reply_gemini(messages: list, max_tokens: int = None) -> str:
         # down and every reply came through here, customers got half-sentences
         # and nothing anywhere said so. Same signal, same warning, same words.
         if cand.get("finishReason") == "MAX_TOKENS":
+            _LAST_AI_TRUNCATED["value"] = True
             print(f"⚠️ gemini TRUNCATED at max_tokens="
                   f"{max_tokens or GEMINI_MAX_TOKENS} — reply cut mid-sentence")
 
@@ -1837,6 +1858,7 @@ def _call_openai(messages: list, max_tokens: int = None) -> str:
         # the provider tells us directly. A truncated structured reply used to
         # reach the user as raw JSON (see generate_owner_reply).
         if getattr(choice, "finish_reason", None) == "length":
+            _LAST_AI_TRUNCATED["value"] = True
             print(f"⚠️ openai TRUNCATED at max_tokens={max_tokens or OPENAI_MAX_TOKENS} "
                   f"— structured output will not parse")
         return choice.message.content.strip()
@@ -1867,6 +1889,7 @@ def _call_deepseek(messages: list, max_tokens: int = None) -> str:
             max_tokens=budget, temperature=0.75,
         )
         if getattr(resp.choices[0], "finish_reason", None) == "length":
+            _LAST_AI_TRUNCATED["value"] = True
             print(f"⚠️ deepseek TRUNCATED at max_tokens={budget} "
                   f"— structured output will not parse")
         content = (resp.choices[0].message.content or "").strip()
@@ -1918,11 +1941,22 @@ def _provider_chain() -> list:
             names.append(n)
     return [(n, _PROVIDERS[n]) for n in names]
 
+# WAS THE LAST REPLY CUT OFF? Set by each provider when it stopped at the
+# token ceiling, reset at the start of every _generate_ai_reply. The providers
+# only printed a warning and returned the fragment, which was fine for the
+# Asthra chat and not fine for Bairavi: on 2026-09-23 two customers were sent
+# "ನಮಸ್ತೆ Kariyanna ಅವರೇ, ನಿಮ್ಮ 25" and "ಗೋಕಾಕ್‌ನಲ್ಲಿರುವ ನಿಮ್ಮ ಅಗ್ರಿಕಲ್ಚರ್
+# ಪ್ರಾಜೆಕ್ಟ್‌" — sentences that simply stop. A flag rather than a changed
+# return value, so no existing caller's contract moves.
+_LAST_AI_TRUNCATED = {"value": False}
+
+
 def _generate_ai_reply(messages: list, apology: str, max_tokens: int = None) -> str:
     """Try each provider in configured order; fall back to `apology` only if all
     fail. One place holds provider order and failure logging — generate_reply
     and generate_owner_reply both call this rather than each carrying its own
     duplicate try-fallback."""
+    _LAST_AI_TRUNCATED["value"] = False
     chain = _provider_chain()
     for i, (name, provider) in enumerate(chain):
         result = provider(messages, max_tokens)

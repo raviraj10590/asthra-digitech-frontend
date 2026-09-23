@@ -346,13 +346,28 @@ def _kv_as_kva(text: str):
     return None
 
 
+# kV IN KANNADA LETTERS. "25 ಕೆವಿ ದರ ಏನಿದೆ" (what is the 25 kV rate?) was
+# read on 2026-09-23 as a quantity of TWENTY-FIVE units and no capacity at
+# all. The unit is the same unit this module already reads in Latin letters,
+# so it is rewritten to that spelling before the existing patterns run —
+# longest spelling first, so "ಕೆವಿಎ" is not half-consumed as "ಕೆವಿ".
+_KANNADA_KV = (("ಕೆ.ವಿ.ಎ", "kva"), ("ಕೆ ವಿ ಎ", "kva"), ("ಕೆವಿಎ", "kva"),
+               ("ಕೆ.ವಿ", "kv"), ("ಕೆ ವಿ", "kv"), ("ಕೆವಿ", "kv"))
+
+
+def _latin_kv(text: str) -> str:
+    for kannada, latin in _KANNADA_KV:
+        text = text.replace(kannada, latin)
+    return text
+
+
 def capacity_kva(text: str):
     """The kVA figure, or None when it cannot be read confidently.
 
     None is a correct answer and a human then confirms it. Returning a nearby
     catalogue size would be the confidently-wrong capacity AC-07 forbids.
     """
-    answer = _field(text, _FIELD_PATTERNS["capacity"]) or (text or "")
+    answer = _latin_kv(_field(text, _FIELD_PATTERNS["capacity"]) or (text or ""))
     m = _KVA_RE.search(answer)
     if m:
         return int(m.group(1))
@@ -407,7 +422,8 @@ def parse(text: str) -> dict:
     """
     kva = capacity_kva(text)
     is_form = is_lead_form(text)
-    loc = _field(text, _FIELD_PATTERNS["location"]) or None
+    raw_loc = _field(text, _FIELD_PATTERNS["location"]) or None
+    loc, form_app = _form_location(raw_loc)
     delivery = _field(text, _FIELD_PATTERNS["delivery"]) or None
     urg = urgency(text)
 
@@ -419,7 +435,8 @@ def parse(text: str) -> dict:
     #
     # On 2026-09-17 that class of failure cost a day of guessing. It now says
     # so in the owner alert rather than presenting a page of blanks.
-    form_unreadable = bool(is_form) and kva is None and loc is None and urg is None
+    form_unreadable = (bool(is_form) and kva is None and raw_loc is None
+                       and urg is None)
 
     return {
         "raw": text or "",
@@ -441,8 +458,31 @@ def parse(text: str) -> dict:
         "delivery_location": delivery,
         "name": _field(text, _FIELD_PATTERNS["name"]) or None,
         "urgency": urg,
-        "application": None,       # §6.2 field 6 — asked, strongest early signal
+        # §6.2 field 6 — asked, strongest early signal. Also read from the
+        # location field when the customer put their purpose there.
+        "application": form_app,
     }
+
+
+def _form_location(value):
+    """(location, application) from the ad form's location answer.
+
+    THE FORM'S LOCATION FIELD IS FREE TEXT, AND CUSTOMERS ANSWER A DIFFERENT
+    QUESTION IN IT. Two real forms on 2026-09-23:
+        "home"          -> echoed back as "📍 ಸ್ಥಳ: home", then "deliver to home?"
+        "ಅಗ್ರಿಕಲ್ಚರ್"   -> "📍 ಸ್ಥಳ: ಅಗ್ರಿಕಲ್ಚರ್" — the PURPOSE, in the place slot
+    The same filter that decides whether a chat reply names a place decides
+    here, so the two can never disagree. A purpose is kept as the purpose;
+    anything else that is not a place is dropped, and the reply then asks
+    where rather than confirming nonsense.
+    """
+    if not value:
+        return None, None
+    low = value.lower()
+    app = next((a for needle, a in _APPLICATIONS if needle in low), None)
+    if _is_place_like(value.strip(_TRIM)):
+        return value, app
+    return None, app
 
 
 # ── Conversation continuity ───────────────────────────────────────────────
@@ -538,6 +578,7 @@ _MEASUREMENT_UNIT = (
     # electrical — kv/kva were already handled by an ad-hoc span test,
     # which this table replaces
     "kv", "kva", "kw", "kwh", "mva", "volt", "volts", "amp", "amps",
+    "ಕೆ.ವಿ.ಎ", "ಕೆ ವಿ ಎ", "ಕೆವಿಎ", "ಕೆ.ವಿ", "ಕೆ ವಿ", "ಕೆವಿ",
     "hz", "phase", "ಫೇಸ್",
     # land area, common in an agricultural enquiry
     "acre", "acres", "guntha", "gunta", "ಎಕರೆ", "ಗುಂಟೆ",
@@ -622,14 +663,33 @@ _APPLICATIONS = (
     ("ev station", "EV_CHARGING"),
     ("agricultur", "AGRICULTURE"), ("agri", "AGRICULTURE"),
     ("ಕೃಷಿ", "AGRICULTURE"), ("pump", "AGRICULTURE"),
+    # THE SAME WORDS AS CUSTOMERS TYPE THEM, 2026-09-23. Two real answers to
+    # "what is it for?" were not read at all:
+    #   "ಬೋರ್ ವೆಲ್ ಉದ್ದೇಶ" (borewell purpose) — stored as the DELIVERY address
+    #   "ಅಗ್ರಿಕಲ್ಚರ್"       (agriculture, in Kannada letters) — asked again
+    # A borewell pump is the commonest farm load there is. The English loan
+    # words written in Kannada script are the same vocabulary this list
+    # already holds in Latin — not transliteration, and no place names.
+    ("borewell", "AGRICULTURE"), ("bore well", "AGRICULTURE"),
+    ("ಬೋರ್ ವೆಲ್", "AGRICULTURE"), ("ಬೋರ್‌ವೆಲ್", "AGRICULTURE"),
+    ("ಬೋರ್ವೆಲ್", "AGRICULTURE"), ("ಕೊಳವೆ ಬಾವಿ", "AGRICULTURE"),
+    # "ಅಗ್ರಿ" is the stem and covers "ಅಗ್ರಿಕಲ್ಚರ್"; a separate entry for the
+    # full word was dead weight, and a mutation removing it changed nothing.
+    ("ಕೊಳವೆಬಾವಿ", "AGRICULTURE"),
+    ("ಅಗ್ರಿ", "AGRICULTURE"), ("ಪಂಪ್", "AGRICULTURE"),
+    ("ನೀರಾವರಿ", "AGRICULTURE"), ("irrigation", "AGRICULTURE"),
+    ("ವ್ಯವಸಾಯ", "AGRICULTURE"),
     # After the agriculture needles on purpose: a "solar pump" is a farm
     # load, while a "solar plant" is its own segment.
     ("solar", "SOLAR"), ("ಸೋಲಾರ್", "SOLAR"),
     ("industr", "INDUSTRY"), ("ಕೈಗಾರಿಕೆ", "INDUSTRY"), ("factory", "INDUSTRY"),
+    ("ಇಂಡಸ್ಟ್ರಿ", "INDUSTRY"), ("ಫ್ಯಾಕ್ಟರಿ", "INDUSTRY"),
     ("construct", "CONSTRUCTION"), ("ಕಟ್ಟಡ", "CONSTRUCTION"),
     ("tender", "TENDER"), ("ಟೆಂಡರ್", "TENDER"),
     ("domestic", "DOMESTIC"), ("house", "DOMESTIC"), ("ಮನೆ", "DOMESTIC"),
     ("commercial", "COMMERCIAL"), ("shop", "COMMERCIAL"),
+    ("ಕಮರ್ಷಿಯಲ್", "COMMERCIAL"), ("ಶಾಪ್", "COMMERCIAL"),
+    ("ಕನ್ಸ್ಟ್ರಕ್ಷನ್", "CONSTRUCTION"),
 )
 
 # QUANTITY DEFAULT — owner's ruling, 2026-09-17.
@@ -1393,6 +1453,7 @@ _NOT_A_PLACE_EXACT = (
     # as the WHOLE answer: "Vidyaranyapura layout" is a real place and
     # still reads, because the comparison is exact.
     "layout", "site", "plot", "farm", "land", "village", "city", "town",
+    "home", "house",
     "ಸೈಟ್", "ಜಮೀನು", "ಗ್ರಾಮ", "ಹಳ್ಳಿ", "ನಗರ",
 )
 
@@ -1441,6 +1502,12 @@ _ADDRESS_MARKER = (
     "post", "pin", "road", "cross", "main", "layout", "nagar", "nagara",
     "colony", "extension", "circle", "street", "gram", "halli", "pura",
 )
+
+
+# The strict subset of _ADDRESS_MARKER that names an administrative unit.
+_ADMIN_MARKER = ("ಜಿಲ್ಲೆ", "ತಾಲ್ಲೂಕು", "ತಾಲೂಕು", "ಹೋಬಳಿ", "ಗ್ರಾಮ",
+                 "district", "dist", "taluk", "taluq", "tq", "hobli",
+                 "village")
 
 
 def _has_address_marker(low: str) -> bool:
@@ -1658,6 +1725,18 @@ def parse_followup(text: str, awaiting=()) -> dict:
     # so a place named in any other context is still not treated as an
     # address.
     if dl is None and AWAITING_DELIVERY in (awaiting or ()):
+        dl = _bare_delivery_answer(text)
+    # AN ADDRESS THAT SAYS WHAT IT IS. On 2026-09-23 a customer wrote
+    # "ಹರಿಯಬ್ಬೆ,ಹಿರಿಯೂರು ತಾಲೂಕು,ಚಿತ್ರದುರ್ಗ ಜಿಲ್ಲೆ" — village, taluk, district —
+    # at a moment the bot was not waiting for a place, so it was not read, and
+    # the next reply asked where to deliver. A bare place name still needs the
+    # question behind it (see above); text that names its own taluk or
+    # district does not, because that is how an address is built and nothing
+    # else is. Only the ADMINISTRATIVE markers count here — "road" or "main"
+    # alone would not be enough without the question.
+    if dl is None and any(
+            _label_matches(low, m) if m.isascii() else m in low
+            for m in _ADMIN_MARKER):
         dl = _bare_delivery_answer(text)
 
     mentioned = bool(_DELIVERY_MENTION_RE.search(text or ""))
