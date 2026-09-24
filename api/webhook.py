@@ -5605,6 +5605,16 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             known = bairavi.established_from_history(ctx["history"])
             followup = bairavi.parse_followup(
                 user_text, bairavi_awaiting(ctx["history"]), known=known)
+            _awaiting = bairavi_awaiting(ctx["history"])
+            # "K" AFTER EVERYTHING IS ANSWERED. Recorded, not replied to — a
+            # receipt for a receipt is noise, and the owner already has the
+            # lead. Anything readable, or any pending question, still gets
+            # the normal reply below.
+            if bairavi.is_silent_ack(followup, _awaiting):
+                _saved = save_messages([(sender, "user", user_text)])
+                warn_if_transcript_lost(sender, _saved, "Bairavi acknowledgement")
+                print(f"BAIRAVI_ACK_NO_REPLY phone=...{sender[-4:]}")
+                return
             # WHAT A QUOTATION REQUIRES, taken from the Brain's own goal
             # registry rather than restated in the Bairavi layer. Injected as
             # data so bairavi.py keeps no dependency on the bic package and

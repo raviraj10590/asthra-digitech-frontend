@@ -739,6 +739,18 @@ DEFAULT_QUANTITY = 1
 # and level, and would read half the map as a charging station.
 _APPLICATIONS_WHOLE_WORD = (("ev", "EV_CHARGING"),)
 
+# THE FARM ITSELF. On 2026-09-24 a customer gave "thota" as the project
+# location and later "ತೋಟ" as the delivery place: ತೋಟ is "farm/plantation",
+# not a place name. Read as a place it was stored as the address and the
+# purpose was never inferred. These words name the SITE TYPE of an
+# agricultural connection — farm, field, paddy, land — so they read as the
+# purpose and are rejected as an address (a village is still needed).
+# Whole words only: "thota" also begins place names such as Thotadahalli.
+_FARM_WORDS = ("thota", "tota", "thotha", "ತೋಟ", "ತೋಟದ", "ತೋಟಕ್ಕೆ", "ತೋಟದಲ್ಲಿ",
+               "farm", "farmland", "hola", "ಹೊಲ", "ಹೊಲಕ್ಕೆ", "ಹೊಲದ",
+               "gadde", "ಗದ್ದೆ", "ಗದ್ದೆಗೆ", "jameenu", "jameen", "ಜಮೀನು", "ಜಮೀನಿಗೆ", "ಜಮೀನಿನ")
+_WORD_RE = re.compile(r"[a-z0-9\u0C80-\u0CFF\u200c\u200d]+")
+
 
 # MISSPELT, NOT UNKNOWN. On 2026-09-24 a customer answered the purpose
 # question with "Agreeculture". It was stored as the delivery ADDRESS and the
@@ -776,6 +788,8 @@ def _application_of(low: str):
     for needle, value in _APPLICATIONS_WHOLE_WORD:
         if _label_matches(low, needle):
             return value
+    if any(w in _FARM_WORDS for w in _WORD_RE.findall(low)):
+        return "AGRICULTURE"
     for word in re.findall(r"[a-z]+", low):
         if len(word) < _FUZZY_MIN_LEN:
             continue
@@ -1378,7 +1392,9 @@ def commercial_intent(text: str):
 # an address is the AC-07 failure in its most expensive form: a lorry sent to
 # "ok". Kept deliberately broad — a rejected answer costs one more question,
 # a wrong one costs a delivery.
-_ACKNOWLEDGEMENTS = ("ok", "okay", "k", "hmm", "thanks", "thank you", "ok sir",
+# "kk"/"okk"/"ಓಕೆ": how "ok" is actually typed. On 2026-09-24 "kk" was
+# recorded as a delivery address.
+_ACKNOWLEDGEMENTS = ("ok", "okay", "k", "kk", "okk", "okey", "oky", "okie", "oki", "ok ok", "ಓಕೆ", "sari", "aytu", "ayitu", "hmm", "thanks", "thank you", "ok sir",
                      "sure", "fine", "ಸರಿ", "ಆಯ್ತು", "ಧನ್ಯವಾದ", "ಥ್ಯಾಂಕ್ಸ್",
                      "no", "illa", "ಇಲ್ಲ", "haan", "ha", "yes", "yep")
 
@@ -1737,6 +1753,9 @@ def _is_place_like(raw: str) -> bool:
     return True
 
 
+_LIST_MARKER = re.compile(r"^\s*\(?\d{1,2}\s*[.)\]:-]\s*")
+
+
 def _bare_delivery_answer(text: str):
     """The customer's own words as the delivery place, or None.
 
@@ -1758,7 +1777,10 @@ def _bare_delivery_answer(text: str):
     raw = (text or "").strip(_TRIM)
     if not raw:
         return None
-    segments = [seg for seg in (part.strip(_TRIM)
+    # NUMBERED ANSWERS. "1) ತೋಟ / 2) agriculture / 3) 25kVA" (2026-09-24)
+    # was stored as the address "1) ತೋಟ": customers number their answers to
+    # match our numbered questions, and the number is not part of any place.
+    segments = [seg for seg in (_LIST_MARKER.sub("", part.strip(_TRIM)).strip(_TRIM)
                                 for part in _SEGMENT_SPLIT.split(raw)) if seg]
     kept = [seg for seg in segments if _is_place_like(seg)]
     # VERBATIM ONLY WHEN THE WHOLE MESSAGE IS AN ADDRESS. Both conditions are
@@ -1775,7 +1797,7 @@ def _bare_delivery_answer(text: str):
     # mutation — dropping the first conjunct failed no test. It is kept
     # because the whole-message test is the one that reads across segment
     # boundaries, and a structural test asserts both are still here.
-    if _is_place_like(raw) and len(kept) == len(segments):
+    if _is_place_like(raw) and len(kept) == len(segments) and not _LIST_MARKER.match(raw):
         return raw
     if not kept:
         return None
@@ -1788,7 +1810,7 @@ def _bare_delivery_answer(text: str):
 # was not a same-place word, so the bot re-introduced the company and asked
 # the identical question again. Only as the WHOLE answer, only when delivery
 # is awaited, and only when there is a location to be the same as.
-_AFFIRMATIONS = ("ok", "okay", "ok sir", "k", "yes", "yes sir", "yeah", "yep",
+_AFFIRMATIONS = ("ok", "okay", "ok sir", "k", "kk", "okk", "okey", "oky", "okie", "oki", "ok ok", "ಓಕೆ", "sari", "aytu", "ayitu", "yes", "yes sir", "yeah", "yep",
                  "haan", "ha", "ಸರಿ", "ಆಯ್ತು", "correct", "right", "👍",
                  "ಹೌದು", "houdu", "howdu")
 
@@ -2661,3 +2683,21 @@ def compose_owner_alert(phone: str, parsed: dict) -> str:
         f"and the customer has not said)\n"
         f"\nNo price, delivery date or certificate was quoted to the customer."
     )
+
+
+def is_silent_ack(followup: dict, awaiting=()) -> bool:
+    """A bare "K"/"Ok" with nothing pending: no reply is owed.
+
+    On 2026-09-24 a customer who had answered every question typed "K" and
+    was sent "✅ ಧನ್ಯವಾದ — ನಿಮ್ಮ ಸಂದೇಶ ಸಿಕ್ಕಿದೆ" — a receipt for a receipt.
+    Silence is right only when the message read nothing at all AND the last
+    reply was not waiting for anything (an "Ok" to "same place?" is an
+    answer, and is handled by delivery_same).
+    """
+    if not followup.get("is_ack") or awaiting:
+        return False
+    read_something = any(followup.get(k) for k in (
+        "quantity", "application", "capacity_kva", "delivery_location",
+        "delivery_same", "asked_price", "discom_approval_ask", "customer_question"))
+    return not read_something
+
