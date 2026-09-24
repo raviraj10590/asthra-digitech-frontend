@@ -16,6 +16,9 @@ from _price_policy import OWNER_PRICES, assert_only_owner_prices  # noqa: E402
 FORM = ("Hello! I filled out your form\n"
         "ನಿಮಗೆ ಅಗತ್ಯವಿರುವ ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಸಾಮರ್ಥ್ಯ ಯಾವುದು?: {cap}\n"
         "ನಿಮ್ಮ ಪ್ರಾಜೆಕ್ಟ್ ಯಾವ ಸ್ಥಳದಲ್ಲಿದೆ?: Sira\nFull name: Test")
+# The form's "price list / info" answer — the customer ASKED for the price.
+PRICE_ASKED = "\nನಿಮಗೆ ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಯಾವಾಗ ಅಗತ್ಯವಿದೆ?: E. ಮಾಹಿತಿ ಮತ್ತು ದರಪಟ್ಟಿಗಾಗಿ"
+NEEDED_SOON = "\nನಿಮಗೆ ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಯಾವಾಗ ಅಗತ್ಯವಿದೆ?: B.  1 ತಿಂಗಳೊಳಗೆ ಅಗತ್ಯವಿದೆ"
 DONE = {"location": "Sira", "capacity_kva": 25, "application": "AGRICULTURE", "delivery_same": True}
 
 
@@ -34,13 +37,13 @@ class ThePriceList(unittest.TestCase):
                           ("B. 63 kVA", "*63 kVA 5 Star* — *₹2,00,000 + GST*"),
                           ("C. 100 kVA", "*100 kVA 5 Star* — *₹2,95,000 + GST*"),
                           ("D. 250 kVA", "*250 kVA 5 Star* — *₹4,95,000 + GST*")):
-            r = b.compose_reply(b.parse(FORM.format(cap=cap)))
+            r = b.compose_reply(b.parse(FORM.format(cap=cap) + PRICE_ASKED))
             self.assertIn(line, r, cap)
             self.assertEqual(r.count("₹"), 1, cap)
             assert_only_owner_prices(self, r)
 
     def test_an_uncatalogued_capacity_sees_the_whole_list_not_a_guess(self):
-        r = b.compose_reply(b.parse(FORM.format(cap="D.500 kVA")))
+        r = b.compose_reply(b.parse(FORM.format(cap="D.500 kVA") + PRICE_ASKED))
         self.assertEqual(r.count("₹"), 4)
         assert_only_owner_prices(self, r)
 
@@ -59,9 +62,24 @@ class ThePriceList(unittest.TestCase):
 
     def test_the_opening_reply_is_short(self):
         """Owner, 2026-09-25: "in one message dont tell everything"."""
-        r = b.compose_reply(b.parse(FORM.format(cap="A. 25 kVA")))
-        self.assertLessEqual(len([l for l in r.splitlines() if l.strip()]), 3, r)
+        r = b.compose_reply(b.parse(FORM.format(cap="A. 25 kVA") + NEEDED_SOON))
+        self.assertLessEqual(len([l for l in r.splitlines() if l.strip()]), 4, r)
         self.assertEqual(r.count("?"), 1)
+
+    def test_no_price_unless_they_asked(self):
+        """Owner, 2026-09-25: "dont tell price directly, if they ask price
+        then only tell them price"."""
+        for tail in ("", NEEDED_SOON, "\nನಿಮಗೆ ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಯಾವಾಗ ಅಗತ್ಯವಿದೆ?: A.ತಕ್ಷಣ ಅಗತ್ಯವಿದೆ"):
+            r = b.compose_reply(b.parse(FORM.format(cap="B. 63 kVA") + tail))
+            self.assertNotIn("₹", r, tail)
+        done_reply = b.compose_followup_reply(b.parse_followup("agriculture", (), DONE), DONE)
+        self.assertNotIn("₹", done_reply)
+        self.assertIn("₹", b.compose_reply(b.parse(FORM.format(cap="B. 63 kVA") + PRICE_ASKED)))
+
+    def test_the_customer_is_addressed_by_name(self):
+        r = b.compose_reply(b.parse(FORM.format(cap="A. 25 kVA").replace("Test", "PUNITH SINCHANA 2024")))
+        self.assertTrue(r.startswith("ನಮಸ್ಕಾರ Punith Sinchana ಅವರೇ"), r)
+        self.assertEqual(b.display_name("  "), "")
 
 
 class PriceAndTermsQuestions(unittest.TestCase):
@@ -75,9 +93,11 @@ class PriceAndTermsQuestions(unittest.TestCase):
         self.assertEqual(r.count("₹"), 4)
 
     def test_payment_and_warranty_questions_are_answered(self):
-        for q in ("payment hege?", "warranty ide?", "transport charge?", "ಅಡ್ವಾನ್ಸ್ ಎಷ್ಟು"):
+        for q, must in (("payment hege?", "50% advance"), ("warranty ide?", "1 ವರ್ಷ warranty"),
+                        ("transport charge?", "Transport ದರದಲ್ಲೇ ಸೇರಿದೆ"), ("ಅಡ್ವಾನ್ಸ್ ಎಷ್ಟು", "50% advance")):
             r = b.compose_followup_reply(b.parse_followup(q, (), DONE), DONE)
-            self.assertIn("50% advance", r, q)
+            self.assertIn(must, r, q)
+            self.assertNotIn("₹", r, q)          # a terms question is not a price question
             self.assertFalse(b.unanswered_question(b.parse_followup(q, (), DONE)), q)
 
 

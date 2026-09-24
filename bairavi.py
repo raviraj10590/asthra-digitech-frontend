@@ -1982,24 +1982,44 @@ def price_line(kva: int) -> str:
 # only when asked (each topic on its own line), and warranty + payment are
 # said once, briefly, when the call is offered.
 TERM_LINES = {
-    "transport": "🚚 Transport ಸೇರಿದೆ (installation ಪ್ರತ್ಯೇಕ)",
-    "warranty": "🛡️ *1 ವರ್ಷ warranty* — ನಂತರವೂ service ಲಭ್ಯ",
-    "payment": "💳 *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ",
+    "transport": "Transport ದರದಲ್ಲೇ ಸೇರಿದೆ; installation ಪ್ರತ್ಯೇಕ.",
+    "warranty": "ನಮ್ಮ transformer ಗಳಿಗೆ *1 ವರ್ಷ warranty* ಇದೆ; ಅದರ ನಂತರವೂ service ಲಭ್ಯವಿದೆ.",
+    "payment": "Payment: *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ.",
 }
-CLOSING_VALUE = "🛡️ 1 ವರ್ಷ warranty · 💳 50% advance, 50% ಡೆಲಿವರಿಗೆ · 🏭 ನೇರ ತಯಾರಕರಿಂದ"
+CLOSING_VALUE = ("ಧನ್ಯವಾದಗಳು. ನಿಮ್ಮ requirement ಪ್ರಕಾರ ನಮ್ಮ engineer ನಿಮ್ಮೊಂದಿಗೆ "
+                 "ಮಾತನಾಡಿ ಸಂಪೂರ್ಣ ವಿವರ ತಿಳಿಸುತ್ತಾರೆ.")
 # Quantity, asked ONCE (owner, 2026-09-17: "just ask them, if they don't
 # tell anything assume it as single quantity"). It rides on the closing
 # message as one line instead of being a numbered question of its own.
-QUANTITY_NOTE = "📦 1 ಕ್ಕಿಂತ ಹೆಚ್ಚು *units* ಬೇಕಾದರೆ ತಿಳಿಸಿ."
+QUANTITY_NOTE = "(1 ಕ್ಕಿಂತ ಹೆಚ್ಚು *units* ಬೇಕಿದ್ದರೆ ದಯವಿಟ್ಟು ತಿಳಿಸಿ.)"
+
+
+# PROFESSIONAL TONE — owner, 2026-09-25: "dont tell price directly, if
+# they ask price then only tell them price; overall conversation look like
+# very professional way". The customer is addressed by name, sentences are
+# complete and courteous, and emojis are kept to the few that carry meaning.
+_PURPOSE_KN = {"AGRICULTURE": "ಕೃಷಿ", "INDUSTRY": "ಕೈಗಾರಿಕೆ",
+               "CONSTRUCTION": "ಕಟ್ಟಡ ನಿರ್ಮಾಣ", "EV_CHARGING": "EV charging",
+               "SOLAR": "solar", "TENDER": "tender", "DOMESTIC": "ಮನೆ ಬಳಕೆ",
+               "COMMERCIAL": "ವಾಣಿಜ್ಯ"}
+
+
+def display_name(name) -> str:
+    """"PUNITH SINCHANA 2024" -> "Punith Sinchana". Letters only, two words at
+    most; empty when nothing presentable is left."""
+    words = [w for w in re.findall(r"[^\W\d_]+", name or "") if len(w) > 1][:2]
+    return " ".join(w.capitalize() if w.isascii() else w for w in words)
 
 
 def price_short_kn(kva=None) -> str:
     """The price in as few lines as possible: one for a size we make, the
     list otherwise. Transport is named because it changes the comparison."""
     if kva in PRICE_LIST:
-        return f"✅ {price_line(kva)} (transport ಸೇರಿದೆ)"
-    return ("💰 ದರಗಳು (transport ಸೇರಿದೆ):\n"
-            + "\n".join(f"• {price_line(k)}" for k in sorted(PRICE_LIST)))
+        return (f"{price_line(kva)}\n"
+                "Transport ದರದಲ್ಲೇ ಸೇರಿದೆ; installation ಪ್ರತ್ಯೇಕ.")
+    return ("ನಮ್ಮ ದರಗಳು:\n"
+            + "\n".join(f"• {price_line(k)}" for k in sorted(PRICE_LIST))
+            + "\nTransport ದರದಲ್ಲೇ ಸೇರಿದೆ; installation ಪ್ರತ್ಯೇಕ.")
 
 
 def price_block_kn(kva=None) -> str:
@@ -2026,11 +2046,11 @@ AWAITING_CALLBACK = "callback"
 CALLBACK_NOW, CALLBACK_EVENING, CALLBACK_TOMORROW = "now", "evening", "tomorrow"
 CALLBACK_LABEL_KN = {CALLBACK_NOW: "ಈಗಲೇ", CALLBACK_EVENING: "ಇಂದು ಸಂಜೆ", CALLBACK_TOMORROW: "ನಾಳೆ"}
 CALLBACK_LABEL_EN = {CALLBACK_NOW: "NOW", CALLBACK_EVENING: "this evening", CALLBACK_TOMORROW: "tomorrow"}
-CALLBACK_QUESTION = ("📞 ನಮ್ಮ engineer ಯಾವಾಗ call ಮಾಡಲಿ?\n"
+CALLBACK_QUESTION = ("ನಿಮಗೆ ಯಾವಾಗ ಕರೆ ಮಾಡುವುದು ಅನುಕೂಲ?\n"
                      "1️⃣ ಈಗಲೇ\n2️⃣ ಇಂದು ಸಂಜೆ\n3️⃣ ನಾಳೆ")
 CALL_HINT = "📞 ನೇರವಾಗಿ ಮಾತನಾಡಲು *CALL* ಎಂದು reply ಮಾಡಿ."
 # The call offer AGAIN, after the full closing was already sent once.
-CALLBACK_REMINDER = "📞 Call ಸಮಯ: 1️⃣ ಈಗಲೇ · 2️⃣ ಇಂದು ಸಂಜೆ · 3️⃣ ನಾಳೆ"
+CALLBACK_REMINDER = "ಕರೆ ಮಾಡಲು ಅನುಕೂಲವಾದ ಸಮಯ: 1️⃣ ಈಗಲೇ · 2️⃣ ಇಂದು ಸಂಜೆ · 3️⃣ ನಾಳೆ"
 
 _CALL_WORDS = ("call", "call me", "phone", "phone me", "ಕಾಲ್", "ಕಾಲ್ ಮಾಡಿ", "ಫೋನ್",
                "ಫೋನ್ ಮಾಡಿ", "ಕರೆ", "ಕರೆ ಮಾಡಿ", "call madi", "call maadi", "phone madi")
@@ -2101,38 +2121,41 @@ def compose_reply(parsed: dict) -> str:
             "3️⃣ ಸಾಧ್ಯವಾದರೆ transformer *ಸಾಮರ್ಥ್ಯ* (kVA)"
         )
 
-    lines = ["ನಮಸ್ಕಾರ 🙏 *Bairavi Trans Solutions*, Kadaba — "
-             "distribution transformer ತಯಾರಕರು."]
+    who = display_name(parsed.get("name"))
+    lines = [f"ನಮಸ್ಕಾರ {who} ಅವರೇ 🙏" if who else "ನಮಸ್ಕಾರ 🙏",
+             "*Bairavi Trans Solutions* (Kadaba) ಅನ್ನು ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು."]
 
     kva = parsed["capacity_kva"]
     if parsed["in_catalogue"]:
-        # Their size and its price, in one line. They told us the size; the
-        # price is what 32 of 110 form leads asked for.
-        lines.append("\n" + price_short_kn(kva))
+        lines.append(f"ನಿಮ್ಮ *{kva} kVA* distribution transformer ವಿಚಾರಣೆ ನಮಗೆ ತಲುಪಿದೆ.")
+    elif parsed["planned"]:
+        # A CAPACITY THE AD OFFERS ON PURPOSE: planned, not made today.
+        # Both halves said plainly — see the planned-capacity tests.
+        lines.append(f"*{kva} kVA* ನಮ್ಮ *ಮುಂದಿನ ಯೋಜನೆ*ಯಲ್ಲಿದೆ — ಸದ್ಯಕ್ಕೆ "
+                     "ತಯಾರಿಸುತ್ತಿಲ್ಲ. ನಿಮ್ಮ requirement ನಮ್ಮ engineering "
+                     f"ತಂಡಕ್ಕೆ ಕಳಿಸಿದ್ದೇವೆ. ಸದ್ಯದ range: *{_RANGE}*.")
+    elif kva is not None:
+        # Never silently mapped to a nearby size (AC-04), never refused.
+        lines.append(f"ನೀವು *{kva} kVA* ಕೇಳಿದ್ದೀರಿ — ನಮ್ಮ engineer ಪರಿಶೀಲಿಸಿ "
+                     f"ತಿಳಿಸುತ್ತಾರೆ. ಸದ್ಯದ range: *{_RANGE}*.")
     else:
-        if parsed["planned"]:
-            # A CAPACITY THE AD OFFERS ON PURPOSE: planned, not made today.
-            # Both halves said plainly — see the planned-capacity tests.
-            lines.append(f"\nℹ️ *{kva} kVA* ನಮ್ಮ *ಮುಂದಿನ ಯೋಜನೆ*ಯಲ್ಲಿದೆ — "
-                         "ಸದ್ಯಕ್ಕೆ ತಯಾರಿಸುತ್ತಿಲ್ಲ. ನಿಮ್ಮ requirement ನಮ್ಮ "
-                         "engineering ತಂಡಕ್ಕೆ ಕಳಿಸಿದ್ದೇವೆ.")
-        elif kva is not None:
-            # Never silently mapped to a nearby size (AC-04), never refused.
-            lines.append(f"\nℹ️ ನೀವು *{kva} kVA* ಕೇಳಿದ್ದೀರಿ — ನಮ್ಮ "
-                         "engineer ಪರಿಶೀಲಿಸಿ ತಿಳಿಸುತ್ತಾರೆ.")
-        lines.append("\n" + price_short_kn(None))
+        lines.append(f"ನಮ್ಮ distribution transformer range: *{_RANGE}*.")
+
+    # PRICE ONLY WHEN ASKED (owner, 2026-09-25). Choosing "price list / info"
+    # on the form IS asking, so that answer carries it.
+    if parsed.get("urgency") == "INFORMATION_ONLY":
+        lines.append("\nನೀವು ದರ ಕೇಳಿದ್ದೀರಿ:\n"
+                     + price_short_kn(kva if parsed["in_catalogue"] else None))
 
     # ONE QUESTION. Delivery first (it decides transport), purpose next;
-    # quantity is not asked — the owner ruled an unstated quantity is one.
+    # quantity is asked once at the close.
+    known = {"location": parsed["location"]}
     if parsed.get("delivery_location"):
-        lines.append(f"🚚 ಡೆಲಿವರಿ ಸ್ಥಳ: {parsed['delivery_location']}")
+        lines.append(f"ಡೆಲಿವರಿ ಸ್ಥಳ: {parsed['delivery_location']}")
         if not parsed.get("application"):
-            lines.append("\nಯಾವ *ಉದ್ದೇಶ*ಕ್ಕೆ ಬೇಕು? " + _PURPOSE_OPTIONS)
-    elif parsed["location"]:
-        # Confirm rather than ask cold: one word to answer.
-        lines.append(f"\n🚚 ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳಕ್ಕೆ ಆ — *{parsed['location']}*?")
+            lines.append("\n" + question_for(AWAITING_PURPOSE, known))
     else:
-        lines.append("\n🚚 TC ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು? (ಊರು, ತಾಲ್ಲೂಕು)")
+        lines.append("\n" + question_for(AWAITING_DELIVERY, known))
     return "\n".join(lines)
 
 
@@ -2365,10 +2388,12 @@ def question_for(field: str, known: dict = None) -> str:
     known = known or {}
     if field == AWAITING_DELIVERY:
         if known.get("location"):
-            return (f"🚚 TC *ಡೆಲಿವರಿ* ಇದೇ ಸ್ಥಳಕ್ಕೆ ಆ — *{known['location']}*?")
-        return "🚚 TC *ಡೆಲಿವರಿ* ಯಾವ ಸ್ಥಳಕ್ಕೆ ಬೇಕು?"
+            return (f"Transformer *ಡೆಲಿವರಿ* *{known['location']}* ಗೆ ಆಗಬೇಕೆ? "
+                    "ಬೇರೆ ಸ್ಥಳವಾದರೆ ದಯವಿಟ್ಟು ತಿಳಿಸಿ.")
+        return "Transformer *ಡೆಲಿವರಿ* ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು? (ಊರು, ತಾಲ್ಲೂಕು)"
     if field == AWAITING_PURPOSE:
-        return "ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS
+        return ("ಈ transformer ಯಾವ *ಉದ್ದೇಶ*ಕ್ಕೆ ಬೇಕು? "
+                "(ಕೃಷಿ / ಕೈಗಾರಿಕೆ / ಕಟ್ಟಡ ನಿರ್ಮಾಣ / EV charging / solar / tender)")
     if field == AWAITING_CAPACITY:
         # The RANGE, not a guess. _RANGE is built from CATALOGUE_KVA, so the
         # list shown can never drift from the list manufactured — and kVA is
@@ -2551,19 +2576,21 @@ def compose_followup_reply(followup: dict, known: dict = None,
         got.append(f"{followup['quantity']} unit"
                    + ("s" if followup["quantity"] != 1 else ""))
     if followup["application"]:
-        got.append(followup["application"].replace("_", " ").lower())
+        got.append(_PURPOSE_KN.get(followup["application"],
+                                   followup["application"].replace("_", " ").lower())
+                   + " ಉದ್ದೇಶ")
     if followup.get("delivery_location"):
-        got.append(f"ಡೆಲಿವರಿ {followup['delivery_location']}")
+        got.append(f"ಡೆಲಿವರಿ: {followup['delivery_location']}")
     elif followup.get("delivery_same"):
-        got.append("ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳ")
+        got.append("ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳಕ್ಕೆ")
 
     if got:
-        lines.append("✅ ಧನ್ಯವಾದ — ದಾಖಲಿಸಿದ್ದೇವೆ: *" + ", ".join(got) + "*.")
+        lines.append("ಧನ್ಯವಾದಗಳು — *" + ", ".join(got) + "* ಗಮನಿಸಿದ್ದೇವೆ.")
     elif not (followup.get("asked_price") or followup.get("callback")
               or followup.get("asked_terms")):
         # A price question or a call choice is answered directly below; a
         # "message received" line above it is filler.
-        lines.append("✅ ಧನ್ಯವಾದ — ನಿಮ್ಮ ಸಂದೇಶ ಸಿಕ್ಕಿದೆ.")
+        lines.append("ಧನ್ಯವಾದಗಳು.")
 
     # THE QUESTION THEY ASKED, ANSWERED. A DISCOM approval question used to
     # get "we have received your message" and the form questions again.
@@ -2626,9 +2653,9 @@ def compose_followup_reply(followup: dict, known: dict = None,
 
     _callback = followup.get("callback")
     if _callback:
-        lines.append(f"\n📞 ಸರಿ — ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[_callback]}* "
-                     "ನಿಮಗೆ call ಮಾಡುತ್ತಾರೆ. ಡೆಲಿವರಿ ಸಮಯ ಮತ್ತು order ವಿವರ "
-                     "ಅವರೇ ತಿಳಿಸುತ್ತಾರೆ.")
+        lines.append(f"ಸರಿ. ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[_callback]}* ನಿಮಗೆ "
+                     "ಕರೆ ಮಾಡಿ, ಡೆಲಿವರಿ ಸಮಯ ಮತ್ತು order ವಿವರಗಳನ್ನು ತಿಳಿಸುತ್ತಾರೆ.\n"
+                     "ಧನ್ಯವಾದಗಳು 🙏")
     if missing:
         # ONE QUESTION PER MESSAGE (owner, 2026-09-25). The next one is asked
         # when this one is answered; the marker still records every field

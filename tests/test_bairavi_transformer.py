@@ -663,7 +663,7 @@ class ConversationContinuity(unittest.TestCase):
     def test_the_followup_answers_are_captured_not_discarded(self):
         r = self.thread(form(capacity="B. 63 kVA"), "1 unit\nAgricultural")
         self.assertIn("1 unit", r["sent"][1])
-        self.assertIn("agriculture", r["sent"][1].lower())
+        self.assertIn("ಕೃಷಿ", r["sent"][1])
         self.assertTrue(any("Quantity: 1" in a for a in r["owner"]))
         self.assertTrue(any("AGRICULTURE" in a for a in r["owner"]))
 
@@ -946,8 +946,8 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
 
     def test_the_exact_2026_09_17_replies_now_carry_content(self):
         first = b.compose_followup_reply(b.parse_followup("Charging Station ⛽"))
-        self.assertIn("ev charging", first)      # confirms what was said
-        self.assertNotIn("ಉದ್ದೇಶ", first)        # does not re-ask what it has
+        self.assertIn("EV charging", first)      # confirms what was said
+        self.assertNotIn("*ಉದ್ದೇಶ*ಕ್ಕೆ ಬೇಕು?", first)   # does not re-ask what it has
         # The delivery place is now outstanding and IS asked — quantity is
         # not, because it defaults.
         self.assertIn("ಡೆಲಿವರಿ", first)
@@ -970,9 +970,9 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
     def test_nothing_is_re_asked_once_both_answers_are_in(self):
         r = b.compose_followup_reply(b.parse_followup("3 units for industry"))
         self.assertIn("3 units", r)
-        self.assertIn("industry", r)
+        self.assertIn("ಕೈಗಾರಿಕೆ", r)
         self.assertNotIn("units* ಬೇಕು", r)
-        self.assertNotIn("ಉದ್ದೇಶ", r)
+        self.assertNotIn("*ಉದ್ದೇಶ*ಕ್ಕೆ ಬೇಕು?", r)
         self.assertIn("ಡೆಲಿವರಿ", r)                # the one thing still open
         known = {"delivery_same": True, "location": "X"}
         done = b.compose_followup_reply(b.parse_followup("3 units for industry", (), known), known)
@@ -1316,8 +1316,7 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
         """One word to answer instead of a sentence — and it captures the
         exception, which is the case worth knowing."""
         r = b.compose_reply(b.parse(form(location="Mangalore")))
-        self.assertIn("Mangalore", r)
-        self.assertIn("ಇದೇ ಸ್ಥಳಕ್ಕೆ", r)
+        self.assertIn("*Mangalore* ಗೆ ಆಗಬೇಕೆ?", r)
 
     def test_it_asks_outright_when_the_form_gave_no_location(self):
         bare = ("Hello! I filled out your form.\n"
@@ -1330,7 +1329,7 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
         self.assertEqual(p["delivery_location"], "Puttur")
         r = b.compose_reply(p)
         self.assertIn("Puttur", r)
-        self.assertNotIn("ಇದೇ ಸ್ಥಳಕ್ಕೆ", r)
+        self.assertNotIn("ಗೆ ಆಗಬೇಕೆ?", r)
 
     def test_the_opening_asks_exactly_one_question(self):
         """Owner, 2026-09-25: one thing at a time. And the question asked is
