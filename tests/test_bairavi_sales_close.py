@@ -175,5 +175,12 @@ class TheClosingIsSaidOnce(unittest.TestCase):
         self.assertEqual(b.parse_followup("2", (b.AWAITING_CALLBACK,), DONE)["callback"], "evening")
 
 
+class NoRepeatedCourtesy(unittest.TestCase):
+    def test_thanks_is_said_once_per_message(self):
+        f = b.parse_followup("agriculture", (b.AWAITING_PURPOSE,), {**DONE, "application": None})
+        r = b.compose_followup_reply(f, {**DONE, "application": None})
+        self.assertEqual(r.count("ಧನ್ಯವಾದಗಳು"), 1, r)
+
+
 if __name__ == "__main__":
     unittest.main()

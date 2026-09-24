@@ -1986,7 +1986,7 @@ TERM_LINES = {
     "warranty": "ನಮ್ಮ transformer ಗಳಿಗೆ *1 ವರ್ಷ warranty* ಇದೆ; ಅದರ ನಂತರವೂ service ಲಭ್ಯವಿದೆ.",
     "payment": "Payment: *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ.",
 }
-CLOSING_VALUE = ("ಧನ್ಯವಾದಗಳು. ನಿಮ್ಮ requirement ಪ್ರಕಾರ ನಮ್ಮ engineer ನಿಮ್ಮೊಂದಿಗೆ "
+CLOSING_VALUE = ("ನಿಮ್ಮ requirement ಪ್ರಕಾರ ನಮ್ಮ engineer ನಿಮ್ಮೊಂದಿಗೆ "
                  "ಮಾತನಾಡಿ ಸಂಪೂರ್ಣ ವಿವರ ತಿಳಿಸುತ್ತಾರೆ.")
 # Quantity, asked ONCE (owner, 2026-09-17: "just ask them, if they don't
 # tell anything assume it as single quantity"). It rides on the closing
