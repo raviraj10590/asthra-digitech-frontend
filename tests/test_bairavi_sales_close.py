@@ -45,7 +45,7 @@ class ThePriceList(unittest.TestCase):
         assert_only_owner_prices(self, r)
 
     def test_the_terms_are_exactly_what_the_owner_said(self):
-        r = b.price_block_kn(25)
+        r = b.price_block_kn(25) + "\n".join(b.TERM_LINES.values()) + b.CLOSING_VALUE
         for must in ("Transport ಸೇರಿದೆ", "installation ಪ್ರತ್ಯೇಕ", "1 ವರ್ಷ warranty",
                      "service ಲಭ್ಯ", "50% advance", "MESCOM approved",
                      "ಡೆಲಿವರಿ ಸಮಯ — ನಮ್ಮ ತಂಡ call ನಲ್ಲಿ"):
@@ -57,8 +57,11 @@ class ThePriceList(unittest.TestCase):
                        "BESCOM approved", "installation free", "valid till"):
             self.assertNotIn(banned, r)
 
-    def test_the_opening_reply_offers_a_call(self):
-        self.assertIn(b.CALL_HINT, b.compose_reply(b.parse(FORM.format(cap="A. 25 kVA"))))
+    def test_the_opening_reply_is_short(self):
+        """Owner, 2026-09-25: "in one message dont tell everything"."""
+        r = b.compose_reply(b.parse(FORM.format(cap="A. 25 kVA")))
+        self.assertLessEqual(len([l for l in r.splitlines() if l.strip()]), 3, r)
+        self.assertEqual(r.count("?"), 1)
 
 
 class PriceAndTermsQuestions(unittest.TestCase):
@@ -134,6 +137,22 @@ class CallBack(unittest.TestCase):
         text = nudge.compose((b.AWAITING_CALLBACK,), b.question_for, DONE)
         self.assertIn(b.CALLBACK_QUESTION, text)
         self.assertNotIn("1️⃣ 📞", text)
+
+
+class TheClosingIsSaidOnce(unittest.TestCase):
+    """Owner, 2026-09-25: "in one message dont tell everything"."""
+
+    def test_after_the_offer_only_a_one_line_reminder(self):
+        f = b.parse_followup("warranty?", (b.AWAITING_CALLBACK,), DONE)
+        r = b.compose_followup_reply(f, DONE)
+        self.assertIn("1 ವರ್ಷ warranty", r)
+        self.assertIn(b.CALLBACK_REMINDER, r)
+        self.assertNotIn(b.CLOSING_VALUE, r)
+        self.assertNotIn(b.QUANTITY_NOTE, r)
+        self.assertNotIn(b.CALLBACK_QUESTION, r)
+
+    def test_the_reminder_options_still_parse(self):
+        self.assertEqual(b.parse_followup("2", (b.AWAITING_CALLBACK,), DONE)["callback"], "evening")
 
 
 if __name__ == "__main__":

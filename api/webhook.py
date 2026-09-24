@@ -5702,10 +5702,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         # actually wrote, and a parse failure must not lose the enquiry.
         _saved = save_messages([(sender, "user", user_text),
                                 (sender, "assistant",
-                                 bairavi.flow_marker(bairavi.outstanding(
-                                     {}, {"location": parsed["location"],
-                                          "delivery_location":
-                                              parsed["delivery_location"]})))])
+                                 bairavi.flow_marker(bairavi.opening_awaiting(parsed)))])
         warn_if_transcript_lost(sender, _saved, "Bairavi opening reply")
         # source marks these as Bairavi so they are separable later. `leads`
         # feeds no Brain metric — new_enquiries comes from first_seen_at

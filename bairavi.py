@@ -1894,6 +1894,9 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
         qty = None  # "2" / "2️⃣" answering "when should we call?" is option two, not two units
     return {"quantity": qty, "application": app, "capacity_kva": cap,
             "callback": callback, "asked_terms": asked_terms(text),
+            # The previous reply already carried the closing block; saying it
+            # again is the "tell everything" the owner asked us to stop.
+            "callback_offered": AWAITING_CALLBACK in (awaiting or ()),
             "delivery_location": dl, "delivery_same": same,
             "delivery_mentioned": mentioned,
             "is_ack": is_ack,
@@ -1972,6 +1975,33 @@ def price_line(kva: int) -> str:
     return f"*{kva} kVA {star} Star* — *₹{inr(amount)} + GST*"
 
 
+# ONE THING AT A TIME — owner, 2026-09-25: "in one message dont tell
+# everything". The full block (price_block_kn) read as a brochure; a
+# customer on a phone answers a short message with one question. So the
+# opening carries the price in one line and one question, the terms come
+# only when asked (each topic on its own line), and warranty + payment are
+# said once, briefly, when the call is offered.
+TERM_LINES = {
+    "transport": "🚚 Transport ಸೇರಿದೆ (installation ಪ್ರತ್ಯೇಕ)",
+    "warranty": "🛡️ *1 ವರ್ಷ warranty* — ನಂತರವೂ service ಲಭ್ಯ",
+    "payment": "💳 *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ",
+}
+CLOSING_VALUE = "🛡️ 1 ವರ್ಷ warranty · 💳 50% advance, 50% ಡೆಲಿವರಿಗೆ · 🏭 ನೇರ ತಯಾರಕರಿಂದ"
+# Quantity, asked ONCE (owner, 2026-09-17: "just ask them, if they don't
+# tell anything assume it as single quantity"). It rides on the closing
+# message as one line instead of being a numbered question of its own.
+QUANTITY_NOTE = "📦 1 ಕ್ಕಿಂತ ಹೆಚ್ಚು *units* ಬೇಕಾದರೆ ತಿಳಿಸಿ."
+
+
+def price_short_kn(kva=None) -> str:
+    """The price in as few lines as possible: one for a size we make, the
+    list otherwise. Transport is named because it changes the comparison."""
+    if kva in PRICE_LIST:
+        return f"✅ {price_line(kva)} (transport ಸೇರಿದೆ)"
+    return ("💰 ದರಗಳು (transport ಸೇರಿದೆ):\n"
+            + "\n".join(f"• {price_line(k)}" for k in sorted(PRICE_LIST)))
+
+
 def price_block_kn(kva=None) -> str:
     """The price for their capacity with the terms, or the whole list.
 
@@ -1999,6 +2029,8 @@ CALLBACK_LABEL_EN = {CALLBACK_NOW: "NOW", CALLBACK_EVENING: "this evening", CALL
 CALLBACK_QUESTION = ("📞 ನಮ್ಮ engineer ಯಾವಾಗ call ಮಾಡಲಿ?\n"
                      "1️⃣ ಈಗಲೇ\n2️⃣ ಇಂದು ಸಂಜೆ\n3️⃣ ನಾಳೆ")
 CALL_HINT = "📞 ನೇರವಾಗಿ ಮಾತನಾಡಲು *CALL* ಎಂದು reply ಮಾಡಿ."
+# The call offer AGAIN, after the full closing was already sent once.
+CALLBACK_REMINDER = "📞 Call ಸಮಯ: 1️⃣ ಈಗಲೇ · 2️⃣ ಇಂದು ಸಂಜೆ · 3️⃣ ನಾಳೆ"
 
 _CALL_WORDS = ("call", "call me", "phone", "phone me", "ಕಾಲ್", "ಕಾಲ್ ಮಾಡಿ", "ಫೋನ್",
                "ಫೋನ್ ಮಾಡಿ", "ಕರೆ", "ಕರೆ ಮಾಡಿ", "call madi", "call maadi", "phone madi")
@@ -2014,14 +2046,22 @@ _CALLBACK_CHOICE = {
 
 # QUESTIONS THE OWNER'S TERMS NOW ANSWER. "what about warranty?" used to get
 # "our engineer will confirm"; since 2026-09-24 there is a stated answer.
-_TERMS_WORDS = ("warranty", "guarantee", "ವಾರಂಟಿ", "ಗ್ಯಾರಂಟಿ", "payment", "advance",
-                "ಅಡ್ವಾನ್ಸ್", "ಪೇಮೆಂಟ್", "transport", "ಸಾಗಣೆ", "installation", "install",
-                "ಇನ್‌ಸ್ಟಾಲೇಶನ್", "service", "ಸರ್ವಿಸ್", "emi", "loan")
+_TERM_TOPIC = {
+    "warranty": "warranty", "guarantee": "warranty", "ವಾರಂಟಿ": "warranty", "ಗ್ಯಾರಂಟಿ": "warranty",
+    "service": "warranty", "ಸರ್ವಿಸ್": "warranty",
+    "payment": "payment", "advance": "payment", "ಅಡ್ವಾನ್ಸ್": "payment", "ಪೇಮೆಂಟ್": "payment",
+    "emi": "payment", "loan": "payment",
+    "transport": "transport", "ಸಾಗಣೆ": "transport", "installation": "transport",
+    "install": "transport", "ಇನ್‌ಸ್ಟಾಲೇಶನ್": "transport",
+}
 
 
-def asked_terms(text: str) -> bool:
+def asked_terms(text: str) -> tuple:
+    """Which of the owner's terms this message asks about, in a fixed order."""
     low = (text or "").lower()
-    return any(_label_matches(low, w) if w.isascii() else w in low for w in _TERMS_WORDS)
+    hit = {topic for w, topic in _TERM_TOPIC.items()
+           if (_label_matches(low, w) if w.isascii() else w in low)}
+    return tuple(t for t in ("transport", "warranty", "payment") if t in hit)
 
 
 def callback_request(text: str, awaiting=()):
@@ -2061,73 +2101,38 @@ def compose_reply(parsed: dict) -> str:
             "3️⃣ ಸಾಧ್ಯವಾದರೆ transformer *ಸಾಮರ್ಥ್ಯ* (kVA)"
         )
 
-    lines = ["ನಮಸ್ಕಾರ 🙏 *Bairavi Trans Solutions* — "
-             "oil-immersed 3-phase distribution transformer ತಯಾರಕರು "
-             "(Kadaba, Dakshina Kannada)."]
+    lines = ["ನಮಸ್ಕಾರ 🙏 *Bairavi Trans Solutions*, Kadaba — "
+             "distribution transformer ತಯಾರಕರು."]
 
     kva = parsed["capacity_kva"]
     if parsed["in_catalogue"]:
-        # Confirm what they chose. This is the whole point: they already told
-        # us, and being asked again is what lost the first fifteen.
-        lines.append(f"\n✅ ನಿಮ್ಮ requirement: *{kva} kVA* "
-                     "— ಇದು ನಮ್ಮ standard range ನಲ್ಲಿದೆ.")
-    elif parsed["planned"]:
-        # A CAPACITY THE AD OFFERS ON PURPOSE. It must not read as a mistake
-        # and it must not read as available. Both halves are said plainly:
-        # planned, and not manufactured today. Saying only the first would
-        # promise a transformer that cannot be delivered; saying only the
-        # second would turn a real enquiry into a rejection.
-        lines.append(f"\nℹ️ ನೀವು *{kva} kVA* ಕೇಳಿದ್ದೀರಿ. ಇದು ನಮ್ಮ "
-                     "*ಮುಂದಿನ ಯೋಜನೆ*ಯಲ್ಲಿರುವ capacity — "
-                     "ಸದ್ಯಕ್ಕೆ ತಯಾರಿಸುತ್ತಿಲ್ಲ.\n"
-                     f"ಸದ್ಯದ manufacturing range: *{_RANGE}*.\n"
-                     "ನಿಮ್ಮ requirement ನಮ್ಮ sales ಮತ್ತು engineering team ಗೆ "
-                     "ಕಳಿಸಿದ್ದೇವೆ — ಅವರು ಪರಿಶೀಲಿಸಿ ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
-    elif kva is not None:
-        # An unrecognised capacity. Never silently mapped to a nearby size
-        # (AC-04 is a gate, not a filter), and never refused.
-        lines.append(f"\nℹ️ ನೀವು *{kva} kVA* ಕೇಳಿದ್ದೀರಿ. ಸದ್ಯದ "
-                     f"manufacturing range *{_RANGE}*. ನಿಮ್ಮ requirement ನಮ್ಮ "
-                     "technical team ಗೆ ಕಳಿಸಿದ್ದೇವೆ — ಅವರು ಖಚಿತವಾಗಿ "
-                     "ತಿಳಿಸುತ್ತಾರೆ.")
+        # Their size and its price, in one line. They told us the size; the
+        # price is what 32 of 110 form leads asked for.
+        lines.append("\n" + price_short_kn(kva))
     else:
-        lines.append(f"\nಸದ್ಯದ manufacturing range: *{_RANGE}*.")
+        if parsed["planned"]:
+            # A CAPACITY THE AD OFFERS ON PURPOSE: planned, not made today.
+            # Both halves said plainly — see the planned-capacity tests.
+            lines.append(f"\nℹ️ *{kva} kVA* ನಮ್ಮ *ಮುಂದಿನ ಯೋಜನೆ*ಯಲ್ಲಿದೆ — "
+                         "ಸದ್ಯಕ್ಕೆ ತಯಾರಿಸುತ್ತಿಲ್ಲ. ನಿಮ್ಮ requirement ನಮ್ಮ "
+                         "engineering ತಂಡಕ್ಕೆ ಕಳಿಸಿದ್ದೇವೆ.")
+        elif kva is not None:
+            # Never silently mapped to a nearby size (AC-04), never refused.
+            lines.append(f"\nℹ️ ನೀವು *{kva} kVA* ಕೇಳಿದ್ದೀರಿ — ನಮ್ಮ "
+                         "engineer ಪರಿಶೀಲಿಸಿ ತಿಳಿಸುತ್ತಾರೆ.")
+        lines.append("\n" + price_short_kn(None))
 
-    if parsed["location"]:
-        lines.append(f"📍 ಸ್ಥಳ: {parsed['location']}")
-
-    # THE PRICE, FIRST. Owner's ruling 2026-09-24 — see PRICE_LIST.
-    lines.append("\n" + price_block_kn(kva if parsed["in_catalogue"] else None))
-
-    # Only what is genuinely missing. Quantity is never in the ad form, and
-    # application is §6.2's strongest early qualification signal.
-    # Ordered by what it costs us not to know. The delivery place decides
-    # transport and site access; purpose is the qualification signal; quantity
-    # defaults to one and is asked once, last, because the owner ruled it is
-    # not important.
-    asks = []
+    # ONE QUESTION. Delivery first (it decides transport), purpose next;
+    # quantity is not asked — the owner ruled an unstated quantity is one.
     if parsed.get("delivery_location"):
-        # The form already told us. Confirm rather than ask again — being
-        # asked twice for something already given is what lost the first
-        # fifteen leads.
         lines.append(f"🚚 ಡೆಲಿವರಿ ಸ್ಥಳ: {parsed['delivery_location']}")
+        if not parsed.get("application"):
+            lines.append("\nಯಾವ *ಉದ್ದೇಶ*ಕ್ಕೆ ಬೇಕು? " + _PURPOSE_OPTIONS)
     elif parsed["location"]:
-        # A project address is not a delivery address, but it is the obvious
-        # candidate — so this confirms instead of asking cold, which is one
-        # word to answer instead of a sentence.
-        asks.append(f"🚚 TC *ಡೆಲಿವರಿ* ಇದೇ ಸ್ಥಳಕ್ಕೆ ಆ — *{parsed['location']}*? "
-                    "ಬೇರೆ ಆದರೆ ಆ ಸ್ಥಳ ತಿಳಿಸಿ.")
+        # Confirm rather than ask cold: one word to answer.
+        lines.append(f"\n🚚 ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳಕ್ಕೆ ಆ — *{parsed['location']}*?")
     else:
-        asks.append("🚚 TC *ಡೆಲಿವರಿ* ಯಾವ ಸ್ಥಳಕ್ಕೆ ಬೇಕು?")
-
-    asks.append("ಯಾವ *ಉದ್ದೇಶ*? " + _PURPOSE_OPTIONS)
-    asks.append("ಎಷ್ಟು *units* ಬೇಕು?")
-
-    lines.append("\nಇಷ್ಟು ತಿಳಿಸಿದರೆ ಸಾಕು:")
-    assert len(asks) <= len(_NUMERALS), "an ask would be silently dropped"
-    for numeral, ask in zip(_NUMERALS, asks):
-        lines.append(f"{numeral} {ask}")
-    lines.append("\n" + CALL_HINT)
+        lines.append("\n🚚 TC ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು? (ಊರು, ತಾಲ್ಲೂಕು)")
     return "\n".join(lines)
 
 
@@ -2554,7 +2559,8 @@ def compose_followup_reply(followup: dict, known: dict = None,
 
     if got:
         lines.append("✅ ಧನ್ಯವಾದ — ದಾಖಲಿಸಿದ್ದೇವೆ: *" + ", ".join(got) + "*.")
-    elif not (followup.get("asked_price") or followup.get("callback")):
+    elif not (followup.get("asked_price") or followup.get("callback")
+              or followup.get("asked_terms")):
         # A price question or a call choice is answered directly below; a
         # "message received" line above it is filler.
         lines.append("✅ ಧನ್ಯವಾದ — ನಿಮ್ಮ ಸಂದೇಶ ಸಿಕ್ಕಿದೆ.")
@@ -2577,16 +2583,15 @@ def compose_followup_reply(followup: dict, known: dict = None,
         lines.append("\n" + answer_question_kn(_question, known))
 
     _intent = followup.get("commercial_intent")
-    if followup.get("asked_terms") and not followup["asked_price"]:
-        # Warranty / payment / transport / installation: the owner's terms,
-        # with the price for their capacity, which is what the terms are for.
-        lines.append("\n" + price_block_kn(merged_state(known, followup).get("capacity_kva")))
+    if followup.get("asked_terms"):
+        # Only the term they asked about — one line each.
+        lines.append("\n" + "\n".join(TERM_LINES[t] for t in followup["asked_terms"]))
     if followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
         # never a number — the evidence for one does not exist.
         # THE PRICE THEY ASKED FOR, from the owner's list (2026-09-24).
         _kva = merged_state(known, followup).get("capacity_kva")
-        lines.append("\n" + price_block_kn(_kva))
+        lines.append("\n" + price_short_kn(_kva))
         if _intent == QUOTATION_REQUEST:
             # Says a REQUEST was recorded and a human will act. Never that a
             # quotation exists — no quotation has been produced, and claiming
@@ -2625,26 +2630,20 @@ def compose_followup_reply(followup: dict, known: dict = None,
                      "ನಿಮಗೆ call ಮಾಡುತ್ತಾರೆ. ಡೆಲಿವರಿ ಸಮಯ ಮತ್ತು order ವಿವರ "
                      "ಅವರೇ ತಿಳಿಸುತ್ತಾರೆ.")
     if missing:
-        lines.append("\nಇನ್ನೊಂದು ವಿಷಯ ತಿಳಿಸಿ:" if len(missing) == 1
-                     else "\nಇಷ್ಟು ತಿಳಿಸಿದರೆ ಸಾಕು:")
-        assert len(missing) <= len(_NUMERALS), "a question would be dropped"
-        # A tuple, not a sliced string: each keycap is three codepoints
-        # (digit + VS16 + combining enclosing keycap), so slicing by 2 tore
-        # them in half and produced "1️" and "⃣2" on the customer's phone.
-        for numeral, q in zip(_NUMERALS, missing):
-            lines.append(f"{numeral} {q}")
-        # A reason to reply, not a demand. This is the sentence that turns an
-        # unanswered question into an answered one.
-        lines.append("\nಇದು ತಿಳಿದರೆ ನಮ್ಮ engineer ನಿಖರವಾದ quotation "
-                     "ಕೊಡಲು ಸಾಧ್ಯ.")
-
-    if not missing and not _callback and not merged_state(known, followup).get("callback"):
-        # EVERYTHING IS ANSWERED: offer the call instead of "we will contact
-        # you", which asked nothing and was where conversations ended.
-        lines.append("\n" + CALLBACK_QUESTION)
-    elif not _callback:
-        lines.append("\nನಮ್ಮ *Bairavi Trans Solutions* ತಂಡ ಶೀಘ್ರದಲ್ಲೇ "
-                     "ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಾರೆ 🙏")
+        # ONE QUESTION PER MESSAGE (owner, 2026-09-25). The next one is asked
+        # when this one is answered; the marker still records every field
+        # outstanding, so an answer to either is read.
+        lines.append("\n" + missing[0])
+    elif (not _callback and not merged_state(known, followup).get("callback")
+          and followup.get("callback_offered")):
+        lines.append("\n" + CALLBACK_REMINDER)
+    elif not _callback and not merged_state(known, followup).get("callback"):
+        # EVERYTHING IS ANSWERED: the two terms that close a sale, once, and
+        # the call — instead of "we will contact you", which asked nothing.
+        _qty_known = merged_state(known, followup).get("quantity") is not None
+        lines.append("\n" + CLOSING_VALUE
+                     + ("" if _qty_known else "\n" + QUANTITY_NOTE)
+                     + "\n\n" + CALLBACK_QUESTION)
     full = "\n".join(lines).strip()
 
     # THE SAME REPLY TWICE IN A ROW. Checked here, at the single place the
@@ -2859,5 +2858,17 @@ def awaiting_after(followup: dict, known: dict = None) -> tuple:
     out = outstanding(followup, known)
     if not out and not merged_state(known, followup).get("callback"):
         return (AWAITING_CALLBACK,)
-    return out
+    # ONLY THE QUESTION THAT WAS ASKED. One question per message (owner,
+    # 2026-09-25), so the marker names that one — the hourly nudge must never
+    # chase a question the customer has not yet been shown. A purpose given
+    # early is still read: application needs no awaiting to be recognised.
+    return out[:1]
+
+
+def opening_awaiting(parsed: dict) -> tuple:
+    """The marker for the opening reply: the one question it asked."""
+    known = {"location": parsed.get("location"),
+             "delivery_location": parsed.get("delivery_location"),
+             "application": parsed.get("application")}
+    return outstanding({}, known)[:1]
 

@@ -148,7 +148,7 @@ class NothingUndocumentedIsEverQuoted(unittest.TestCase):
         for cap in CAP_OPTIONS:
             txt = b.compose_reply(b.parse(form(capacity=cap)))
             self.assertIn("+ GST", txt)
-            self.assertIn("CALL", txt)
+            self.assertEqual(txt.count("?"), 1)      # and one question
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -278,7 +278,12 @@ class Parsing(unittest.TestCase):
         asked in the reply."""
         for cap in CAP_OPTIONS:
             self.assertIsNone(b.parse(form(capacity=cap))["quantity"])
-        self.assertIn("units", b.compose_reply(b.parse(form())))
+        # Asked once, on the closing message (one question per message,
+        # owner 2026-09-25).
+        done = {"location": "X", "capacity_kva": 25, "application": "AGRICULTURE",
+                "delivery_same": True}
+        self.assertIn(b.QUANTITY_NOTE,
+                      b.compose_followup_reply(b.parse_followup("ok", (), done), done))
 
     def test_urgency_comes_from_the_form_option_only(self):
         for when, expect in (("A.ತಕ್ಷಣ ಅಗತ್ಯವಿದೆ", "IMMEDIATE"),
@@ -641,7 +646,7 @@ class ConversationContinuity(unittest.TestCase):
             self.assertNotIn("Asthra", reply, f"turn {i+1} answered as Asthra")
             self.assertNotIn("ಕಂಪನಿ ಅಲ್ಲ", reply, f"turn {i+1} denied being us")
         self.assertIn("Bairavi", r["sent"][0])
-        self.assertIn("Bairavi", r["sent"][2])
+        self.assertIn("+ GST", r["sent"][2])      # "Rate" gets the price
         self.assertEqual(r["menu"], [])
 
     def test_real_thread_59c8f8_25kva_needs_a_TC(self):
@@ -925,9 +930,10 @@ class PurposesCustomersActuallyName(unittest.TestCase):
 
 class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
 
-    def test_an_unreadable_message_still_re_asks_the_purpose(self):
+    def test_an_unreadable_message_still_re_asks_the_next_question(self):
         r = b.compose_followup_reply(b.parse_followup("hmm ok"))
-        self.assertIn("ಉದ್ದೇಶ", r)
+        self.assertIn("ಡೆಲಿವರಿ", r)                # delivery comes first
+        self.assertNotIn("ಉದ್ದೇಶ", r)              # one question per message
 
     def test_the_quantity_is_never_chased(self):
         """Owner's ruling: ask once in the opening reply, then assume one.
@@ -949,14 +955,13 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
 
         second = b.compose_followup_reply(b.parse_followup("100kv"))
         self.assertIn("100 kVA", second)
-        self.assertIn("ಉದ್ದೇಶ", second)          # purpose is still outstanding
+        self.assertIn("ಡೆಲಿವರಿ", second)         # next open question, one at a time
 
-    def test_the_re_ask_gives_a_reason_to_answer(self):
-        """A bare question is easy to ignore. The sentence that says why —
-        an exact quotation — is the part that converts it into an answer."""
+    def test_the_re_ask_is_short(self):
+        """Owner, 2026-09-25: "in one message dont tell everything". A re-ask
+        is one receipt line and one question."""
         r = b.compose_followup_reply(b.parse_followup("hmm ok"))
-        self.assertIn("engineer", r)
-        self.assertIn("quotation", r)
+        self.assertLessEqual(len([l for l in r.splitlines() if l.strip()]), 2, r)
 
     def test_it_never_claims_to_have_read_a_field_it_did_not(self):
         r = b.compose_followup_reply(b.parse_followup("hmm ok"))
@@ -966,8 +971,13 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         r = b.compose_followup_reply(b.parse_followup("3 units for industry"))
         self.assertIn("3 units", r)
         self.assertIn("industry", r)
-        self.assertNotIn("ಎಷ್ಟು *units* ಬೇಕು?", r)
-        self.assertIn("ಸಂಪರ್ಕಿಸುತ್ತಾರೆ", r)
+        self.assertNotIn("units* ಬೇಕು", r)
+        self.assertNotIn("ಉದ್ದೇಶ", r)
+        self.assertIn("ಡೆಲಿವರಿ", r)                # the one thing still open
+        known = {"delivery_same": True, "location": "X"}
+        done = b.compose_followup_reply(b.parse_followup("3 units for industry", (), known), known)
+        self.assertIn(b.CALLBACK_QUESTION, done)    # everything in: offer the call
+        self.assertNotIn(b.QUANTITY_NOTE, done)     # quantity was given
 
     def test_a_restated_capacity_is_acknowledged(self):
         self.assertIn("100 kVA",
@@ -982,8 +992,8 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         for numeral in b._NUMERALS:
             self.assertEqual(len(numeral), 3, repr(numeral))
             self.assertTrue(numeral.endswith("\u20e3"), repr(numeral))
-        self.assertIn(b._NUMERALS[0],
-                      b.compose_followup_reply(b.parse_followup("hmm ok")))
+        for numeral in b._NUMERALS[:3]:
+            self.assertIn(numeral, b.CALLBACK_QUESTION)
 
     def test_a_price_question_gets_only_list_prices(self):
         r = b.compose_followup_reply(b.parse_followup("rate eshtu"))
@@ -991,9 +1001,11 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         assert_only_owner_prices(self, r)
 
     def test_the_reply_still_identifies_as_bairavi_and_never_as_asthra(self):
+        # The opening introduces Bairavi; follow-ups stay short and must
+        # simply never speak as Asthra.
+        self.assertIn("Bairavi Trans Solutions", b.compose_reply(b.parse(form())))
         for msg in ("hmm ok", "Charging Station", "100kv", "3 units"):
             r = b.compose_followup_reply(b.parse_followup(msg))
-            self.assertIn("Bairavi Trans Solutions", r)
             self.assertNotIn("Asthra", r)
 
     def test_no_delivery_date_or_certificate_is_ever_promised(self):
@@ -1076,8 +1088,12 @@ class AnUnstatedQuantityIsOneUnit(unittest.TestCase):
     def test_the_opening_reply_still_ASKS_once(self):
         """"just ask them" — the question stays in the first reply. What
         changed is that it is never chased afterwards."""
-        r = b.compose_reply(b.parse(form()))
-        self.assertIn("units", r)
+        done = {"location": "X", "capacity_kva": 25, "application": "AGRICULTURE",
+                "delivery_same": True}
+        close = b.compose_followup_reply(b.parse_followup("ok", (), done), done)
+        self.assertEqual(close.count(b.QUANTITY_NOTE), 1)
+        # ...and never chased: no reminder or re-ask carries it.
+        self.assertNotIn("units", b.question_for(b.AWAITING_CALLBACK, done))
 
     def test_the_owner_alert_for_a_fresh_form_says_assumed_not_TBD(self):
         a = b.compose_owner_alert("910000000000", b.parse(form()))
@@ -1274,7 +1290,7 @@ Phone number: +910000000000"""
         self.assertIn("Bairavi Trans Solutions", r)
         self.assertNotIn("Asthra", r)
         assert_only_owner_prices(self, r)
-        self.assertIn("units", r)
+        self.assertEqual(r.count("?"), 1)          # still asks its one question
 
     def test_the_verbatim_text_survives_an_unreadable_form(self):
         p = b.parse(self.BLIND)
@@ -1307,7 +1323,7 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
         bare = ("Hello! I filled out your form.\n"
                 "ಸಾಮರ್ಥ್ಯ: 100 kVA\nFull name: X\nPhone number: 910000000000")
         r = b.compose_reply(b.parse(bare))
-        self.assertIn("ಯಾವ ಸ್ಥಳಕ್ಕೆ ಬೇಕು", r)
+        self.assertIn("ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು", r)
 
     def test_a_form_that_asks_delivery_is_confirmed_not_re_asked(self):
         p = b.parse(form() + "\nDelivery location: Puttur")
@@ -1316,15 +1332,19 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
         self.assertIn("Puttur", r)
         self.assertNotIn("ಇದೇ ಸ್ಥಳಕ್ಕೆ", r)
 
-    def test_no_ask_is_ever_silently_dropped(self):
-        """zip() against a shorter numeral tuple discards the extra question
-        without erroring, which is how the units ask disappeared once."""
+    def test_the_opening_asks_exactly_one_question(self):
+        """Owner, 2026-09-25: one thing at a time. And the question asked is
+        the one the transcript marker says is awaited."""
         for f in (form(), form(location=""), form() + "\nDelivery: Puttur"):
-            r = b.compose_reply(b.parse(f))
-            asked = r.count("\u20e3")          # keycap numerals rendered
-            listed = r.count("*ಉದ್ದೇಶ*") + r.count("*units*") + r.count("*ಡೆಲಿವರಿ*")
-            self.assertGreaterEqual(asked, 2, r)
-            self.assertGreaterEqual(listed, 2, r)
+            p = b.parse(f)
+            r = b.compose_reply(p)
+            self.assertEqual(r.count("?"), 1, r)
+            self.assertNotIn("\u20e3", r)          # no numbered list
+            awaited = b.opening_awaiting(p)
+            self.assertLessEqual(len(awaited), 1)
+            token = {b.AWAITING_DELIVERY: "ಸ್ಥಳ", b.AWAITING_PURPOSE: "ಉದ್ದೇಶ"}
+            for field in awaited:
+                self.assertIn(token[field], r)
 
     # ── reading the answer ────────────────────────────────────────────
     def test_an_unambiguous_delivery_answer_is_captured(self):

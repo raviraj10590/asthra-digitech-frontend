@@ -529,7 +529,7 @@ class EveryBranchSurvivesASecondMessage(unittest.TestCase):
         turns = c.thread(lead_form(), "1 unit", "Rate")
         for i, t in enumerate(turns, 1):
             self.assertNotIn("Asthra", t.reply or "", f"turn {i}")
-        self.assertIn("quotation", turns[2].reply.lower())
+        self.assertIn("+ gst", turns[2].reply.lower())   # "Rate" gets the list price
 
     def test_asthra_new_contact_then_followup(self):
         c = Conversation()

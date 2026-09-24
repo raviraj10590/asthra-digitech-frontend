@@ -230,11 +230,13 @@ class WhatIsOutstandingIsDecidedInOnePlace(unittest.TestCase):
             self.assertTrue(b.question_for(field).strip())
 
     def test_the_reply_and_the_marker_cannot_disagree(self):
-        """Both derive from outstanding(). If they diverged, the bot would
-        ask for one thing and the sweep would chase another."""
+        """The marker (awaiting_after) and the reply ask the same thing. If
+        they diverged, the bot would ask for one thing and the sweep would
+        chase another. Since 2026-09-25 that is one question at a time."""
         for text in ("Agriculture", "hmm ok", "delivery: Puttur", "100kv"):
             f = b.parse_followup(text)
-            awaiting = b.outstanding(f)
+            awaiting = b.awaiting_after(f)
+            self.assertLessEqual(len(awaiting), 1, text)
             reply = b.compose_followup_reply(f)
             for field in awaiting:
                 token = "ಡೆಲಿವರಿ" if field == b.AWAITING_DELIVERY else "ಉದ್ದೇಶ"
