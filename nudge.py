@@ -126,8 +126,13 @@ def compose(awaiting, question_for, known=None) -> str:
     lines = ["ನಮಸ್ಕಾರ 🙏 *Bairavi Trans Solutions* — ನಿಮ್ಮ transformer "
              "requirement ಬಗ್ಗೆ ಒಂದು ವಿಷಯ ಬಾಕಿ ಇದೆ."]
     numerals = ("1️⃣", "2️⃣")
-    for numeral, field in zip(numerals, awaiting):
-        lines.append(f"{numeral} {question_for(field, known)}")
+    if len(awaiting) == 1:
+        # One question needs no number — and the call-back question carries
+        # its own 1️⃣/2️⃣/3️⃣ options, which a leading 1️⃣ would garble.
+        lines.append(question_for(awaiting[0], known))
+    else:
+        for numeral, field in zip(numerals, awaiting):
+            lines.append(f"{numeral} {question_for(field, known)}")
     lines.append("\nಇದು ತಿಳಿದರೆ ನಮ್ಮ engineer ನಿಖರವಾದ quotation ಕೊಡಲು ಸಾಧ್ಯ. "
                  "ಬೇಡವಾದರೆ ತೊಂದರೆ ಇಲ್ಲ — ತಿಳಿಸಿ ಸಾಕು 🙏")
     return "\n".join(lines)

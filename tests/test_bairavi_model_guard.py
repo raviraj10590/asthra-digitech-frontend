@@ -175,7 +175,7 @@ class TheModelIsAskedOnlyWhereThereIsNothingToSay(unittest.TestCase):
 
     def test_a_real_question_does_reach_the_model(self):
         for text in ("ನಿಮ್ಮ ಕಂಪನಿ ಎಷ್ಟು ವರ್ಷದಿಂದ ಇದೆ?", "who are you?",
-                     "what about warranty?", "ನನ್ನ ಹೆಸರು ಗೊತ್ತಾ?",
+                     "what is the impedance?", "ನನ್ನ ಹೆಸರು ಗೊತ್ತಾ?",
                      "transformer nalli en difference?"):
             with self.subTest(text=text):
                 self.assertTrue(b.should_ask_model(parse(text), KNOWN), text)
@@ -228,16 +228,16 @@ class TheComposedReplyIsTheFallback(unittest.TestCase):
         self.assertIn(b.question_for(b.AWAITING_DELIVERY, KNOWN), out)
 
     def test_a_refused_reply_yields_nothing(self):
-        out, _ = self._run("what about warranty?", "We give a 2 year warranty.")
+        out, _ = self._run("how many years is your company running?", "We give a 2 year warranty.")
         self.assertEqual(out, "")
 
     def test_the_refusal_is_logged_with_a_reason(self):
-        _, log = self._run("what about warranty?", "We give a 2 year warranty.")
+        _, log = self._run("how many years is your company running?", "We give a 2 year warranty.")
         self.assertIn("BAIRAVI_MODEL_REFUSED", log)
         self.assertIn("a warranty", log)
 
     def test_the_refusal_log_never_carries_the_phone_or_the_text(self):
-        _, log = self._run("what about warranty?",
+        _, log = self._run("how many years is your company running?",
                            "We give a 2 year warranty on all units.")
         self.assertNotIn("919000000000", log)
         self.assertIn("0000", log)

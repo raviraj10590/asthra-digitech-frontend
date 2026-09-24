@@ -21,6 +21,7 @@ this module: the bot may repeat what the owner has said and no more.
 """
 import unittest
 import bairavi as b
+from _price_policy import assert_only_owner_prices  # noqa: E402
 
 
 class TheQuestionIsRecognised(unittest.TestCase):
@@ -186,8 +187,7 @@ class TheOwnerIsTold(unittest.TestCase):
         text = "mescom approval?"
         f = b.parse_followup(text, awaiting=(b.AWAITING_DELIVERY,))
         alert = b.compose_followup_alert("910000000000", f, text, {})
-        self.assertIn("No price, delivery date or certificate was quoted",
-                      alert)
+        self.assertIn("No delivery date, discount or certificate", alert)
 
 
 if __name__ == "__main__":

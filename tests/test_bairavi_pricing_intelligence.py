@@ -48,7 +48,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import bairavi as b                                            # noqa: E402
+import bairavi as b
+from _price_policy import assert_only_owner_prices, owner_price_violations  # noqa: E402                                            # noqa: E402
 
 PHONE = "910000000000"
 
@@ -107,23 +108,24 @@ class NoReplyMayEverContainAPrice(unittest.TestCase):
             "price list ಕಳುಹಿಸಿ", "ಒಂದು transformer ಎಷ್ಟು?", "cost?",
             "100 kva 2 units delivery to Hubli rate enide")
 
-    def test_no_customer_reply_looks_like_money(self):
+    def test_no_customer_reply_contains_money_other_than_list_prices(self):
         for ask in self.ASKS:
             reply = conversation(ask)[0]["reply"]
-            self.assertIsNone(_LOOKS_LIKE_MONEY.search(reply), ask)
+            assert_only_owner_prices(self, reply, ask)
 
     def test_no_reply_contains_the_design_package_figure(self):
         for ask in self.ASKS:
             reply = conversation(ask)[0]["reply"]
-            for forbidden in ("68,244", "68244", "₹"):
+            for forbidden in ("68,244", "68244"):
                 self.assertNotIn(forbidden, reply, ask)
 
     def test_no_costing_vocabulary_reaches_the_customer(self):
-        """margin, GST and material rates are the inputs to the formula that
-        must never be run."""
+        """margin and material rates are the inputs to the formula that must
+        never be run. "+ GST" is allowed since 2026-09-24 — it is how the
+        owner states his list prices — but never a GST rate or a total."""
         for ask in self.ASKS:
             low = conversation(ask)[0]["reply"].lower()
-            for word in ("margin", "gst", "per kg", "₹/kg", "factory cost"):
+            for word in ("margin", "per kg", "₹/kg", "factory cost", "18%", "gst included"):
                 self.assertNotIn(word, low, ask)
 
     def test_no_reply_claims_a_quotation_WAS_generated(self):
@@ -218,10 +220,10 @@ class TheMatrix(unittest.TestCase):
         self.assertFalse(any("price" in s["predicate"]
                              for s in GOAL["required_slots"]))
 
-    def test_J_the_truthful_no_price_response_is_preserved(self):
+    def test_J_a_price_question_gets_the_list_prices(self):
         t = conversation("price?")[0]
-        self.assertIn("ದರದ ಬಗ್ಗೆ", t["reply"])
-        self.assertIn("engineer", t["reply"])
+        self.assertIn("+ GST", t["reply"])
+        assert_only_owner_prices(self, t["reply"])
 
     def test_K_a_bare_commercial_word_is_still_an_intent(self):
         """One word, no sentence, no capacity — still a price question."""
@@ -405,7 +407,7 @@ class RequirementsAreReadFromTheBrainsGoalRegistry(unittest.TestCase):
         """A BIC outage must not break a customer reply."""
         followup = b.parse_followup("rate?")
         reply = b.compose_followup_reply(followup, {}, None)
-        self.assertIn("ದರದ ಬಗ್ಗೆ", reply)
+        self.assertIn("+ GST", reply)
 
     def test_missing_requirements_reads_MERGED_state(self):
         self.assertEqual(
@@ -734,7 +736,7 @@ class TheVocabularyCoversHowPeopleAsk(unittest.TestCase):
         question changes only which answer is given, and that answer still
         contains no number."""
         reply = b.compose_followup_reply(b.parse_followup("Amount?"), {})
-        self.assertNotIn("₹", reply)
+        assert_only_owner_prices(self, reply)
         for token in ("68,244", "68244"):
             self.assertNotIn(token, reply)
 

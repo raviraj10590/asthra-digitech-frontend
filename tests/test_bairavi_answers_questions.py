@@ -24,6 +24,7 @@ the owner, which is strictly better than the receipt production sent.
 """
 import unittest
 import bairavi as b
+from _price_policy import assert_only_owner_prices  # noqa: E402
 
 ASKED = (b.AWAITING_DELIVERY,)
 KNOWN = {"name": "Manju", "capacity_kva": 100, "location": "kushtagi"}
@@ -178,7 +179,8 @@ class TheCustomerGetsTheAnswer(unittest.TestCase):
         unanswered. The price referral already answers it, and a customer
         asking one thing must not be answered two ways."""
         reply = b.compose_followup_reply(parse("rate eshtu?"), KNOWN)
-        self.assertIn("ದರದ ಬಗ್ಗೆ", reply)
+        self.assertIn("+ GST", reply)
+        self.assertEqual(reply.count("+ GST"), 1)
         self.assertNotIn("ತಲುಪಿಸಿದ್ದೇವೆ", reply)
 
     def test_an_approval_question_is_not_answered_twice(self):
@@ -186,10 +188,15 @@ class TheCustomerGetsTheAnswer(unittest.TestCase):
         self.assertIn("MESCOM", reply)
         self.assertNotIn("ತಲುಪಿಸಿದ್ದೇವೆ", reply)
 
-    def test_an_unanswerable_question_gets_an_honest_referral(self):
+    def test_warranty_is_answered_from_the_owners_terms(self):
+        """Owner's ruling 2026-09-24: 1 year warranty, service after."""
         reply = b.compose_followup_reply(parse("what about warranty?"), KNOWN)
+        self.assertIn("1 ವರ್ಷ warranty", reply)
+        assert_only_owner_prices(self, reply)
+
+    def test_a_truly_unknown_question_still_gets_an_honest_referral(self):
+        reply = b.compose_followup_reply(parse("what is the impedance?"), KNOWN)
         self.assertIn("engineer", reply)
-        self.assertNotIn("ವಾರಂಟಿ", reply)
 
 
 class TheOwnerIsToldWhenWeCouldNotAnswer(unittest.TestCase):
@@ -199,7 +206,7 @@ class TheOwnerIsToldWhenWeCouldNotAnswer(unittest.TestCase):
                                         KNOWN)
 
     def test_an_unanswerable_question_raises_the_flag(self):
-        self.assertIn("could not answer", self._alert("what about warranty?"))
+        self.assertIn("could not answer", self._alert("what is the impedance?"))
 
     def test_an_answered_question_does_not(self):
         for text in ("rate eshtu?", "mescom approval?", "who are you?",

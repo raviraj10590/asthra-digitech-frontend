@@ -5605,7 +5605,11 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             known = bairavi.established_from_history(ctx["history"])
             followup = bairavi.parse_followup(
                 user_text, bairavi_awaiting(ctx["history"]), known=known)
-            _awaiting = bairavi_awaiting(ctx["history"])
+            # UNTIMED on purpose. The 12 h bound protects READING a bare word
+            # as an answer; for deciding to stay silent the safe direction is
+            # the opposite — if the last reply asked anything, however long
+            # ago, the customer gets a reply.
+            _awaiting = bairavi.awaiting_from_history(ctx["history"])
             # "K" AFTER EVERYTHING IS ANSWERED. Recorded, not replied to — a
             # receipt for a receipt is noise, and the owner already has the
             # lead. Anything readable, or any pending question, still gets
@@ -5653,7 +5657,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                 (sender, "user", user_text),
                 (sender, "assistant",
                  bairavi.flow_marker(
-                     bairavi.outstanding(followup, known),
+                     bairavi.awaiting_after(followup, known),
                      quote_signalled=_quote_now
                      or bairavi.quote_already_signalled(ctx["history"]),
                      reply=_reply))])

@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import bairavi as b                                            # noqa: E402
 import webhook as w                                            # noqa: E402
+from _price_policy import assert_only_owner_prices              # noqa: E402
 
 CAP_Q = "ನಿಮಗೆ ಅಗತ್ಯವಿರುವ ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಸಾಮರ್ಥ್ಯ ಯಾವುದು?"
 WHEN_Q = "ನಿಮಗೆ ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಯಾವಾಗ ಅಗತ್ಯವಿದೆ?"
@@ -95,16 +96,17 @@ class NothingUndocumentedIsEverQuoted(unittest.TestCase):
         out.append(b.compose_reply(b.parse("100 kva price?")))
         return out
 
-    def test_no_price_figure_ever_appears(self):
+    def test_only_the_owners_list_prices_ever_appear(self):
+        """Owner's ruling 2026-09-24: list prices are shown, + GST. Any other
+        figure is still a defect."""
+        from _price_policy import OWNER_PRICES
         for txt in self.every_reply():
-            self.assertNotIn("68244", txt.replace(",", ""))
-            self.assertNotIn("₹", txt)
-            self.assertNotIn("rs.", txt.lower())
-            self.assertNotIn("lakh", txt.lower())
-            # no bare rupee-ish number: kVA figures are the only digits allowed
+            assert_only_owner_prices(self, txt)
+            # no bare rupee-ish number: kVA figures and list prices only
             for m in re.finditer(r"\d[\d,]{2,}", txt):
                 near = txt[m.start():m.start() + 24].lower()
-                self.assertTrue("kva" in near or "910000000000" in near,
+                self.assertTrue("kva" in near or "910000000000" in near
+                                or m.group(0).rstrip(",") in OWNER_PRICES,
                                 f"unexplained number in reply: {near!r}")
 
     def test_no_delivery_or_lead_time_is_promised(self):
@@ -119,8 +121,10 @@ class NothingUndocumentedIsEverQuoted(unittest.TestCase):
         worst thing this layer could do."""
         for txt in self.every_reply():
             up = txt.upper()
-            for banned in ("BIS", "BEE", "ISO", "MESCOM", "STAR RATING",
-                           "CERTIFIED", "ISI"):
+            # MESCOM approval and the star ratings were stated by the owner
+            # (2026-09-23 and 2026-09-24); nothing else was.
+            for banned in ("BIS", "BEE", "ISO", "GESCOM APPROVED",
+                           "BESCOM APPROVED", "CERTIFIED", "ISI"):
                 self.assertNotIn(banned, up, banned)
 
     def test_no_gtp_level_technical_value_appears(self):
@@ -139,12 +143,12 @@ class NothingUndocumentedIsEverQuoted(unittest.TestCase):
     def test_the_catalogue_is_exactly_the_four_manufactured_sizes(self):
         self.assertEqual(b.CATALOGUE_KVA, (25, 63, 100, 250))
 
-    def test_the_no_price_sentence_is_present_on_every_sales_reply(self):
-        """A customer who asked for a price must get a real next step, not
-        silence about it."""
+    def test_every_sales_reply_carries_the_price_and_a_next_step(self):
+        """Owner's ruling 2026-09-24: the price first, and a way to talk."""
         for cap in CAP_OPTIONS:
             txt = b.compose_reply(b.parse(form(capacity=cap)))
-            self.assertIn("engineer", txt.lower())
+            self.assertIn("+ GST", txt)
+            self.assertIn("CALL", txt)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -658,12 +662,11 @@ class ConversationContinuity(unittest.TestCase):
         self.assertTrue(any("Quantity: 1" in a for a in r["owner"]))
         self.assertTrue(any("AGRICULTURE" in a for a in r["owner"]))
 
-    def test_a_price_question_is_answered_without_a_price(self):
+    def test_a_price_question_is_answered_with_the_list_price(self):
         r = self.thread(form(), "Rate")
         reply = r["sent"][1]
-        self.assertIn("quotation", reply.lower())
-        for banned in ("₹", "68244", "rs.", "lakh"):
-            self.assertNotIn(banned, reply.lower())
+        self.assertIn("+ GST", reply)
+        assert_only_owner_prices(self, reply)
 
     def test_the_customers_words_reach_the_owner_verbatim(self):
         """A site condition no parsed field would capture — and the reason
@@ -982,12 +985,10 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         self.assertIn(b._NUMERALS[0],
                       b.compose_followup_reply(b.parse_followup("hmm ok")))
 
-    def test_a_price_question_still_gets_no_number(self):
+    def test_a_price_question_gets_only_list_prices(self):
         r = b.compose_followup_reply(b.parse_followup("rate eshtu"))
-        self.assertIn("engineer", r)
-        self.assertNotIn("₹", r)
-        self.assertFalse(re.search(r"\d{3,}", r.replace("100", "")),
-                         "a figure reached the customer")
+        self.assertIn("+ GST", r)
+        assert_only_owner_prices(self, r)
 
     def test_the_reply_still_identifies_as_bairavi_and_never_as_asthra(self):
         for msg in ("hmm ok", "Charging Station", "100kv", "3 units"):
@@ -1272,7 +1273,7 @@ Phone number: +910000000000"""
         r = b.compose_reply(b.parse(self.BLIND))
         self.assertIn("Bairavi Trans Solutions", r)
         self.assertNotIn("Asthra", r)
-        self.assertNotIn("₹", r)
+        assert_only_owner_prices(self, r)
         self.assertIn("units", r)
 
     def test_the_verbatim_text_survives_an_unreadable_form(self):

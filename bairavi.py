@@ -1118,7 +1118,8 @@ def unanswered_question(followup: dict) -> bool:
     if followup.get("customer_question") != QUESTION_UNANSWERED:
         return False
     return (followup.get("discom_approval_ask") is None
-            and not followup.get("asked_price"))
+            and not followup.get("asked_price")
+            and not followup.get("asked_terms"))
 
 
 # ── WHEN THE MODEL MAY SPEAK, AND WHAT IT MAY NOT SAY ─────────────────────
@@ -1174,7 +1175,7 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
                   "delivery_location"):
         if followup.get(field):
             return False
-    if followup.get("delivery_same"):
+    if followup.get("delivery_same") or followup.get("callback") or followup.get("asked_terms"):
         return False
     return True
 
@@ -1888,7 +1889,11 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # who had just typed "Ok".
     is_ack = bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or _is_greeting(bare)
 
+    callback = callback_request(text, awaiting)
+    if callback and AWAITING_CALLBACK in (awaiting or ()) and len(low.split()) <= 2:
+        qty = None  # "2" / "2️⃣" answering "when should we call?" is option two, not two units
     return {"quantity": qty, "application": app, "capacity_kva": cap,
+            "callback": callback, "asked_terms": asked_terms(text),
             "delivery_location": dl, "delivery_same": same,
             "delivery_mentioned": mentioned,
             "is_ack": is_ack,
@@ -1916,6 +1921,126 @@ _RANGE = " / ".join(f"{k} kVA" for k in CATALOGUE_KVA)
 # promise made is one the business can actually keep.
 _NO_PRICE = ("ದರ ಮತ್ತು ಡೆಲಿವರಿ ಸಮಯ — ನಮ್ಮ engineer "
              "ನಿಮ್ಮ requirement ನೋಡಿ ನಿಖರವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
+
+# ── THE OWNER'S PRICE LIST — 2026-09-24 ──────────────────────────────────
+#
+# Stated by the owner in chat, verbatim: "warranty period 1 year after that
+# service available. payment advance 50% and 50 on delivery. 25 kva price
+# 95,000 plus gst for 4 star transformer, 2 lakh plus gst for 63kva, 100 kva
+# 2.95 lakh plus gst" and then "63 and 100 kva 5 star, transportation
+# included not installation, delivery time call with our team, 250 kva
+# 5 star 4.95 lakh plus gst".
+#
+# WHY PRICES ARE NOW SHOWN FIRST: 32 of 110 form leads (30 days to
+# 2026-09-24) chose "price list / info", and "our engineer will tell you"
+# was where those conversations ended. The owner asked for it.
+#
+# WHAT IS STILL NOT STATED, AND THEREFORE NEVER WRITTEN: the GST rate (always
+# "+ GST", never a total), a delivery time in days (the team confirms it on
+# a call), the installation cost, a validity date, any discount. The model
+# path's evidence guard still refuses money in generated text: prices come
+# only from this table, through the composer.
+PRICE_LIST = {25: (95_000, 4), 63: (200_000, 5), 100: (295_000, 5), 250: (495_000, 5)}
+
+
+def inr(amount: int) -> str:
+    """Indian grouping: 95000 -> "95,000", 200000 -> "2,00,000"."""
+    s = str(int(amount))
+    if len(s) <= 3:
+        return s
+    head, tail = s[:-3], s[-3:]
+    groups = []
+    while len(head) > 2:
+        groups.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        groups.insert(0, head)
+    return ",".join(groups) + "," + tail
+
+
+_SALES_TERMS = (
+    "🚚 Transport ಸೇರಿದೆ (installation ಪ್ರತ್ಯೇಕ)\n"
+    "🛡️ *1 ವರ್ಷ warranty* — ನಂತರವೂ service ಲಭ್ಯ\n"
+    "💳 *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ\n"
+    "🏭 ನೇರ ತಯಾರಕರಿಂದ (Kadaba) — ಮಧ್ಯವರ್ತಿ ಇಲ್ಲ\n"
+    "✔️ MESCOM approved\n"
+    "⏱️ ಡೆಲಿವರಿ ಸಮಯ — ನಮ್ಮ ತಂಡ call ನಲ್ಲಿ ಖಚಿತಪಡಿಸುತ್ತಾರೆ")
+
+
+def price_line(kva: int) -> str:
+    amount, star = PRICE_LIST[kva]
+    return f"*{kva} kVA {star} Star* — *₹{inr(amount)} + GST*"
+
+
+def price_block_kn(kva=None) -> str:
+    """The price for their capacity with the terms, or the whole list.
+
+    One capacity when we know it and make it; otherwise the full list, so a
+    customer who wrote 60 kVA sees 63 and decides — never silently mapped.
+    """
+    if kva in PRICE_LIST:
+        head = "💰 " + price_line(kva)
+    else:
+        head = "💰 *ನಮ್ಮ ದರಗಳು:*\n" + "\n".join(f"• {price_line(k)}" for k in sorted(PRICE_LIST))
+    return head + "\n" + _SALES_TERMS
+
+
+# ── CALL-BACK BOOKING ─────────────────────────────────────────────────────
+#
+# Once qualification is complete the reply ends with a choice, not a
+# "we will contact you": which of three times the engineer should call.
+# A choice is easier to answer than "do you want to buy?", and the answer
+# goes to the owner as a call task. 88 of 110 leads had never been called
+# by a person (30 days to 2026-09-24).
+AWAITING_CALLBACK = "callback"
+CALLBACK_NOW, CALLBACK_EVENING, CALLBACK_TOMORROW = "now", "evening", "tomorrow"
+CALLBACK_LABEL_KN = {CALLBACK_NOW: "ಈಗಲೇ", CALLBACK_EVENING: "ಇಂದು ಸಂಜೆ", CALLBACK_TOMORROW: "ನಾಳೆ"}
+CALLBACK_LABEL_EN = {CALLBACK_NOW: "NOW", CALLBACK_EVENING: "this evening", CALLBACK_TOMORROW: "tomorrow"}
+CALLBACK_QUESTION = ("📞 ನಮ್ಮ engineer ಯಾವಾಗ call ಮಾಡಲಿ?\n"
+                     "1️⃣ ಈಗಲೇ\n2️⃣ ಇಂದು ಸಂಜೆ\n3️⃣ ನಾಳೆ")
+CALL_HINT = "📞 ನೇರವಾಗಿ ಮಾತನಾಡಲು *CALL* ಎಂದು reply ಮಾಡಿ."
+
+_CALL_WORDS = ("call", "call me", "phone", "phone me", "ಕಾಲ್", "ಕಾಲ್ ಮಾಡಿ", "ಫೋನ್",
+               "ಫೋನ್ ಮಾಡಿ", "ಕರೆ", "ಕರೆ ಮಾಡಿ", "call madi", "call maadi", "phone madi")
+_CALLBACK_CHOICE = {
+    "1": CALLBACK_NOW, "now": CALLBACK_NOW, "ಈಗ": CALLBACK_NOW, "ಈಗಲೇ": CALLBACK_NOW,
+    "ega": CALLBACK_NOW, "egale": CALLBACK_NOW, "immediately": CALLBACK_NOW,
+    "2": CALLBACK_EVENING, "evening": CALLBACK_EVENING, "ಸಂಜೆ": CALLBACK_EVENING,
+    "sanje": CALLBACK_EVENING, "today evening": CALLBACK_EVENING, "ಇಂದು ಸಂಜೆ": CALLBACK_EVENING,
+    "3": CALLBACK_TOMORROW, "tomorrow": CALLBACK_TOMORROW, "ನಾಳೆ": CALLBACK_TOMORROW,
+    "nale": CALLBACK_TOMORROW, "naale": CALLBACK_TOMORROW,
+}
+
+
+# QUESTIONS THE OWNER'S TERMS NOW ANSWER. "what about warranty?" used to get
+# "our engineer will confirm"; since 2026-09-24 there is a stated answer.
+_TERMS_WORDS = ("warranty", "guarantee", "ವಾರಂಟಿ", "ಗ್ಯಾರಂಟಿ", "payment", "advance",
+                "ಅಡ್ವಾನ್ಸ್", "ಪೇಮೆಂಟ್", "transport", "ಸಾಗಣೆ", "installation", "install",
+                "ಇನ್‌ಸ್ಟಾಲೇಶನ್", "service", "ಸರ್ವಿಸ್", "emi", "loan")
+
+
+def asked_terms(text: str) -> bool:
+    low = (text or "").lower()
+    return any(_label_matches(low, w) if w.isascii() else w in low for w in _TERMS_WORDS)
+
+
+def callback_request(text: str, awaiting=()):
+    """now / evening / tomorrow when the customer asked for a call, else None.
+
+    "CALL" (or ಕಾಲ್ ಮಾಡಿ, phone me…) as the whole message is a request to be
+    called now. A bare 1 / 2 / 3 is a choice ONLY when the last reply offered
+    those three options — otherwise "2" is still a quantity.
+    """
+    bare = re.sub(r"[\s.!,🙏️⃣]+", " ", (text or "").lower()).strip()
+    if bare in _CALL_WORDS:
+        return CALLBACK_NOW
+    if AWAITING_CALLBACK in (awaiting or ()):
+        if bare in _CALLBACK_CHOICE:
+            return _CALLBACK_CHOICE[bare]
+        for word, slot in _CALLBACK_CHOICE.items():
+            if not word.isdigit() and word in bare:
+                return slot
+    return None
 
 
 def compose_reply(parsed: dict) -> str:
@@ -1971,7 +2096,8 @@ def compose_reply(parsed: dict) -> str:
     if parsed["location"]:
         lines.append(f"📍 ಸ್ಥಳ: {parsed['location']}")
 
-    lines.append("\n" + _NO_PRICE)
+    # THE PRICE, FIRST. Owner's ruling 2026-09-24 — see PRICE_LIST.
+    lines.append("\n" + price_block_kn(kva if parsed["in_catalogue"] else None))
 
     # Only what is genuinely missing. Quantity is never in the ad form, and
     # application is §6.2's strongest early qualification signal.
@@ -2001,6 +2127,7 @@ def compose_reply(parsed: dict) -> str:
     assert len(asks) <= len(_NUMERALS), "an ask would be silently dropped"
     for numeral, ask in zip(_NUMERALS, asks):
         lines.append(f"{numeral} {ask}")
+    lines.append("\n" + CALL_HINT)
     return "\n".join(lines)
 
 
@@ -2016,7 +2143,7 @@ def compose_reply(parsed: dict) -> str:
 # answer "ನನ್ನ ಹೆಸರು ಗೊತ್ತಾ?" with something it already knew.
 _PERSISTENT_FIELDS = ("capacity_kva", "quantity", "application", "location",
                       "delivery_location", "delivery_same",
-                      "delivery_mentioned", "name")
+                      "delivery_mentioned", "name", "callback")
 
 
 def merged_state(known: dict, turn: dict = None) -> dict:
@@ -2244,6 +2371,8 @@ def question_for(field: str, known: dict = None) -> str:
         return f"ಎಷ್ಟು *kVA* ಬೇಕು? (ನಮ್ಮ range: {_RANGE})"
     if field == AWAITING_QUANTITY:
         return "ಎಷ್ಟು *units* ಬೇಕು?"
+    if field == AWAITING_CALLBACK:
+        return CALLBACK_QUESTION
     raise ValueError(f"no question for {field!r}")
 
 
@@ -2321,7 +2450,7 @@ def marker_awaiting(content: str) -> tuple:
         return ()
     raw = text.split("awaiting=", 1)[1].split()[0]
     valid = (AWAITING_DELIVERY, AWAITING_PURPOSE,
-             AWAITING_CAPACITY, AWAITING_QUANTITY)
+             AWAITING_CAPACITY, AWAITING_QUANTITY, AWAITING_CALLBACK)
     return tuple(f for f in raw.split(",") if f in valid)
 
 
@@ -2425,7 +2554,9 @@ def compose_followup_reply(followup: dict, known: dict = None,
 
     if got:
         lines.append("✅ ಧನ್ಯವಾದ — ದಾಖಲಿಸಿದ್ದೇವೆ: *" + ", ".join(got) + "*.")
-    else:
+    elif not (followup.get("asked_price") or followup.get("callback")):
+        # A price question or a call choice is answered directly below; a
+        # "message received" line above it is filler.
         lines.append("✅ ಧನ್ಯವಾದ — ನಿಮ್ಮ ಸಂದೇಶ ಸಿಕ್ಕಿದೆ.")
 
     # THE QUESTION THEY ASKED, ANSWERED. A DISCOM approval question used to
@@ -2446,12 +2577,16 @@ def compose_followup_reply(followup: dict, known: dict = None,
         lines.append("\n" + answer_question_kn(_question, known))
 
     _intent = followup.get("commercial_intent")
+    if followup.get("asked_terms") and not followup["asked_price"]:
+        # Warranty / payment / transport / installation: the owner's terms,
+        # with the price for their capacity, which is what the terms are for.
+        lines.append("\n" + price_block_kn(merged_state(known, followup).get("capacity_kva")))
     if followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
         # never a number — the evidence for one does not exist.
-        lines.append("\nದರದ ಬಗ್ಗೆ: ನಮ್ಮ engineer ನಿಮ್ಮ requirement "
-                     "(capacity, quantity, ಸ್ಥಳ) ನೋಡಿ ನಿಖರವಾದ quotation "
-                     "ಕೊಡುತ್ತಾರೆ — ಸಾಮಾನ್ಯ ದರ ಹೇಳುವುದು ತಪ್ಪಾಗುತ್ತದೆ.")
+        # THE PRICE THEY ASKED FOR, from the owner's list (2026-09-24).
+        _kva = merged_state(known, followup).get("capacity_kva")
+        lines.append("\n" + price_block_kn(_kva))
         if _intent == QUOTATION_REQUEST:
             # Says a REQUEST was recorded and a human will act. Never that a
             # quotation exists — no quotation has been produced, and claiming
@@ -2484,6 +2619,11 @@ def compose_followup_reply(followup: dict, known: dict = None,
         _asks = _required + _asks
     missing = [question_for(f, known) for f in _asks]
 
+    _callback = followup.get("callback")
+    if _callback:
+        lines.append(f"\n📞 ಸರಿ — ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[_callback]}* "
+                     "ನಿಮಗೆ call ಮಾಡುತ್ತಾರೆ. ಡೆಲಿವರಿ ಸಮಯ ಮತ್ತು order ವಿವರ "
+                     "ಅವರೇ ತಿಳಿಸುತ್ತಾರೆ.")
     if missing:
         lines.append("\nಇನ್ನೊಂದು ವಿಷಯ ತಿಳಿಸಿ:" if len(missing) == 1
                      else "\nಇಷ್ಟು ತಿಳಿಸಿದರೆ ಸಾಕು:")
@@ -2498,9 +2638,14 @@ def compose_followup_reply(followup: dict, known: dict = None,
         lines.append("\nಇದು ತಿಳಿದರೆ ನಮ್ಮ engineer ನಿಖರವಾದ quotation "
                      "ಕೊಡಲು ಸಾಧ್ಯ.")
 
-    lines.append("\nನಮ್ಮ *Bairavi Trans Solutions* ತಂಡ ಶೀಘ್ರದಲ್ಲೇ "
-                 "ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಾರೆ 🙏")
-    full = "\n".join(lines)
+    if not missing and not _callback and not merged_state(known, followup).get("callback"):
+        # EVERYTHING IS ANSWERED: offer the call instead of "we will contact
+        # you", which asked nothing and was where conversations ended.
+        lines.append("\n" + CALLBACK_QUESTION)
+    elif not _callback:
+        lines.append("\nನಮ್ಮ *Bairavi Trans Solutions* ತಂಡ ಶೀಘ್ರದಲ್ಲೇ "
+                     "ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಾರೆ 🙏")
+    full = "\n".join(lines).strip()
 
     # THE SAME REPLY TWICE IN A ROW. Checked here, at the single place the
     # reply is built, so no caller can send a repeat by forgetting to ask.
@@ -2549,8 +2694,10 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
     """
     def val(v):
         return v if v not in (None, "") else "TBD"
+    _cb = followup.get("callback")
     return (
-        "🔌 *BAIRAVI — follow-up*\n"
+        (f"🔥📞 *CALL {CALLBACK_LABEL_EN[_cb].upper()}* — customer asked for a call\n" if _cb else "")
+        + "🔌 *BAIRAVI — follow-up*\n"
         f"From: wa.me/{phone}\n"
         # Reported when a follow-up RESTATES it — "100kv" on 2026-09-17 was a
         # capacity the owner alert had no line for, so it reached him only
@@ -2579,7 +2726,7 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
                or "not named")
             + "\n") if followup.get("discom_approval_ask") is not None else "")
         + f"\nTheir words: {(text or '').strip()[:300]}\n"
-        "\nNo price, delivery date or certificate was quoted to the customer."
+        "\nQuoted to the customer: the owner's list price only (+ GST). No delivery date, discount or certificate."
     )
 
 
@@ -2698,6 +2845,19 @@ def is_silent_ack(followup: dict, awaiting=()) -> bool:
         return False
     read_something = any(followup.get(k) for k in (
         "quantity", "application", "capacity_kva", "delivery_location",
-        "delivery_same", "asked_price", "discom_approval_ask", "customer_question"))
+        "delivery_same", "asked_price", "discom_approval_ask", "customer_question", "callback", "asked_terms"))
     return not read_something
+
+
+def awaiting_after(followup: dict, known: dict = None) -> tuple:
+    """What the reply just composed is waiting for — for the transcript marker.
+
+    outstanding() plus the call-back choice, which is offered only once the
+    qualification questions are all answered and no call time is known yet.
+    Kept separate so outstanding() keeps meaning "qualification still open".
+    """
+    out = outstanding(followup, known)
+    if not out and not merged_state(known, followup).get("callback"):
+        return (AWAITING_CALLBACK,)
+    return out
 

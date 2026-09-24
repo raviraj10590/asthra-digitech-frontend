@@ -87,6 +87,11 @@ class WebhookStaysSilent(unittest.TestCase):
         self.assertLess(i, j)
         self.assertIn("return", src[i:i + 400])
 
+    def test_silence_uses_the_untimed_reader(self):
+        """A stale or missing timestamp must never turn an answer into silence."""
+        src = open(os.path.join(os.path.dirname(__file__), "..", "api", "webhook.py")).read()
+        self.assertIn('_awaiting = bairavi.awaiting_from_history(ctx["history"])', src)
+
 
 if __name__ == "__main__":
     unittest.main()
