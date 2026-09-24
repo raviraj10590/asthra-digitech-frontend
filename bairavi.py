@@ -1991,6 +1991,28 @@ CLOSING_VALUE = ("ನಿಮ್ಮ requirement ಪ್ರಕಾರ ನಮ್ಮ en
 # Quantity, asked ONCE (owner, 2026-09-17: "just ask them, if they don't
 # tell anything assume it as single quantity"). It rides on the closing
 # message as one line instead of being a numbered question of its own.
+# THE CLOSE, IN THE CUSTOMER'S OWN TERMS (owner, 2026-09-25: "sales ge
+# conversion aago tara natural aagirbeku"). The form already told us how
+# soon they need it; a salesperson would use that, so the close does too.
+# Each line states only what the team will do — no delivery promise, no
+# claim beyond the evidence.
+_CLOSE_BY_URGENCY = {
+    "IMMEDIATE": "ನಿಮಗೆ transformer ತಕ್ಷಣ ಬೇಕಾಗಿರುವುದರಿಂದ, ನಮ್ಮ engineer ಆದಷ್ಟು "
+                 "ಬೇಗ ನಿಮ್ಮೊಂದಿಗೆ ಮಾತನಾಡುತ್ತಾರೆ.",
+    "WITHIN_1_MONTH": "ನಿಮಗೆ ಒಂದು ತಿಂಗಳೊಳಗೆ ಬೇಕಾಗಿರುವುದರಿಂದ, ನಿಮ್ಮ ಸಮಯಕ್ಕೆ "
+                      "ಸರಿಯಾಗಿ plan ಮಾಡಲು ನಮ್ಮ engineer ಮಾತನಾಡುತ್ತಾರೆ.",
+    "INFORMATION_ONLY": "ದರದ ಜೊತೆಗೆ, ನಿಮ್ಮ site ಗೆ ಸರಿಯಾದ transformer ಬಗ್ಗೆ ನಮ್ಮ "
+                        "engineer ಮಾರ್ಗದರ್ಶನ ನೀಡುತ್ತಾರೆ.",
+}
+
+
+def closing_line(state: dict) -> str:
+    """The sentence before the call offer, by name and by urgency."""
+    who = display_name((state or {}).get("name"))
+    body = _CLOSE_BY_URGENCY.get((state or {}).get("urgency"), CLOSING_VALUE)
+    return f"{who} ಅವರೇ, {body}" if who else body
+
+
 QUANTITY_NOTE = "(1 ಕ್ಕಿಂತ ಹೆಚ್ಚು *units* ಬೇಕಿದ್ದರೆ ದಯವಿಟ್ಟು ತಿಳಿಸಿ.)"
 
 
@@ -2171,7 +2193,7 @@ def compose_reply(parsed: dict) -> str:
 # answer "ನನ್ನ ಹೆಸರು ಗೊತ್ತಾ?" with something it already knew.
 _PERSISTENT_FIELDS = ("capacity_kva", "quantity", "application", "location",
                       "delivery_location", "delivery_same",
-                      "delivery_mentioned", "name", "callback")
+                      "delivery_mentioned", "name", "callback", "urgency")
 
 
 def merged_state(known: dict, turn: dict = None) -> dict:
@@ -2653,7 +2675,9 @@ def compose_followup_reply(followup: dict, known: dict = None,
 
     _callback = followup.get("callback")
     if _callback:
-        lines.append(f"ಸರಿ. ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[_callback]}* ನಿಮಗೆ "
+        _who = display_name(merged_state(known, followup).get("name"))
+        lines.append(("ಸರಿ " + _who + " ಅವರೇ." if _who else "ಸರಿ.")
+                     + f" ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[_callback]}* ನಿಮಗೆ "
                      "ಕರೆ ಮಾಡಿ, ಡೆಲಿವರಿ ಸಮಯ ಮತ್ತು order ವಿವರಗಳನ್ನು ತಿಳಿಸುತ್ತಾರೆ.\n"
                      "ಧನ್ಯವಾದಗಳು 🙏")
     if missing:
@@ -2668,7 +2692,7 @@ def compose_followup_reply(followup: dict, known: dict = None,
         # EVERYTHING IS ANSWERED: the two terms that close a sale, once, and
         # the call — instead of "we will contact you", which asked nothing.
         _qty_known = merged_state(known, followup).get("quantity") is not None
-        lines.append("\n" + CLOSING_VALUE
+        lines.append("\n" + closing_line(merged_state(known, followup))
                      + ("" if _qty_known else "\n" + QUANTITY_NOTE)
                      + "\n\n" + CALLBACK_QUESTION)
     full = "\n".join(lines).strip()

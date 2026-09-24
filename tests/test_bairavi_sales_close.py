@@ -182,5 +182,38 @@ class NoRepeatedCourtesy(unittest.TestCase):
         self.assertEqual(r.count("ಧನ್ಯವಾದಗಳು"), 1, r)
 
 
+class TheCloseUsesWhatTheFormSaid(unittest.TestCase):
+    """Owner, 2026-09-25: conversion should feel natural."""
+
+    def _close(self, urgency, name="RAVI KUMAR"):
+        k = {**DONE, "application": None, "urgency": urgency, "name": name}
+        return b.compose_followup_reply(b.parse_followup("agriculture", (b.AWAITING_PURPOSE,), k), k)
+
+    def test_urgent_leads_are_told_we_will_be_quick(self):
+        self.assertIn("ತಕ್ಷಣ ಬೇಕಾಗಿರುವುದರಿಂದ", self._close("IMMEDIATE"))
+
+    def test_price_list_leads_are_offered_guidance(self):
+        self.assertIn("ಮಾರ್ಗದರ್ಶನ", self._close("INFORMATION_ONLY"))
+
+    def test_by_name(self):
+        self.assertIn("Ravi Kumar ಅವರೇ,", self._close("WITHIN_1_MONTH"))
+        self.assertNotIn("ಅವರೇ", self._close(None, name=None))
+
+    def test_no_delivery_promise_in_any_close(self):
+        for u in ("IMMEDIATE", "WITHIN_1_MONTH", "INFORMATION_ONLY", None):
+            r = self._close(u)
+            for banned in ("days", "ದಿನ", "week", "ವಾರ", "guarantee", "₹"):
+                self.assertNotIn(banned, r, u)
+
+    def test_urgency_and_name_survive_from_the_form(self):
+        form = FORM.format(cap="A. 25 kVA") + "\nನಿಮಗೆ ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಯಾವಾಗ ಅಗತ್ಯವಿದೆ?: A.ತಕ್ಷಣ ಅಗತ್ಯವಿದೆ"
+        history = [{"role": "user", "content": form},
+                   {"role": "assistant", "content": b.flow_marker((b.AWAITING_DELIVERY,))},
+                   {"role": "user", "content": "ok"}]
+        state = b.established_from_history(history)
+        self.assertEqual(state["urgency"], "IMMEDIATE")
+        self.assertEqual(b.display_name(state["name"]), "Test")
+
+
 if __name__ == "__main__":
     unittest.main()
