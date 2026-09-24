@@ -639,6 +639,15 @@ def _read_quantity(low: str, cap=None):
             continue
         if not stated_unit and low[digits_end:digits_end + 1].isalpha():
             continue
+        # A NUMBERED LIST, NOT A COUNT. On 2026-09-24 a customer answered the
+        # three questions as "1. near 3km. / 2. Agriculture. / 3. 25kv" and
+        # was recorded as ordering 1 unit — the "1." that numbered their
+        # first answer. A figure that opens a line and is followed by "." or
+        # ")" is a list marker.
+        line_start = low.rfind("\n", 0, m.start()) + 1
+        if (not stated_unit and not low[line_start:m.start()].strip()
+                and low[digits_end:digits_end + 1] in (".", ")")):
+            continue
         if not stated_unit:
             # WHAT FOLLOWS A BARE FIGURE. The old test looked five characters
             # past the match for "kv" only, which is why "15 hp" and
@@ -649,7 +658,22 @@ def _read_quantity(low: str, cap=None):
             if any(rest.startswith(u) for u in _MEASUREMENT_UNIT):
                 continue
         return n
+    # A COUNT IN WORDS. "Agriculture / Single unit" (2026-09-24) was stored as
+    # the delivery address "Single unit". Only a number word WITH a unit word
+    # after it, or "single" on its own, is read: "one" alone appears in
+    # ordinary sentences and says nothing about how many.
+    w = _WORD_QTY_RE.search(low)
+    if w:
+        return _WORD_QTY[w.group("w") or "single"]
     return None
+
+
+_WORD_QTY = {"single": 1, "one": 1, "ondu": 1, "ಒಂದು": 1,
+             "two": 2, "eradu": 2, "ಎರಡು": 2, "three": 3, "mooru": 3, "ಮೂರು": 3}
+_WORD_QTY_RE = re.compile(
+    r"(?<![\w\u0C80-\u0CFF])(?P<w>" + "|".join(_WORD_QTY) + r")\s*"
+    r"(?:units?(?![a-z])|nos?(?![a-z])|tc(?![a-z])|transformers?(?![a-z])|ಯುನಿಟ್|ಟಿಸಿ)"
+    r"|(?<![\w\u0C80-\u0CFF])(?P<single>single)(?![a-z])")
 
 # Application vocabulary, English and Kannada. An allowlist: an unrecognised
 # purpose stays None rather than being guessed, because "what it is for"
@@ -716,6 +740,34 @@ DEFAULT_QUANTITY = 1
 _APPLICATIONS_WHOLE_WORD = (("ev", "EV_CHARGING"),)
 
 
+# MISSPELT, NOT UNKNOWN. On 2026-09-24 a customer answered the purpose
+# question with "Agreeculture". It was stored as the delivery ADDRESS and the
+# purpose was asked again. Customers type these words by ear; a Latin word
+# within two edits of a known purpose word is that word. Long words only, so
+# short place names cannot drift into a purpose.
+_FUZZY_PURPOSE = (("agriculture", "AGRICULTURE"), ("agricultural", "AGRICULTURE"),
+                  ("irrigation", "AGRICULTURE"), ("borewell", "AGRICULTURE"),
+                  ("industrial", "INDUSTRY"), ("industry", "INDUSTRY"),
+                  ("construction", "CONSTRUCTION"), ("commercial", "COMMERCIAL"),
+                  ("domestic", "DOMESTIC"), ("charging", "EV_CHARGING"))
+_FUZZY_MIN_LEN = 8
+
+
+def _edit_distance(a: str, b: str, limit: int) -> int:
+    """Levenshtein distance, stopping early once it exceeds `limit`."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > limit:
+            return limit + 1
+        prev = cur
+    return prev[-1]
+
+
 def _application_of(low: str):
     """The purpose this text states, or None. The single reader for it."""
     for needle, value in _APPLICATIONS:
@@ -724,6 +776,12 @@ def _application_of(low: str):
     for needle, value in _APPLICATIONS_WHOLE_WORD:
         if _label_matches(low, needle):
             return value
+    for word in re.findall(r"[a-z]+", low):
+        if len(word) < _FUZZY_MIN_LEN:
+            continue
+        for target, value in _FUZZY_PURPOSE:
+            if _edit_distance(word, target, 2) <= 2:
+                return value
     return None
 
 
@@ -1754,6 +1812,14 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # A capacity is not a quantity, and neither is a distance or a motor
     # rating. _read_quantity owns that rule and the delivery filter shares it.
     qty = _read_quantity(low, cap)
+    # THE CAPACITY, REPEATED. Asked for the purpose, a 25 kVA customer
+    # replied "25" and was recorded as ordering 25 units (2026-09-24). A bare
+    # figure equal to the kVA we already hold is that kVA again; "25 units"
+    # with the word still counts.
+    known_kva = (known or {}).get("capacity_kva")
+    if (qty is not None and known_kva is not None and qty == known_kva
+            and not re.search(r"units?|nos?|pcs?|ಯುನಿಟ್|ನಗ", low)):
+        qty = None
     app = _application_of(low)
     # WHERE TO DELIVER. An explicit delivery word is required: a bare place
     # name in a follow-up cannot be told apart from an application, a company
