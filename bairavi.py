@@ -737,7 +737,15 @@ DEFAULT_QUANTITY = 1
 # because only "charging" and "ev station" were known. "ev" cannot join the
 # substring list above: it sits inside Devanahalli, Bevinahalli, every, never
 # and level, and would read half the map as a charging station.
-_APPLICATIONS_WHOLE_WORD = (("ev", "EV_CHARGING"),)
+_APPLICATIONS_WHOLE_WORD = (("ev", "EV_CHARGING"),
+                            # ಕೃಷಿ typed in English letters (2026-09-25:
+                            # "Krushi", "Krusshi" were not understood and the
+                            # purpose was asked twice more).
+                            ("krushi", "AGRICULTURE"), ("krishi", "AGRICULTURE"),
+                            ("krusshi", "AGRICULTURE"), ("krusi", "AGRICULTURE"),
+                            ("kurshi", "AGRICULTURE"), ("krushi ge", "AGRICULTURE"),
+                            ("vyavasaya", "AGRICULTURE"), ("vyavasaaya", "AGRICULTURE"),
+                            ("raitha", "AGRICULTURE"), ("raita", "AGRICULTURE"))
 
 # THE FARM ITSELF. On 2026-09-24 a customer gave "thota" as the project
 # location and later "ತೋಟ" as the delivery place: ತೋಟ is "farm/plantation",
@@ -1019,7 +1027,19 @@ QUESTION_NAME = "their_name"
 QUESTION_WHO = "who_we_are"
 QUESTION_RANGE = "what_we_make"
 QUESTION_DELIVERY_AREA = "delivery_area"
+QUESTION_DELIVERY_TIME = "delivery_time"
 QUESTION_UNANSWERED = "unanswered"
+
+# WHEN WILL YOU DELIVER — owner's ruling 2026-09-24: "delivery time call
+# with our team". On 2026-09-25 "Ayitu delivery Yavaga kodtira" was ignored
+# and the purpose question sent instead. Detected as a WHEN word plus a
+# delivery word, so "yavaga call madtira" is not mistaken for it.
+_WHEN_WORDS = ("yavaga", "yaavaga", "yavag", "ಯಾವಾಗ", "when", "how many days",
+               "how long", "estu dina", "eshtu dina", "ಎಷ್ಟು ದಿನ", "ಎಷ್ಟು ದಿನದಲ್ಲಿ")
+_DELIVER_WORDS = ("deliver", "ಡೆಲಿವರಿ", "kodtira", "kodthira", "kodteera", "ಕೊಡ್ತೀರ",
+                  "ಕೊಡುತ್ತೀರಾ", "supply", "ready", "ರೆಡಿ", "send", "kalisti", "ಕಳಿಸ್ತೀರ")
+_DELIVERY_TIME_KN = ("ಡೆಲಿವರಿ ಸಮಯವನ್ನು ನಿಮ್ಮ order ವಿವರ ನೋಡಿ ನಮ್ಮ ತಂಡ ಕರೆಯಲ್ಲಿ "
+                     "ಖಚಿತಪಡಿಸುತ್ತಾರೆ.")
 
 # DELIVERY REACH — owner-stated, 2026-09-20, in the owner's own words:
 # "sadyakke delivery irodu mescom limit in 2 month etaire karnataka delivery
@@ -1060,6 +1080,8 @@ def customer_question(text: str):
     owner needs to see.
     """
     low = (text or "").lower()
+    if any(w in low for w in _WHEN_WORDS) and any(w in low for w in _DELIVER_WORDS):
+        return QUESTION_DELIVERY_TIME
     for tag, vocabulary in ((QUESTION_NAME, _ASK_NAME),
                             (QUESTION_DELIVERY_AREA, _ASK_DELIVERY_AREA),
                             (QUESTION_RANGE, _ASK_RANGE),
@@ -1099,6 +1121,8 @@ def answer_question_kn(tag, known: dict = None) -> str:
                 + _range_line_kn())
     if tag == QUESTION_RANGE:
         return _range_line_kn()
+    if tag == QUESTION_DELIVERY_TIME:
+        return _DELIVERY_TIME_KN
     if tag == QUESTION_DELIVERY_AREA:
         return (_DELIVERY_NOW_KN + " ನಿಮ್ಮ ಸ್ಥಳಕ್ಕೆ ಸಾಧ್ಯವೇ ಎಂದು ನಮ್ಮ "
                 "engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
@@ -1161,6 +1185,9 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
     if followup.get("discom_approval_ask") is not None:
         return False
     if followup.get("is_ack"):
+        return False
+    # The owner's ruling is the answer; a model paraphrase could add a number.
+    if followup.get("customer_question") == QUESTION_DELIVERY_TIME:
         return False
     # THE OTHER QUESTIONS GO TO THE MODEL FIRST, and their evidenced answers
     # become the fallback rather than the first responder. A keyword match is
@@ -1251,6 +1278,16 @@ def reply_violates_evidence(text: str):
                 return reason
         elif term in low:
             return reason
+    # NOT OUR VOICE (owner, 2026-09-25: "answer is some not good"). The model
+    # replied in Kannada written in English letters and used the informal
+    # "neenu" — to a customer. Both are refused; the composed reply stands.
+    if re.search(r"\bneenu\b|\bninu\b|ನೀನು", low):
+        return "informal address"
+    _latin_kn = ("namma", "nimma", "nimage", "ide ", "madidivi", "tilisu", "tilsu",
+                 "helidri", "vishaya", "khachita", "svalpa", "dhanyavada")
+    kannada_chars = sum(1 for ch in raw if "\u0c80" <= ch <= "\u0cff")
+    if kannada_chars < 10 and sum(w in low for w in _latin_kn) >= 2:
+        return "Kannada in English letters"
     # A capacity we do not offer, stated as if we do.
     for figure in re.findall(r"(\d{2,4})\s*k\s*v\s*a", low):
         if int(figure) not in CATALOGUE_KVA and int(figure) not in PLANNED_KVA:
@@ -1290,7 +1327,10 @@ def model_brief_kn(known: dict = None) -> str:
         "4. Technical spec (loss, impedance, ಅಳತೆ, ತೂಕ, GTP) ಹೇಳಬೇಡಿ.\n"
         "5. ಮೇಲಿನ range ನಲ್ಲಿ ಇಲ್ಲದ kVA ಇದೆ ಎಂದು ಹೇಳಬೇಡಿ.\n"
         "6. ಗೊತ್ತಿಲ್ಲದಿದ್ದರೆ: 'ನಮ್ಮ engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ' ಎಂದು ಹೇಳಿ.\n"
-        "7. ಗ್ರಾಹಕ ಬರೆದ ಭಾಷೆಯಲ್ಲೇ ಉತ್ತರಿಸಿ. 2–4 ಸಾಲು, WhatsApp ಶೈಲಿ.\n"
+        "7. ಕನ್ನಡ ಲಿಪಿಯಲ್ಲೇ ಉತ್ತರಿಸಿ (ಗ್ರಾಹಕ English ನಲ್ಲಿ ಬರೆದರೆ ಮಾತ್ರ "
+        "English). English ಅಕ್ಷರಗಳಲ್ಲಿ ಕನ್ನಡ ಬರೆಯಬೇಡಿ. ಯಾವಾಗಲೂ ಗೌರವದಿಂದ "
+        "'ನೀವು' ಬಳಸಿ — 'ನೀನು' ಎಂದಿಗೂ ಬೇಡ. ವೃತ್ತಿಪರ ಶೈಲಿ, 1–3 ಚಿಕ್ಕ ವಾಕ್ಯ. "
+        "ಈಗಾಗಲೇ ತಿಳಿದ ವಿವರಗಳನ್ನು ಪುನರಾವರ್ತಿಸಬೇಡಿ.\n"
         "8. Asthra DigiTech ನ ಸೇವೆಗಳ ಬಗ್ಗೆ ಮಾತನಾಡಬೇಡಿ — ಇದು "
         "transformer ವಿಚಾರಣೆ.\n"
         # THE NUMBER IS THE CONVERSATION. Asking a WhatsApp customer for
@@ -1508,7 +1548,14 @@ def _is_greeting(low: str) -> bool:
     gone rather than left as an untested branch.
     """
     squeezed = _collapse_runs(low)
-    return any(squeezed == _collapse_runs(g) for g in _GREETING)
+    greetings = {_collapse_runs(g) for g in _GREETING}
+    if squeezed in greetings:
+        return True
+    # "Hii namaste", "hi sir good morning": several greeting words and
+    # nothing else (2026-09-25 — that reply got the call-back close).
+    words = [w for w in re.split(r"[\s,!.🙏]+", squeezed) if w]
+    polite = greetings | {"sir", "madam", "ji", "anna", "sar", "ಸರ್"}
+    return len(words) > 1 and all(w in polite for w in words) and any(w in greetings for w in words)
 
 
 # ── SEMANTIC CLASSES THAT ARE NOT A PLACE ─────────────────────────────────
@@ -1887,7 +1934,8 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # A bare acknowledgement or greeting says nothing a model can answer, and
     # asking one produced a paragraph re-introducing the company to someone
     # who had just typed "Ok".
-    is_ack = bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or _is_greeting(bare)
+    is_greeting = _is_greeting(bare)
+    is_ack = bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or is_greeting
 
     callback = callback_request(text, awaiting)
     if callback and AWAITING_CALLBACK in (awaiting or ()) and len(low.split()) <= 2:
@@ -1900,6 +1948,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "delivery_location": dl, "delivery_same": same,
             "delivery_mentioned": mentioned,
             "is_ack": is_ack,
+            "is_greeting": is_greeting,
             # Unchanged meaning and unchanged readers: "did they raise money
             # at all". commercial_intent says WHICH ask it was.
             "asked_price": any(w in low for w in _PRICE_ASK),
@@ -2606,6 +2655,16 @@ def compose_followup_reply(followup: dict, known: dict = None,
     elif followup.get("delivery_same"):
         got.append("ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳಕ್ಕೆ")
 
+    _state_now = merged_state(known, followup)
+    if followup.get("is_greeting") and not got:
+        # "Hii namaste" is a hello, not an answer. It was met with the
+        # call-back close on 2026-09-25; it gets a hello and the one open
+        # question (or an offer to help), nothing more.
+        _who = display_name(_state_now.get("name"))
+        _hello = f"ನಮಸ್ಕಾರ {_who} ಅವರೇ 🙏" if _who else "ನಮಸ್ಕಾರ 🙏"
+        _open = outstanding(followup, known)
+        return (_hello + "\n" + (question_for(_open[0], known) if _open
+                else "ಹೇಳಿ, ನಿಮ್ಮ transformer ವಿಚಾರದಲ್ಲಿ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?"))
     if got:
         lines.append("ಧನ್ಯವಾದಗಳು — *" + ", ".join(got) + "* ಗಮನಿಸಿದ್ದೇವೆ.")
     elif not (followup.get("asked_price") or followup.get("callback")
@@ -2891,8 +2950,8 @@ def is_silent_ack(followup: dict, awaiting=()) -> bool:
     reply was not waiting for anything (an "Ok" to "same place?" is an
     answer, and is handled by delivery_same).
     """
-    if not followup.get("is_ack") or awaiting:
-        return False
+    if not followup.get("is_ack") or awaiting or followup.get("is_greeting"):
+        return False  # a greeting is always greeted back
     read_something = any(followup.get(k) for k in (
         "quantity", "application", "capacity_kva", "delivery_location",
         "delivery_same", "asked_price", "discom_approval_ask", "customer_question", "callback", "asked_terms"))
