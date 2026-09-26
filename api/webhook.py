@@ -1833,11 +1833,75 @@ def shadow_enabled() -> bool:
     return os.environ.get("SHADOW_INTERPRETATION", "off").strip().lower() in ("on", "true", "1", "yes")
 
 
+# The shadow table's name and its uniqueness key — PostgREST ignores a
+# duplicate (a retried webhook after a fail-open claim) instead of erroring.
+SHADOW_TABLE = "bairavi_shadow_interpretations"
+SHADOW_CONFLICT_KEY = "turn_key,contract_version,validator_version"
+SHADOW_INSERT_MAX_SECONDS = 2.0     # the insert may never take longer
+SHADOW_INSERT_SAFETY_SECONDS = 1.0  # always left before the function's hard limit
+
+
+def shadow_turn_key(message_id):
+    """HMAC-SHA256(SHADOW_TURN_KEY, WhatsApp message id), first 32 hex.
+
+    None — and therefore NO record — when there is no message id or no
+    secret. There is deliberately no fallback identity: the old
+    sha256(phone|text) could be brute-forced (small phone space, predictable
+    text) and collided across real turns ("ok" twice). The secret is read
+    per call, never logged, and never placed in a record.
+    """
+    secret = os.environ.get("SHADOW_TURN_KEY", "")
+    if not message_id or not secret.strip():
+        return None
+    return hmac.new(secret.encode("utf-8"), str(message_id).encode("utf-8"),
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def _shadow_write_headers():
+    """Service-role headers for the shadow-table INSERT — and nothing else.
+
+    Same reasoning as _leads_write_headers, kept separate so neither builder's
+    scope silently grows: the table revokes every privilege from anon, so the
+    anon key must never be offered. None when the credential is absent — no
+    fallback. The returned dict CONTAINS the secret; never log it.
+    """
+    key = SUPABASE_SERVICE_ROLE_KEY.strip()
+    if not key:
+        return None
+    return {"apikey": key, "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=ignore-duplicates,return=minimal"}
+
+
+def _shadow_insert(record: dict) -> None:
+    """One bounded INSERT, never retried. Any failure is a PII-safe log line."""
+    headers = _shadow_write_headers()
+    if headers is None:
+        print("BAIRAVI_SHADOW_WRITE_SKIPPED reason=no_service_role_credential")
+        return
+    hard_left = ai_seconds_left() + POST_AI_RESERVE_SECONDS
+    timeout = min(SHADOW_INSERT_MAX_SECONDS, hard_left - SHADOW_INSERT_SAFETY_SECONDS)
+    if timeout < 0.3:
+        print("BAIRAVI_SHADOW_WRITE_SKIPPED reason=deadline")
+        return
+    try:
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/{SHADOW_TABLE}",
+                          params={"on_conflict": SHADOW_CONFLICT_KEY},
+                          headers=headers, json=record, timeout=timeout)
+        if r.status_code >= 300:
+            # Status only: an error body can echo the submitted values.
+            print(f"BAIRAVI_SHADOW_WRITE_FAILED http={r.status_code}")
+    except Exception as e:
+        print(f"BAIRAVI_SHADOW_WRITE_FAILED error={type(e).__name__}")
+
+
 def _shadow_sink(record: dict) -> None:
-    """Where a shadow record goes. Today: one structured log line (no phone,
-    no message body, no key). A persistent table needs the owner's approval
-    of a schema first — see the Step 2 report."""
-    print("BAIRAVI_SHADOW " + json.dumps(record, ensure_ascii=False, default=str))
+    """Where a shadow record goes: one PII-free summary log line, then the
+    bounded insert. The summary carries no turn key, value or text."""
+    print(f"BAIRAVI_SHADOW status={record.get('status')} "
+          f"contract={record.get('contract_version')} validator={record.get('validator_version')} "
+          f"conflicts={','.join(record.get('conflict_fields') or []) or '-'}")
+    _shadow_insert(record)
 
 
 def _shadow_model_name(provider: str) -> str:
@@ -1847,33 +1911,40 @@ def _shadow_model_name(provider: str) -> str:
 
 def shadow_interpret(sender: str, user_text: str, history: list, followup: dict,
                      known: dict, message_id=None) -> None:
-    """Observe one turn. Returns nothing; never raises; never mutates its inputs."""
+    """Observe one turn. Returns nothing; never raises; never mutates its inputs.
+
+    No WhatsApp message id (or no SHADOW_TURN_KEY) means no record at all —
+    and so no interpretation call either: an observation that can never be
+    stored or joined to its transcript row is not worth a model call.
+    """
     if not shadow_enabled():
         return
+    turn_key = shadow_turn_key(message_id)
+    if turn_key is None:
+        return
     try:
-        _shadow_interpret(sender, user_text, history, followup, known, message_id)
+        _shadow_interpret(turn_key, user_text, history, followup, known)
     except Exception as e:                               # the customer must not notice
         try:
-            _shadow_sink({"v": interpretation.SHADOW_VERSION, "business": "bairavi",
-                          "status": interpretation.S_ERROR, "error": type(e).__name__})
+            _shadow_sink(interpretation.shadow_record(
+                status=interpretation.S_ERROR, turn_key=turn_key, awaiting=(),
+                error_class=type(e).__name__))
         except Exception:
             pass
 
 
-def _shadow_interpret(sender, user_text, history, followup, known, message_id):
+def _shadow_interpret(turn_key, user_text, history, followup, known):
     import copy
     # Private copies: whatever happens below cannot reach the caller's state.
     followup, known = copy.deepcopy(followup), copy.deepcopy(known or {})
     history = list(history or [])
     awaiting = bairavi_awaiting(history)          # exactly what the parser was given
-    turn_ref = hashlib.sha256(str(message_id or f"{sender}|{user_text}").encode()).hexdigest()[:16]
-    ts = datetime.now(timezone.utc).isoformat()
     left = ai_seconds_left()
     budget = min(INTERPRET_TIMEOUT_SECONDS, left)
     if budget < MIN_PROVIDER_SECONDS:
         _shadow_sink(interpretation.shadow_record(
-            status=interpretation.S_SKIPPED_DEADLINE, turn_ref=turn_ref, awaiting=awaiting,
-            left_s=left, ts=ts))
+            status=interpretation.S_SKIPPED_DEADLINE, turn_key=turn_key, awaiting=awaiting,
+            left_s=left))
         return
 
     name, provider = _provider_chain()[0]         # the primary only; no fallback chain
@@ -1892,23 +1963,24 @@ def _shadow_interpret(sender, user_text, history, followup, known, message_id):
         _CHAIN_DEADLINE["t"] = saved_chain
         _LAST_AI_TRUNCATED["value"] = saved_truncated
     latency_ms = int((time.monotonic() - started) * 1000)
-    common = dict(turn_ref=turn_ref, awaiting=awaiting, provider=name,
+    common = dict(turn_key=turn_key, awaiting=awaiting, provider=name,
                   model=_shadow_model_name(name), latency_ms=latency_ms,
-                  budget_s=budget, left_s=left, ts=ts)
+                  budget_s=budget, left_s=left)
     if not raw:
         _shadow_sink(interpretation.shadow_record(status=interpretation.S_PROVIDER_FAILED, **common))
         return
-    interp = interpretation.parse_llm_json(raw)
+    interp = interpretation.parse_llm_json(raw)   # the raw text goes no further than here
     if interp is None or interpretation.schema_errors(interp):
         validated = interpretation.validate(interp, user_text, awaiting, known)
         _shadow_sink(interpretation.shadow_record(status=interpretation.S_INVALID,
                                                   interp=interp if isinstance(interp, dict) else None,
-                                                  validated=validated, **common))
+                                                  validated=validated, text=user_text, **common))
         return
     validated = interpretation.validate(interp, user_text, awaiting, known)
     comparison = interpretation.compare(followup, user_text, known, interp, validated)
     _shadow_sink(interpretation.shadow_record(status=interpretation.S_OK, interp=interp,
-                                              validated=validated, comparison=comparison, **common))
+                                              validated=validated, comparison=comparison,
+                                              text=user_text, **common))
 
 
 def _as_ai_messages(rows) -> list:

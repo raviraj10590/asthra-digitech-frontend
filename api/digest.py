@@ -313,6 +313,30 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"bic replay retention failed (ignored): {e}")
 
+        # Bairavi shadow telemetry: 14-day rolling window (owner-approved
+        # 2026-09-27). Same pattern as above: service-role RPC, short timeout,
+        # never retried, never able to affect the digest. Before migration
+        # 20260927000001 is applied the function does not exist and PostgREST
+        # answers 404 — logged and ignored. Status code only: no body, no
+        # customer data is involved in either direction.
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/bairavi_prune_shadow_interpretations",
+                headers={
+                    "apikey": os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+                    "Authorization": f"Bearer {os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')}",
+                    "Content-Type": "application/json",
+                },
+                json={"retain_days": 14},
+                timeout=5,
+            )
+            if r.status_code == 404:
+                print("bairavi shadow retention: function not present (migration not applied) — skipped")
+            else:
+                print(f"bairavi shadow retention: {r.status_code}")
+        except Exception as e:
+            print(f"bairavi shadow retention failed (ignored): {type(e).__name__}")
+
         # IDD-2I Step 5: sweep customer_reply expectations whose window
         # closed with no reply. Reports as data (I7) rather than discarding —
         # every swept row becomes a NO_RESPONSE/TIMED_OUT observation.

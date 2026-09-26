@@ -288,7 +288,7 @@ class NoCustomerTextAndNoNetwork(unittest.TestCase):
         tree = ast.parse(open(os.path.join(ROOT, "interpretation.py")).read())
         mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         mods |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
-        self.assertEqual(mods, {"json", "re", "bairavi"})
+        self.assertEqual(mods, {"hashlib", "json", "re", "bairavi"})   # hashlib: version hashes (pure)
 
     def test_no_output_value_is_customer_text(self):
         _, v = roundtrip("warranty ide? 63 kva", (b.AWAITING_DELIVERY,))

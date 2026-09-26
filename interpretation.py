@@ -350,10 +350,19 @@ def state_view(validated: dict) -> dict:
 # is read by parse_llm_json, gated by validate(), compared with the
 # authoritative parser, and only ever RECORDED. Nothing here reaches a
 # customer, the transcript, the saved facts, the CRM or an owner alert.
+#
+# DESIGN B (owner-approved 2026-09-27): the record holds NO customer words.
+# No evidence text, no delivery-place text, no message body, no phone, no
+# WhatsApp message id, no raw model output. Evidence is described by
+# structure only (found / value-in-evidence / length / outcome); the
+# transcript stays the one place a human reads the actual message.
 # ══════════════════════════════════════════════════════════════════════════
 
-SHADOW_VERSION = 1
-EVIDENCE_MAX = 60           # evidence spans are kept short on purpose
+import hashlib
+
+# ── versions — so results from different code are never mixed ────────────
+RECORD_VERSION = 2          # the row layout (1 was the Step 2 log line)
+VALIDATOR_VERSION = "v1"    # bump on ANY change to validate()'s rules
 
 # Status of one shadow turn — a fixed vocabulary.
 S_OK = "ok"
@@ -361,6 +370,7 @@ S_INVALID = "invalid_shadow"
 S_PROVIDER_FAILED = "provider_failed"
 S_SKIPPED_DEADLINE = "skipped_deadline"
 S_ERROR = "shadow_error"
+STATUSES = (S_OK, S_INVALID, S_PROVIDER_FAILED, S_SKIPPED_DEADLINE, S_ERROR)
 
 # Comparison classes (owner's spec, 2026-09-27).
 MATCH, SHADOW_ONLY, PARSER_ONLY, CONFLICT = "MATCH", "SHADOW_ONLY", "PARSER_ONLY", "CONFLICT"
@@ -368,6 +378,50 @@ INVALID_SHADOW, SKIPPED = "INVALID_SHADOW", "SKIPPED"
 COMPARED = ("intent", "question_type", "capacity_kva", "quantity", "application",
             "delivery_place", "callback", "correction", "delivery_same",
             "discom", "delivery_mentioned")
+
+# Delivery-place outcomes: the ONLY thing ever recorded about a place.
+PLACE_ACCEPTED, PLACE_NOT_A_PLACE, PLACE_CONTEXT = "accepted", "not_a_place", "context"
+PLACE_NO_EVIDENCE, PLACE_REJECTED = "no_evidence", "rejected"
+_PLACE_OUTCOME = {R_NOT_A_PLACE: PLACE_NOT_A_PLACE, R_CONTEXT: PLACE_CONTEXT,
+                  R_NO_EVIDENCE: PLACE_NO_EVIDENCE, R_VALUE_NOT_IN_EVIDENCE: PLACE_NO_EVIDENCE}
+
+# The template WITHOUT runtime context; its hash is prompt_version.
+_BRIEF_TEMPLATE = (
+    "You read ONE WhatsApp message from a customer of a transformer "
+    "manufacturer and return ONLY a JSON object. No other text. You never "
+    "write a reply to the customer.\n"
+    "Schema:\n"
+    '{{"intent": one of {intents},\n'
+    ' "fields": {{field: {{"value": ..., "evidence": "<exact words copied from '
+    'the message>"}}}} using only these fields: {fields},\n'
+    ' "questions": list from {questions},\n'
+    ' "is_correction": true only if the customer explicitly changes a fact '
+    "already known,\n"
+    ' "ambiguous": false, or the field name if the message could mean two '
+    "things}}\n"
+    "Rules: capacity_kva and quantity are integers; application is one of "
+    "{applications}; callback is one of {callbacks}. Leave out any field the "
+    "message does not state. Never guess. Evidence must be copied exactly "
+    "from the message.\n"
+    "The business's last question was about: {awaiting}.\n"
+    "Already known: {known}."
+)
+
+
+def _short_hash(text: str, n: int) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:n]
+
+
+def contract_version() -> str:
+    """Deterministic: changes exactly when the schema's allowed values do."""
+    blob = json.dumps({"intents": INTENTS, "questions": QUESTIONS, "fields": FIELDS,
+                       "applications": APPLICATIONS}, sort_keys=True)
+    return "c1-" + _short_hash(blob, 8)
+
+
+def prompt_version() -> str:
+    """12 hex of the template alone — no customer context, never the prompt."""
+    return _short_hash(_BRIEF_TEMPLATE, 12)
 
 
 def interpretation_brief(awaiting=(), known: dict = None) -> str:
@@ -377,26 +431,11 @@ def interpretation_brief(awaiting=(), known: dict = None) -> str:
              if k in ("capacity_kva", "quantity", "application", "location",
                       "delivery_location", "delivery_same", "callback")
              and v not in (None, "", False)}
-    return (
-        "You read ONE WhatsApp message from a customer of a transformer "
-        "manufacturer and return ONLY a JSON object. No other text. You never "
-        "write a reply to the customer.\n"
-        "Schema:\n"
-        '{"intent": one of ' + ", ".join(INTENTS) + ",\n"
-        ' "fields": {field: {"value": ..., "evidence": "<exact words copied from '
-        'the message>"}} using only these fields: ' + ", ".join(FIELDS) + ",\n"
-        ' "questions": list from ' + ", ".join(QUESTIONS) + ",\n"
-        ' "is_correction": true only if the customer explicitly changes a fact '
-        "already known,\n"
-        ' "ambiguous": false, or the field name if the message could mean two '
-        "things}\n"
-        "Rules: capacity_kva and quantity are integers; application is one of "
-        + ", ".join(APPLICATIONS) + "; callback is one of " + ", ".join(CALLBACKS)
-        + ". Leave out any field the message does not state. Never guess. "
-        "Evidence must be copied exactly from the message.\n"
-        f"The business's last question was about: {', '.join(awaiting) or 'nothing'}.\n"
-        f"Already known: {known or 'nothing'}."
-    )
+    return _BRIEF_TEMPLATE.format(
+        intents=", ".join(INTENTS), fields=", ".join(FIELDS),
+        questions=", ".join(QUESTIONS), applications=", ".join(APPLICATIONS),
+        callbacks=", ".join(CALLBACKS), awaiting=", ".join(awaiting) or "nothing",
+        known=known or "nothing")
 
 
 def parse_llm_json(raw):
@@ -466,8 +505,8 @@ def classify(parser_value, shadow_value) -> str:
 
 def compare(parser_followup: dict, text: str, known: dict,
             interp: dict, validated: dict) -> dict:
-    """Field-by-field classes, plus the two sides' values where they differ.
-    Decides nothing: it records the disagreement for a human to read."""
+    """Field-by-field classes, plus both sides' values where they differ —
+    EXCEPT the delivery place, whose values are never carried (Design B)."""
     parser_contract = from_parse(parser_followup, text, known)
     p = _comparable(parser_followup, parser_contract["intent"],
                     parser_contract["is_correction"])
@@ -476,43 +515,113 @@ def compare(parser_followup: dict, text: str, known: dict,
                                                "application", "delivery_location"))
     s = _comparable(validated, interp.get("intent"), accepted_correction)
     classes = {f: classify(p[f], s[f]) for f in COMPARED}
-    diffs = {f: {"parser": p[f], "shadow": s[f]} for f in COMPARED if classes[f] != MATCH}
+    diffs = {f: {"parser": p[f], "shadow": s[f]} for f in COMPARED
+             if classes[f] != MATCH and f != "delivery_place"}
     return {"classes": classes, "diffs": diffs}
 
 
-def _clip(v):
-    return v if not isinstance(v, str) else v[:EVIDENCE_MAX]
+def field_report(interp, text: str, validated: dict) -> dict:
+    """Design B: what was proposed, described WITHOUT the customer's words.
+
+    value              the proposed value for capacity/quantity/application/
+                       callback (integers or fixed vocabulary); ALWAYS None for
+                       delivery_place — the place text is never recorded
+    evidence_found     the evidence appears in the customer's message
+    value_in_evidence  the value appears in its own evidence
+    evidence_len       length of the evidence span (characters)
+    outcome            "accepted", or the validator's fixed-vocabulary reason;
+                       for delivery_place one of accepted / not_a_place /
+                       context / no_evidence / rejected
+    """
+    fields = interp.get("fields") if isinstance(interp, dict) else None
+    if not isinstance(fields, dict):
+        return {}
+    reasons = {f: r for f, r in (validated or {}).get("_rejected", ()) if f != "*"}
+    accepted_key = {"delivery_place": "delivery_location"}
+    out = {}
+    for name, slot in fields.items():
+        if name not in FIELDS or not isinstance(slot, dict):
+            continue
+        value, evidence = slot.get("value"), slot.get("evidence")
+        ev = str(evidence or "")
+        accepted = (validated or {}).get(accepted_key.get(name, name)) is not None
+        if name == "delivery_place":
+            outcome = (PLACE_ACCEPTED if accepted
+                       else _PLACE_OUTCOME.get(reasons.get(name), PLACE_REJECTED))
+            rec_value = None
+        else:
+            outcome = "accepted" if accepted else reasons.get(name, "rejected")
+            rec_value = value if isinstance(value, (int, str)) and not isinstance(value, bool) else None
+            if isinstance(rec_value, str) and rec_value not in APPLICATIONS + CALLBACKS:
+                rec_value = None                      # only vocabulary values, never free text
+        out[name] = {"value": rec_value,
+                     "evidence_found": _in_message(ev, text),
+                     "value_in_evidence": bool(value is not None and ev
+                                               and _norm(value) in _norm(ev)),
+                     "evidence_len": len(ev),
+                     "outcome": outcome}
+    return out
 
 
-def shadow_record(*, status, turn_ref, awaiting, provider=None, model=None,
+# The columns of public.bairavi_shadow_interpretations the writer fills
+# (id and created_at are the database's own). A test pins this against the
+# migration so the two cannot drift.
+RECORD_COLUMNS = ("business", "turn_key", "record_version", "contract_version",
+                  "validator_version", "prompt_version", "provider", "model", "status",
+                  "error_class", "awaiting", "latency_ms", "budget_ms", "deadline_left_ms",
+                  "intent", "questions", "is_correction", "proposed", "accepted",
+                  "rejected", "ambiguous", "comparison", "conflict_fields", "diffs")
+
+
+def _ms(seconds):
+    return None if seconds is None else int(round(seconds * 1000))
+
+
+def shadow_record(*, status, turn_key, awaiting, provider=None, model=None,
                   latency_ms=None, budget_s=None, left_s=None, interp=None,
-                  validated=None, comparison=None, ts=None) -> dict:
-    """One telemetry record. No phone number, no message body, no key: the
-    turn is a hash, and evidence spans are clipped to EVIDENCE_MAX."""
-    rec = {"v": SHADOW_VERSION, "ts": ts, "business": "bairavi", "turn": turn_ref,
-           "status": status, "awaiting": list(awaiting or ()),
-           "provider": provider, "model": model, "latency_ms": latency_ms,
-           "budget_s": None if budget_s is None else round(budget_s, 2),
-           "deadline_left_s": None if left_s is None else round(left_s, 2)}
-    if status in (S_OK, S_INVALID) and interp is not None:
-        fields = interp.get("fields") if isinstance(interp, dict) else None
-        rec["intent"] = interp.get("intent") if isinstance(interp, dict) else None
-        rec["questions"] = interp.get("questions") if isinstance(interp, dict) else None
-        rec["is_correction"] = interp.get("is_correction") if isinstance(interp, dict) else None
-        rec["proposed"] = ({k: {"value": _clip((s or {}).get("value")),
-                                "evidence": _clip((s or {}).get("evidence"))}
-                            for k, s in fields.items()} if isinstance(fields, dict) else None)
+                  validated=None, comparison=None, text="", error_class=None) -> dict:
+    """One Design B row. `text` is used only to compute evidence structure and
+    is never itself placed in the record."""
+    is_dict = isinstance(interp, dict)
+    if status in (S_OK, S_INVALID) and is_dict:
+        intent = interp.get("intent") if interp.get("intent") in INTENTS else None
+        qs = interp.get("questions")
+        questions = [q for q in qs if q in QUESTIONS] if isinstance(qs, list) else None
+        corr = interp.get("is_correction") if isinstance(interp.get("is_correction"), bool) else None
+        proposed = field_report(interp, text, validated)
+    else:
+        intent = questions = corr = proposed = None
+    accepted = None
     if validated is not None:
-        rec["accepted"] = {k: validated.get(k) for k in
-                           ("capacity_kva", "quantity", "application",
-                            "delivery_location", "callback") if validated.get(k) is not None}
-        rec["rejected"] = [list(r) for r in validated.get("_rejected", ())]
-        rec["ambiguous"] = validated.get("_ambiguous")
-    rec["comparison"] = (comparison["classes"] if comparison
-                         else ({f: SKIPPED for f in COMPARED} if status == S_SKIPPED_DEADLINE
-                               else {f: INVALID_SHADOW for f in COMPARED}
-                               if status in (S_INVALID, S_PROVIDER_FAILED, S_ERROR) else None))
-    if comparison:
-        rec["diffs"] = {f: {k: _clip(v) for k, v in d.items()}
-                        for f, d in comparison["diffs"].items()}
-    return rec
+        accepted = {k: validated.get(k) for k in ("capacity_kva", "quantity", "application",
+                                                  "callback") if validated.get(k) is not None}
+        accepted["delivery_place_accepted"] = validated.get("delivery_location") is not None
+    classes = (comparison["classes"] if comparison
+               else {f: SKIPPED for f in COMPARED} if status == S_SKIPPED_DEADLINE
+               else {f: INVALID_SHADOW for f in COMPARED})
+    return {
+        "business": "bairavi",
+        "turn_key": turn_key,
+        "record_version": RECORD_VERSION,
+        "contract_version": contract_version(),
+        "validator_version": VALIDATOR_VERSION,
+        "prompt_version": prompt_version(),
+        "provider": provider,
+        "model": model,
+        "status": status,
+        "error_class": (str(error_class)[:40] if error_class else None),
+        "awaiting": list(awaiting or ()),
+        "latency_ms": latency_ms,
+        "budget_ms": _ms(budget_s),
+        "deadline_left_ms": _ms(left_s),
+        "intent": intent,
+        "questions": questions,
+        "is_correction": corr,
+        "proposed": proposed,
+        "accepted": accepted,
+        "rejected": [[f, r] for f, r in (validated or {}).get("_rejected", ())],
+        "ambiguous": (validated or {}).get("_ambiguous") if validated else None,
+        "comparison": classes,
+        "conflict_fields": sorted(f for f, c in classes.items() if c == CONFLICT),
+        "diffs": (comparison or {}).get("diffs") or None,
+    }

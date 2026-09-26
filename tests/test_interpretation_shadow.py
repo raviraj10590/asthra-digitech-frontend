@@ -24,6 +24,8 @@ import interpretation as I  # noqa: E402
 import webhook as w  # noqa: E402
 
 NOW_ISO = datetime.datetime.now(datetime.timezone.utc).isoformat()
+# A random per-run value — NOT the production secret, never a fixed string.
+TEST_TURN_KEY = os.urandom(16).hex()
 
 
 def contract(intent="answer", questions=(), correction=False, ambiguous=False, **fields):
@@ -56,7 +58,7 @@ def run_conversation(messages, *, shadow=False, provider=None, clock_left=None):
         ctx = {"history": list(history), "recent_sys": [], "paused": False,
                "vip_alerted": False, "lead_alerted": False, "last_user": {}}
         saved = []
-        env = {"SHADOW_INTERPRETATION": "on" if shadow else "off"}
+        env = {"SHADOW_INTERPRETATION": "on" if shadow else "off", "SHADOW_TURN_KEY": TEST_TURN_KEY}
         chain = [("deepseek", provider or (lambda m, t=None: ""))]
         with mock.patch.dict(os.environ, env), \
              mock.patch.object(w, "fetch_memory", lambda s: {}), \
@@ -161,12 +163,13 @@ class ShadowHasNoAuthority(unittest.TestCase):
             r = run_conversation(THREAD[:3], shadow=True, provider=lambda m, t=None, raw=raw: raw)
             self.assertEqual(r.sent, run_conversation(THREAD[:3]).sent)
 
-    def test_the_shadow_record_carries_no_phone_and_no_body(self):
+    def test_the_shadow_record_carries_no_phone_no_body_no_wamid_no_place(self):
         for rec in self.on.shadow:
             blob = json.dumps(rec, ensure_ascii=False)
-            self.assertNotIn("910000000077", blob)
-            self.assertNotIn("0077", blob)
-            self.assertNotIn("quotation beku", blob)
+            for banned in ("910000000077", "0077", "quotation beku", "2 beku", "wamid.",
+                           "Mysuru", "ಗುಜರಾತ್", "Sira", TEST_TURN_KEY):
+                self.assertNotIn(banned, blob, banned)
+            self.assertEqual(set(rec), set(I.RECORD_COLUMNS))
 
 
 class TheInputsAreNotMutated(unittest.TestCase):
@@ -177,7 +180,7 @@ class TheInputsAreNotMutated(unittest.TestCase):
         known = {"capacity_kva": 63}
         followup = b.parse_followup("2", (b.AWAITING_DELIVERY,), known=known)
         before = copy.deepcopy((history, known, followup))
-        with mock.patch.dict(os.environ, {"SHADOW_INTERPRETATION": "on"}), \
+        with mock.patch.dict(os.environ, {"SHADOW_INTERPRETATION": "on", "SHADOW_TURN_KEY": TEST_TURN_KEY}), \
              mock.patch.object(w, "_provider_chain", lambda: [("deepseek", adversarial)]), \
              mock.patch.object(w, "_shadow_sink", lambda r: None):
             w.start_turn_clock()
@@ -198,11 +201,12 @@ class ShadowObeysTheTurnDeadline(unittest.TestCase):
 
     def _once(self, provider, left):
         recs = []
-        with mock.patch.dict(os.environ, {"SHADOW_INTERPRETATION": "on"}), \
+        with mock.patch.dict(os.environ, {"SHADOW_INTERPRETATION": "on", "SHADOW_TURN_KEY": TEST_TURN_KEY}), \
              mock.patch.object(w, "_provider_chain", lambda: [("deepseek", provider)]), \
              mock.patch.object(w, "_shadow_sink", recs.append):
             w._TURN_CLOCK["deadline"] = w.time.monotonic() + left
-            w.shadow_interpret("910000000077", "2 units", [], b.parse_followup("2 units"), {})
+            w.shadow_interpret("910000000077", "2 units", [], b.parse_followup("2 units"), {},
+                               "wamid.deadline")
         return recs
 
     def test_the_call_gets_at_most_the_interpret_budget(self):
@@ -355,19 +359,25 @@ class TheComparisonClasses(unittest.TestCase):
             self.assertEqual(c["classes"][f], I.MATCH, f)
 
     def test_invalid_and_skipped_are_their_own_classes(self):
-        rec = I.shadow_record(status=I.S_INVALID, turn_ref="t", awaiting=(), interp=None,
+        rec = I.shadow_record(status=I.S_INVALID, turn_key="t" * 32, awaiting=(), interp=None,
                               validated=I.validate(None, "x"))
         self.assertEqual(set(rec["comparison"].values()), {I.INVALID_SHADOW})
-        rec = I.shadow_record(status=I.S_SKIPPED_DEADLINE, turn_ref="t", awaiting=())
+        rec = I.shadow_record(status=I.S_SKIPPED_DEADLINE, turn_key="t" * 32, awaiting=())
         self.assertEqual(set(rec["comparison"].values()), {I.SKIPPED})
 
-    def test_evidence_is_clipped_and_kept_for_review(self):
-        long = "x" * 200
-        rec = I.shadow_record(status=I.S_OK, turn_ref="t", awaiting=(),
+    def test_evidence_is_described_never_stored(self):
+        """Design B (2026-09-27): structure only; the transcript has the words."""
+        long = "Sulekere village near Turuvekere " * 5
+        rec = I.shadow_record(status=I.S_OK, turn_key="t" * 32, awaiting=(),
                               interp=contract(delivery_place=(long, long)),
-                              validated=I.validate(contract(), "hi"),
+                              validated=I.validate(contract(), "hi"), text=long,
                               comparison={"classes": {f: I.MATCH for f in I.COMPARED}, "diffs": {}})
-        self.assertEqual(len(rec["proposed"]["delivery_place"]["evidence"]), I.EVIDENCE_MAX)
+        slot = rec["proposed"]["delivery_place"]
+        self.assertEqual(set(slot), {"value", "evidence_found", "value_in_evidence",
+                                     "evidence_len", "outcome"})
+        self.assertIsNone(slot["value"])
+        self.assertEqual(slot["evidence_len"], len(long))
+        self.assertNotIn("Sulekere", json.dumps(rec, ensure_ascii=False))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -493,7 +503,7 @@ class ShadowRunsLast(unittest.TestCase):
             ctx = {"history": list(history), "recent_sys": [], "paused": False,
                    "vip_alerted": False, "lead_alerted": False, "last_user": {}}
             saved = []
-            with mock.patch.dict(os.environ, {"SHADOW_INTERPRETATION": "on"}), \
+            with mock.patch.dict(os.environ, {"SHADOW_INTERPRETATION": "on", "SHADOW_TURN_KEY": TEST_TURN_KEY}), \
                  mock.patch.object(w, "fetch_memory", lambda s: {}), \
                  mock.patch.object(w, "record_first_seen", lambda *a, **k: None), \
                  mock.patch.object(w, "send_text", lambda to, t, **k: events.append("send")), \
