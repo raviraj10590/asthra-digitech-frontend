@@ -111,8 +111,11 @@ class TimeoutsAreExplicit(unittest.TestCase):
         self.assertEqual(kw["timeout"], w.OPENAI_TIMEOUT_SECONDS)
 
     def test_3_gemini_timeout_is_unchanged(self):
+        """The cap is still 15s. Since Step 0 (2026-09-25) it is also
+        shortened to whatever the turn deadline leaves — never lengthened."""
         import inspect
-        self.assertIn("timeout=15",
+        self.assertEqual(w.GEMINI_TIMEOUT_SECONDS, 15)
+        self.assertIn("timeout=_bounded(GEMINI_TIMEOUT_SECONDS)",
                       inspect.getsource(w.generate_reply_gemini))
 
     def test_the_timeouts_are_finite_and_not_the_sdk_default(self):

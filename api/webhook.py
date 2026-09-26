@@ -181,6 +181,59 @@ DEEPSEEK_TIMEOUT_SECONDS = float(os.environ.get("DEEPSEEK_TIMEOUT_SECONDS", "35"
 # 380 tokens, consults 220-320, replies 900).
 OPENAI_TIMEOUT_SECONDS = float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "20"))
 
+# ── THE TURN DEADLINE — no model call may outlive the function ─────────────
+#
+# vercel.json gives this function maxDuration 30s. The provider chain tried
+# DeepSeek (35s), then OpenAI (20s), then Gemini (15s) IN SEQUENCE: up to 70s
+# of waiting inside a function that is killed at 30. When Vercel kills it,
+# nothing after the model runs — not the fallback provider, not the Bairavi
+# composed reply, not the transcript write — so the customer got silence.
+#
+# The per-provider caps above are unchanged (they still describe each
+# provider). What is new is a DEADLINE: every POST starts a clock, and a
+# model call may wait only until FUNCTION_BUDGET_SECONDS minus
+# POST_AI_RESERVE_SECONDS after the request began. The reserve is the time the
+# code after the model needs: send the reply, write the transcript, notify the
+# owner. A provider with less than MIN_PROVIDER_SECONDS left is skipped, and
+# the existing fallback (composed reply / apology) runs instead.
+#
+# maxDuration is NOT raised to hide this; a test pins the two together.
+FUNCTION_BUDGET_SECONDS = 30.0      # == vercel.json builds[webhook].config.maxDuration
+POST_AI_RESERVE_SECONDS = 6.0       # reply send (<=10s timeout, ~1s typical) + saves + alerts
+MIN_PROVIDER_SECONDS = 2.0          # below this a call cannot usefully complete
+# Used only when no turn clock is running (a cron or a direct call): one
+# chain may then take at most this long, which still fits the budget.
+DEFAULT_AI_CHAIN_SECONDS = FUNCTION_BUDGET_SECONDS - POST_AI_RESERVE_SECONDS - 4.0
+
+# FUTURE — the LLM interpretation call (architecture Step 2, NOT implemented).
+# Designed to sit BEFORE the reply chain in the same turn, so it must leave
+# the chain real time: 6s here + the chain's own deadline still fit inside
+# FUNCTION_BUDGET_SECONDS - POST_AI_RESERVE_SECONDS. A test pins that sum.
+INTERPRET_TIMEOUT_SECONDS = 6.0
+
+_TURN_CLOCK = {"deadline": None}    # monotonic time by which model calls must end
+_CHAIN_DEADLINE = {"t": None}       # set by _generate_ai_reply for its own chain
+
+
+def start_turn_clock(now: float = None) -> None:
+    """Called at the top of every POST. Serverless instances are reused, so
+    this RESETS the deadline for each request rather than inheriting one."""
+    started = time.monotonic() if now is None else now
+    _TURN_CLOCK["deadline"] = started + FUNCTION_BUDGET_SECONDS - POST_AI_RESERVE_SECONDS
+
+
+def ai_seconds_left(now: float = None) -> float:
+    """Seconds a model call may still take in this turn (may be negative)."""
+    deadline = _CHAIN_DEADLINE["t"] or _TURN_CLOCK["deadline"]
+    if deadline is None:
+        return DEFAULT_AI_CHAIN_SECONDS
+    return deadline - (time.monotonic() if now is None else now)
+
+
+def _bounded(cap: float) -> float:
+    """A provider's own cap, shortened to what the turn has left."""
+    return max(0.1, min(float(cap), ai_seconds_left()))
+
 
 def _is_timeout(exc) -> bool:
     """True when an exception represents a provider timeout.
@@ -1842,6 +1895,9 @@ def _to_gemini_payload(messages: list, max_tokens: int = None) -> dict:
     return payload
 
 
+GEMINI_TIMEOUT_SECONDS = 15   # unchanged cap; now also bounded by the turn deadline
+
+
 def generate_reply_gemini(messages: list, max_tokens: int = None) -> str:
     """Same conversation, Gemini 2.5 Flash. Returns '' on any failure so the
     caller can fall through to the apology text."""
@@ -1853,7 +1909,7 @@ def generate_reply_gemini(messages: list, max_tokens: int = None) -> str:
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
             json=_to_gemini_payload(messages, max_tokens),
-            timeout=15,
+            timeout=_bounded(GEMINI_TIMEOUT_SECONDS),
         )
         if not r.ok:
             print(f"gemini fallback {r.status_code}: {r.text[:160]}")
@@ -1892,6 +1948,7 @@ def _call_openai(messages: list, max_tokens: int = None) -> str:
         resp = get_openai().chat.completions.create(
             model=OPENAI_CHAT_MODEL, messages=messages,
             max_tokens=max_tokens or OPENAI_MAX_TOKENS, temperature=0.75,
+            timeout=_bounded(OPENAI_TIMEOUT_SECONDS),
         )
         choice = resp.choices[0]
         # Explicit truncation signal. Guessing from the text is unreliable;
@@ -1927,6 +1984,7 @@ def _call_deepseek(messages: list, max_tokens: int = None) -> str:
         resp = client.chat.completions.create(
             model=DEEPSEEK_MODEL, messages=messages,
             max_tokens=budget, temperature=0.75,
+            timeout=_bounded(DEEPSEEK_TIMEOUT_SECONDS),
         )
         if getattr(resp.choices[0], "finish_reason", None) == "length":
             _LAST_AI_TRUNCATED["value"] = True
@@ -1998,7 +2056,24 @@ def _generate_ai_reply(messages: list, apology: str, max_tokens: int = None) -> 
     duplicate try-fallback."""
     _LAST_AI_TRUNCATED["value"] = False
     chain = _provider_chain()
+    # Without a turn clock (cron, direct call) the chain gets its own deadline.
+    _CHAIN_DEADLINE["t"] = (None if _TURN_CLOCK["deadline"] is not None
+                            else time.monotonic() + DEFAULT_AI_CHAIN_SECONDS)
+    try:
+        return _run_provider_chain(chain, messages, apology, max_tokens)
+    finally:
+        _CHAIN_DEADLINE["t"] = None
+
+
+def _run_provider_chain(chain, messages, apology, max_tokens):
     for i, (name, provider) in enumerate(chain):
+        left = ai_seconds_left()
+        if left < MIN_PROVIDER_SECONDS:
+            # Out of time: the caller's existing fallback must get to run
+            # before Vercel's maxDuration kills the function.
+            print(f"AI_BUDGET_EXHAUSTED before {name} left={left:.1f}s "
+                  f"— skipping remaining providers")
+            break
         result = provider(messages, max_tokens)
         if result:
             if i > 0:
@@ -6759,6 +6834,7 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Receive and process incoming WhatsApp messages."""
+        start_turn_clock()
         length = int(self.headers.get("Content-Length", 0))
         body   = self.rfile.read(length)
 
