@@ -282,11 +282,13 @@ class TheSchemaIsClosed(unittest.TestCase):
 
 
 class NoCustomerTextAndNoNetwork(unittest.TestCase):
-    def test_the_module_imports_only_re_and_bairavi(self):
+    def test_the_module_imports_only_pure_modules(self):
+        """json joined in Step 2 (reading the interpreter's JSON). Still no
+        network, no database, no provider."""
         tree = ast.parse(open(os.path.join(ROOT, "interpretation.py")).read())
-        mods = {n.names[0].name for n in ast.walk(tree) if isinstance(n, ast.Import)}
+        mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         mods |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
-        self.assertEqual(mods, {"re", "bairavi"})
+        self.assertEqual(mods, {"json", "re", "bairavi"})
 
     def test_no_output_value_is_customer_text(self):
         _, v = roundtrip("warranty ide? 63 kva", (b.AWAITING_DELIVERY,))
@@ -294,11 +296,16 @@ class NoCustomerTextAndNoNetwork(unittest.TestCase):
             if isinstance(val, str):
                 self.assertLess(len(val), 40, f"{key} looks like prose: {val!r}")
 
-    def test_the_webhook_does_not_use_it_yet(self):
+    def test_the_webhook_uses_it_only_inside_shadow_mode(self):
+        """Step 1 forbade any use. Step 2 (2026-09-27) allows exactly one:
+        the shadow functions. Nothing else in the webhook may touch it."""
         tree = ast.parse(open(os.path.join(ROOT, "api", "webhook.py")).read())
-        mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
-        mods |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
-        self.assertNotIn("interpretation", mods)
+        allowed = {"shadow_interpret", "_shadow_interpret"}
+        for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+            uses = any(isinstance(x, ast.Name) and x.id == "interpretation"
+                       for x in ast.walk(fn))
+            if uses:
+                self.assertIn(fn.name, allowed, f"{fn.name} uses interpretation")
 
 
 class GapsFoundByMutation(unittest.TestCase):

@@ -86,6 +86,7 @@ SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in V
 # .strip() because a trailing newline in an env var silently corrupts the
 # Bearer header — the same normalisation bic/config.py already applies.
 import bairavi
+import interpretation  # Step 2: shadow mode only — see shadow_interpret()
 
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 BROCHURE_URL    = os.environ.get("BROCHURE_URL",    "")
@@ -1809,6 +1810,105 @@ def bairavi_model_reply(phone: str, user_text: str, history: list,
               f"phone=...{str(phone)[-4:]}")
         return ""
     return reply
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 2 — INTERPRETATION SHADOW MODE (observe only, zero authority)
+#
+# After a Bairavi follow-up has been fully handled — reply sent, transcript
+# written, lead updated, owner alerted — an interpreter is asked for the
+# closed-schema JSON, interpretation.validate() gates it, it is compared with
+# the parser that DID decide the turn, and one telemetry line is written.
+# Nothing it produces is returned, stored in state, sent, or acted on.
+#
+# OFF unless SHADOW_INTERPRETATION is set ("on"/"true"/"1"); read per call so
+# enabling it needs no redeploy. It never uses _generate_ai_reply: that path
+# marks "AI consulted" in the immutable Decision Record, and a shadow call
+# must not change what production records say happened.
+# ══════════════════════════════════════════════════════════════════════════
+SHADOW_MAX_TOKENS = 1200
+
+
+def shadow_enabled() -> bool:
+    return os.environ.get("SHADOW_INTERPRETATION", "off").strip().lower() in ("on", "true", "1", "yes")
+
+
+def _shadow_sink(record: dict) -> None:
+    """Where a shadow record goes. Today: one structured log line (no phone,
+    no message body, no key). A persistent table needs the owner's approval
+    of a schema first — see the Step 2 report."""
+    print("BAIRAVI_SHADOW " + json.dumps(record, ensure_ascii=False, default=str))
+
+
+def _shadow_model_name(provider: str) -> str:
+    return {"deepseek": DEEPSEEK_MODEL, "openai": OPENAI_CHAT_MODEL,
+            "gemini": "gemini-2.5-flash"}.get(provider, provider)
+
+
+def shadow_interpret(sender: str, user_text: str, history: list, followup: dict,
+                     known: dict, message_id=None) -> None:
+    """Observe one turn. Returns nothing; never raises; never mutates its inputs."""
+    if not shadow_enabled():
+        return
+    try:
+        _shadow_interpret(sender, user_text, history, followup, known, message_id)
+    except Exception as e:                               # the customer must not notice
+        try:
+            _shadow_sink({"v": interpretation.SHADOW_VERSION, "business": "bairavi",
+                          "status": interpretation.S_ERROR, "error": type(e).__name__})
+        except Exception:
+            pass
+
+
+def _shadow_interpret(sender, user_text, history, followup, known, message_id):
+    import copy
+    # Private copies: whatever happens below cannot reach the caller's state.
+    followup, known = copy.deepcopy(followup), copy.deepcopy(known or {})
+    history = list(history or [])
+    awaiting = bairavi_awaiting(history)          # exactly what the parser was given
+    turn_ref = hashlib.sha256(str(message_id or f"{sender}|{user_text}").encode()).hexdigest()[:16]
+    ts = datetime.now(timezone.utc).isoformat()
+    left = ai_seconds_left()
+    budget = min(INTERPRET_TIMEOUT_SECONDS, left)
+    if budget < MIN_PROVIDER_SECONDS:
+        _shadow_sink(interpretation.shadow_record(
+            status=interpretation.S_SKIPPED_DEADLINE, turn_ref=turn_ref, awaiting=awaiting,
+            left_s=left, ts=ts))
+        return
+
+    name, provider = _provider_chain()[0]         # the primary only; no fallback chain
+    seen = [m for m in history if bairavi.FLOW_MARKER not in (m.get("content") or "")]
+    messages = ([{"role": "system",
+                  "content": interpretation.interpretation_brief(awaiting, known)}]
+                + _as_ai_messages(seen[-6:])
+                + [{"role": "user", "content": user_text}])
+    saved_truncated = _LAST_AI_TRUNCATED["value"]
+    saved_chain = _CHAIN_DEADLINE["t"]
+    started = time.monotonic()
+    try:
+        _CHAIN_DEADLINE["t"] = started + budget   # _bounded() now caps this call at `budget`
+        raw = provider(messages, SHADOW_MAX_TOKENS)
+    finally:
+        _CHAIN_DEADLINE["t"] = saved_chain
+        _LAST_AI_TRUNCATED["value"] = saved_truncated
+    latency_ms = int((time.monotonic() - started) * 1000)
+    common = dict(turn_ref=turn_ref, awaiting=awaiting, provider=name,
+                  model=_shadow_model_name(name), latency_ms=latency_ms,
+                  budget_s=budget, left_s=left, ts=ts)
+    if not raw:
+        _shadow_sink(interpretation.shadow_record(status=interpretation.S_PROVIDER_FAILED, **common))
+        return
+    interp = interpretation.parse_llm_json(raw)
+    if interp is None or interpretation.schema_errors(interp):
+        validated = interpretation.validate(interp, user_text, awaiting, known)
+        _shadow_sink(interpretation.shadow_record(status=interpretation.S_INVALID,
+                                                  interp=interp if isinstance(interp, dict) else None,
+                                                  validated=validated, **common))
+        return
+    validated = interpretation.validate(interp, user_text, awaiting, known)
+    comparison = interpretation.compare(followup, user_text, known, interp, validated)
+    _shadow_sink(interpretation.shadow_record(status=interpretation.S_OK, interp=interp,
+                                              validated=validated, comparison=comparison, **common))
 
 
 def _as_ai_messages(rows) -> list:
@@ -5693,6 +5793,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                 _saved = save_messages([(sender, "user", user_text)])
                 warn_if_transcript_lost(sender, _saved, "Bairavi acknowledgement")
                 print(f"BAIRAVI_ACK_NO_REPLY phone=...{sender[-4:]}")
+                shadow_interpret(sender, user_text, ctx["history"], followup, known, message_id)
                 return
             # WHAT A QUOTATION REQUIRES, taken from the Brain's own goal
             # registry rather than restated in the Bairavi layer. Injected as
@@ -5769,6 +5870,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             if _quote_now:
                 notify_owner(bairavi.compose_quotation_signal(
                     sender, followup, user_text, known, _quote_goal))
+            # SHADOW (Step 2): observe only, after every production side effect.
+            shadow_interpret(sender, user_text, ctx["history"], followup, known, message_id)
             return
 
         parsed = bairavi.parse(user_text)

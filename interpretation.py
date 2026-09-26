@@ -21,8 +21,9 @@ WHO OWNS WHAT
   whatever an interpreter says):
     delivery_same, delivery_mentioned, discom_approval_ask, callback_offered
 
-Pure module: imports only re and bairavi. Never produces customer-facing text.
+Pure module: imports only json, re and bairavi. Never produces customer-facing text.
 """
+import json
 import re
 
 import bairavi as b
@@ -340,3 +341,178 @@ def validate(interp, text: str, awaiting=(), known: dict = None) -> dict:
 def state_view(validated: dict) -> dict:
     """Only the keys parse_followup itself returns — what the state machine sees."""
     return {k: v for k, v in validated.items() if not k.startswith("_")}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# STEP 2 — SHADOW MODE: the pure parts (brief, reader, comparison, record)
+#
+# The interpreter is ASKED for structured data and nothing else; its answer
+# is read by parse_llm_json, gated by validate(), compared with the
+# authoritative parser, and only ever RECORDED. Nothing here reaches a
+# customer, the transcript, the saved facts, the CRM or an owner alert.
+# ══════════════════════════════════════════════════════════════════════════
+
+SHADOW_VERSION = 1
+EVIDENCE_MAX = 60           # evidence spans are kept short on purpose
+
+# Status of one shadow turn — a fixed vocabulary.
+S_OK = "ok"
+S_INVALID = "invalid_shadow"
+S_PROVIDER_FAILED = "provider_failed"
+S_SKIPPED_DEADLINE = "skipped_deadline"
+S_ERROR = "shadow_error"
+
+# Comparison classes (owner's spec, 2026-09-27).
+MATCH, SHADOW_ONLY, PARSER_ONLY, CONFLICT = "MATCH", "SHADOW_ONLY", "PARSER_ONLY", "CONFLICT"
+INVALID_SHADOW, SKIPPED = "INVALID_SHADOW", "SKIPPED"
+COMPARED = ("intent", "question_type", "capacity_kva", "quantity", "application",
+            "delivery_place", "callback", "correction", "delivery_same",
+            "discom", "delivery_mentioned")
+
+
+def interpretation_brief(awaiting=(), known: dict = None) -> str:
+    """The interpreter's system prompt. It asks for ONE JSON object in the
+    closed schema; it asks for no reply, no advice and no decision."""
+    known = {k: v for k, v in (known or {}).items()
+             if k in ("capacity_kva", "quantity", "application", "location",
+                      "delivery_location", "delivery_same", "callback")
+             and v not in (None, "", False)}
+    return (
+        "You read ONE WhatsApp message from a customer of a transformer "
+        "manufacturer and return ONLY a JSON object. No other text. You never "
+        "write a reply to the customer.\n"
+        "Schema:\n"
+        '{"intent": one of ' + ", ".join(INTENTS) + ",\n"
+        ' "fields": {field: {"value": ..., "evidence": "<exact words copied from '
+        'the message>"}} using only these fields: ' + ", ".join(FIELDS) + ",\n"
+        ' "questions": list from ' + ", ".join(QUESTIONS) + ",\n"
+        ' "is_correction": true only if the customer explicitly changes a fact '
+        "already known,\n"
+        ' "ambiguous": false, or the field name if the message could mean two '
+        "things}\n"
+        "Rules: capacity_kva and quantity are integers; application is one of "
+        + ", ".join(APPLICATIONS) + "; callback is one of " + ", ".join(CALLBACKS)
+        + ". Leave out any field the message does not state. Never guess. "
+        "Evidence must be copied exactly from the message.\n"
+        f"The business's last question was about: {', '.join(awaiting) or 'nothing'}.\n"
+        f"Already known: {known or 'nothing'}."
+    )
+
+
+def parse_llm_json(raw):
+    """The first JSON object in a model's text, or None. Never raises."""
+    t = re.sub(r"```(?:json)?", "", str(raw or ""))
+    start = t.find("{")
+    if start < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(t)):
+        ch = t[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(t[start:i + 1])
+                except ValueError:
+                    return None
+                return obj if isinstance(obj, dict) else None
+    return None
+
+
+def _question_type(v: dict) -> tuple:
+    qs = list(v.get("asked_terms") or ())
+    if v.get("customer_question"):
+        qs.append(_TAG_TO_Q.get(v["customer_question"], v["customer_question"]))
+    return tuple(sorted(qs))
+
+
+def _comparable(v: dict, intent, correction) -> dict:
+    return {"intent": intent,
+            "question_type": _question_type(v) or None,
+            "capacity_kva": v.get("capacity_kva"),
+            "quantity": v.get("quantity"),
+            "application": v.get("application"),
+            "delivery_place": v.get("delivery_location"),
+            "callback": v.get("callback"),
+            "correction": bool(correction) or None,
+            "delivery_same": bool(v.get("delivery_same")) or None,
+            "discom": v.get("discom_approval_ask"),
+            "delivery_mentioned": bool(v.get("delivery_mentioned")) or None}
+
+
+def classify(parser_value, shadow_value) -> str:
+    empty_p = parser_value in (None, "", (), [])
+    empty_s = shadow_value in (None, "", (), [])
+    if empty_p and empty_s:
+        return MATCH
+    if empty_p:
+        return SHADOW_ONLY
+    if empty_s:
+        return PARSER_ONLY
+    return MATCH if parser_value == shadow_value else CONFLICT
+
+
+def compare(parser_followup: dict, text: str, known: dict,
+            interp: dict, validated: dict) -> dict:
+    """Field-by-field classes, plus the two sides' values where they differ.
+    Decides nothing: it records the disagreement for a human to read."""
+    parser_contract = from_parse(parser_followup, text, known)
+    p = _comparable(parser_followup, parser_contract["intent"],
+                    parser_contract["is_correction"])
+    accepted_correction = bool(interp.get("is_correction")) and any(
+        validated.get(k) is not None for k in ("capacity_kva", "quantity",
+                                               "application", "delivery_location"))
+    s = _comparable(validated, interp.get("intent"), accepted_correction)
+    classes = {f: classify(p[f], s[f]) for f in COMPARED}
+    diffs = {f: {"parser": p[f], "shadow": s[f]} for f in COMPARED if classes[f] != MATCH}
+    return {"classes": classes, "diffs": diffs}
+
+
+def _clip(v):
+    return v if not isinstance(v, str) else v[:EVIDENCE_MAX]
+
+
+def shadow_record(*, status, turn_ref, awaiting, provider=None, model=None,
+                  latency_ms=None, budget_s=None, left_s=None, interp=None,
+                  validated=None, comparison=None, ts=None) -> dict:
+    """One telemetry record. No phone number, no message body, no key: the
+    turn is a hash, and evidence spans are clipped to EVIDENCE_MAX."""
+    rec = {"v": SHADOW_VERSION, "ts": ts, "business": "bairavi", "turn": turn_ref,
+           "status": status, "awaiting": list(awaiting or ()),
+           "provider": provider, "model": model, "latency_ms": latency_ms,
+           "budget_s": None if budget_s is None else round(budget_s, 2),
+           "deadline_left_s": None if left_s is None else round(left_s, 2)}
+    if status in (S_OK, S_INVALID) and interp is not None:
+        fields = interp.get("fields") if isinstance(interp, dict) else None
+        rec["intent"] = interp.get("intent") if isinstance(interp, dict) else None
+        rec["questions"] = interp.get("questions") if isinstance(interp, dict) else None
+        rec["is_correction"] = interp.get("is_correction") if isinstance(interp, dict) else None
+        rec["proposed"] = ({k: {"value": _clip((s or {}).get("value")),
+                                "evidence": _clip((s or {}).get("evidence"))}
+                            for k, s in fields.items()} if isinstance(fields, dict) else None)
+    if validated is not None:
+        rec["accepted"] = {k: validated.get(k) for k in
+                           ("capacity_kva", "quantity", "application",
+                            "delivery_location", "callback") if validated.get(k) is not None}
+        rec["rejected"] = [list(r) for r in validated.get("_rejected", ())]
+        rec["ambiguous"] = validated.get("_ambiguous")
+    rec["comparison"] = (comparison["classes"] if comparison
+                         else ({f: SKIPPED for f in COMPARED} if status == S_SKIPPED_DEADLINE
+                               else {f: INVALID_SHADOW for f in COMPARED}
+                               if status in (S_INVALID, S_PROVIDER_FAILED, S_ERROR) else None))
+    if comparison:
+        rec["diffs"] = {f: {k: _clip(v) for k, v in d.items()}
+                        for f, d in comparison["diffs"].items()}
+    return rec
