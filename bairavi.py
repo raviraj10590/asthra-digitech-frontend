@@ -1906,7 +1906,17 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # strict shapes found nothing and the previous reply did ask for delivery,
     # so a place named in any other context is still not treated as an
     # address.
-    if dl is None and AWAITING_DELIVERY in (awaiting or ()):
+    #
+    # NOT WHEN THE ANSWER IS A QUESTION ABOUT *WHEN*. "delivery yavaga" /
+    # "Ayitu delivery yavaga kodtira", sent while we were waiting for the
+    # place, were answered as a delivery-time question AND stored as the
+    # delivery address — permanently, and over a place already given (audit,
+    # 2026-09-27). The question is detected by customer_question(), the same
+    # reader that answers it; only this bare-answer path is skipped, so an
+    # explicit "deliver to X" above and a taluk/district address below still
+    # read exactly as before.
+    if (dl is None and AWAITING_DELIVERY in (awaiting or ())
+            and customer_question(text) != QUESTION_DELIVERY_TIME):
         dl = _bare_delivery_answer(text)
     # AN ADDRESS THAT SAYS WHAT IT IS. On 2026-09-23 a customer wrote
     # "ಹರಿಯಬ್ಬೆ,ಹಿರಿಯೂರು ತಾಲೂಕು,ಚಿತ್ರದುರ್ಗ ಜಿಲ್ಲೆ" — village, taluk, district —
