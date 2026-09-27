@@ -90,7 +90,7 @@ class APlaceWrittenBelowTheForm(unittest.TestCase):
         p = b.parse(FORM.format(loc="", tail="ಮುದಿಗೆರೆ ಅಜ್ಜಂಪ"))
         self.assertEqual(p["location"], "ಮುದಿಗೆರೆ ಅಜ್ಜಂಪ")
         reply = b.compose_reply(p)
-        self.assertIn("*ಮುದಿಗೆರೆ ಅಜ್ಜಂಪ* ಗೆ ಆಗಬೇಕೆ?", reply)          # confirm, not "which place?"
+        self.assertIn("ಡೆಲಿವರಿ ಸ್ಥಳ: *ಮುದಿಗೆರೆ ಅಜ್ಜಂಪ* — ಇದು ಸರಿಯೇ?", reply)          # confirm, not "which place?"
 
     def test_non_places_below_the_form_are_ignored(self):
         for tail in ("", "thanks", "please call me", "ತಕ್ಷಣ", "ok"):

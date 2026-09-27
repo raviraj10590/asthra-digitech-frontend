@@ -1316,7 +1316,7 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
         """One word to answer instead of a sentence — and it captures the
         exception, which is the case worth knowing."""
         r = b.compose_reply(b.parse(form(location="Mangalore")))
-        self.assertIn("*Mangalore* ಗೆ ಆಗಬೇಕೆ?", r)
+        self.assertIn("ಡೆಲಿವರಿ ಸ್ಥಳ: *Mangalore* — ಇದು ಸರಿಯೇ?", r)
 
     def test_it_asks_outright_when_the_form_gave_no_location(self):
         bare = ("Hello! I filled out your form.\n"
@@ -1329,7 +1329,7 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
         self.assertEqual(p["delivery_location"], "Puttur")
         r = b.compose_reply(p)
         self.assertIn("Puttur", r)
-        self.assertNotIn("ಗೆ ಆಗಬೇಕೆ?", r)
+        self.assertNotIn("ಇದು ಸರಿಯೇ?", r)
 
     def test_the_opening_asks_exactly_one_question(self):
         """Owner, 2026-09-25: one thing at a time. And the question asked is

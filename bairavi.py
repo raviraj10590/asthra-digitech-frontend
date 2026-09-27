@@ -2284,7 +2284,12 @@ def compose_reply(parsed: dict) -> str:
 
     kva = parsed["capacity_kva"]
     if parsed["in_catalogue"]:
-        lines.append(f"ನಿಮ್ಮ *{kva} kVA* distribution transformer ವಿಚಾರಣೆ ನಮಗೆ ತಲುಪಿದೆ.")
+        if parsed.get("urgency") == "IMMEDIATE":
+            # Owner-approved wording (2026-09-27). A priority, never a date.
+            lines.append(f"ನಿಮಗೆ *{kva} kVA* ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ *ತಕ್ಷಣ* ಬೇಕು ಎಂದು "
+                         "ಗಮನಿಸಿದ್ದೇವೆ — ಆದ್ಯತೆ ಮೇಲೆ ಮುಂದುವರಿಸುತ್ತೇವೆ.")
+        else:
+            lines.append(f"ನಿಮ್ಮ *{kva} kVA* ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ವಿಚಾರಣೆ ನಮಗೆ ತಲುಪಿದೆ.")
     elif parsed["planned"]:
         # A CAPACITY THE AD OFFERS ON PURPOSE: planned, not made today.
         # Both halves said plainly — see the planned-capacity tests.
@@ -2540,12 +2545,49 @@ def outstanding(followup: dict, known: dict = None) -> tuple:
     return tuple(out)
 
 
+_TALUK_LABELS = {"tq", "tq.", "tal", "tal.", "taluk", "taluka", "tk", "tk."}
+_DISTRICT_LABELS = {"dist", "dist.", "district", "dt", "dt."}
+
+
+def place_display(location: str) -> str:
+    """How a typed place is SHOWN. The stored value is never changed.
+
+    Extra spaces go. When BOTH a taluk label and a district label are
+    each followed by one word, the rest is the village and is shown first:
+    "TQ Ramdurga  Dist Belgaum  Toranagatti" -> "Toranagatti, Ramdurga,
+    Belgaum". Anything less certain is shown as typed; we do not know
+    village names, so we never guess an order the labels do not state.
+    """
+    words = (location or "").replace(",", " ").split()
+    tidy = " ".join((location or "").split())
+    parts = {}
+    rest = []
+    i = 0
+    while i < len(words):
+        w = words[i].lower()
+        kind = "t" if w in _TALUK_LABELS else "d" if w in _DISTRICT_LABELS else None
+        if kind:
+            if kind in parts or i + 1 >= len(words):
+                return tidy
+            nxt = words[i + 1].lower()
+            if nxt in _TALUK_LABELS or nxt in _DISTRICT_LABELS:
+                return tidy
+            parts[kind] = words[i + 1]
+            i += 2
+            continue
+        rest.append(words[i])
+        i += 1
+    if set(parts) != {"t", "d"}:
+        return tidy
+    return ", ".join(([" ".join(rest)] if rest else []) + [parts["t"], parts["d"]])
+
+
 def question_for(field: str, known: dict = None) -> str:
     """The customer-facing question for one outstanding field."""
     known = known or {}
     if field == AWAITING_DELIVERY:
         if known.get("location"):
-            return (f"Transformer *ಡೆಲಿವರಿ* *{known['location']}* ಗೆ ಆಗಬೇಕೆ? "
+            return (f"ಡೆಲಿವರಿ ಸ್ಥಳ: *{place_display(known['location'])}* — ಇದು ಸರಿಯೇ? "
                     "ಬೇರೆ ಸ್ಥಳವಾದರೆ ದಯವಿಟ್ಟು ತಿಳಿಸಿ.")
         return "Transformer *ಡೆಲಿವರಿ* ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು? (ಊರು, ತಾಲ್ಲೂಕು)"
     if field == AWAITING_PURPOSE:
