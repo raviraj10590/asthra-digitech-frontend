@@ -424,6 +424,15 @@ def parse(text: str) -> dict:
     is_form = is_lead_form(text)
     raw_loc = _field(text, _FIELD_PATTERNS["location"]) or None
     loc, form_app = _form_location(raw_loc)
+    # A PLACE WRITTEN BELOW THE FORM. On 2026-09-26 a customer left the
+    # location answer empty and typed "ಮುದಿಗೆರೆ ಅಜ್ಜಂಪ" on its own line after
+    # the last answer; the bot then asked "which place?". Only when the form's
+    # own answer is empty, only unlabelled lines after the greeting, and only
+    # if the existing place checks accept every one — no new vocabulary.
+    if is_form and loc is None:
+        extra = _unlabelled_form_lines(text)
+        if extra and all(_is_place_like(x) for x in extra):
+            loc = ", ".join(extra)
     delivery = _field(text, _FIELD_PATTERNS["delivery"]) or None
     urg = urgency(text)
 
@@ -462,6 +471,13 @@ def parse(text: str) -> dict:
         # location field when the customer put their purpose there.
         "application": form_app,
     }
+
+
+def _unlabelled_form_lines(text: str) -> list:
+    """Non-empty lines of a lead form that are not `label: answer` lines,
+    skipping the first line (the form's own greeting)."""
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    return [l for l in lines[1:] if ":" not in l]
 
 
 def _form_location(value):
@@ -898,7 +914,11 @@ QUOTATION_REQUEST = "QUOTATION_REQUEST"
 # to "ಬೆಲೆ" or "ದರ" is still caught, by those words.
 _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
                 "amount", "how much", "howmuch", "kitna", "kitne",
-                "ಎಷ್ಟಾಗುತ್ತೆ", "ಎಷ್ಟಾಗುತ್ತದೆ", "ಎಷ್ಟು ರೂ", "ಮೊತ್ತ")
+                "ಎಷ್ಟಾಗುತ್ತೆ", "ಎಷ್ಟಾಗುತ್ತದೆ", "ಎಷ್ಟು ರೂ", "ಮೊತ್ತ",
+                # The same English words, typed in Kannada letters (2026-09-26:
+                # "ರೇಟ್" was not read as a price question, and the model then
+                # told the customer it could not say the rate).
+                "ರೇಟ್", "ರೇಟು", "ಪ್ರೈಸ್")
 # Already the bot's own words for this: the follow-up button is titled
 # "📋 ಕೋಟೇಶನ್" and its id is "quotation".
 _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
@@ -907,6 +927,24 @@ _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
 # it: the bare-delivery-answer filter and the `asked_price` field, whose
 # meaning ("did they ask about money at all") is unchanged.
 _PRICE_ASK = _PRICE_WORDS + _QUOTATION_WORDS
+
+
+def _mentions(low: str, words) -> bool:
+    """Does the text contain one of these words?
+
+    WHOLE WORDS for English (a plural "s"/"es" allowed), substrings for
+    Kannada as everywhere in this module. On 2026-09-25 "Yavaga barate" —
+    when will it come? — was answered with the price list, because "rate"
+    sits inside "barate". Kannada script keeps substring matching: its words
+    inflect, and there is no ASCII word boundary to lean on.
+    """
+    for w in words:
+        if w.isascii():
+            if re.search(rf"(?<![a-z]){re.escape(w)}(?:e?s)?(?![a-z])", low):
+                return True
+        elif w in low:
+            return True
+    return False
 
 
 # ── DISCOM APPROVAL ───────────────────────────────────────────────────────
@@ -1397,9 +1435,9 @@ def commercial_intent(text: str):
     price asked four turns ago must not make every later reply a price reply.
     """
     low = (text or "").lower()
-    if any(w in low for w in _QUOTATION_WORDS):
+    if _mentions(low, _QUOTATION_WORDS):
         return QUOTATION_REQUEST
-    if any(w in low for w in _PRICE_WORDS):
+    if _mentions(low, _PRICE_WORDS):
         return PRICE_REQUEST
     return None
 
@@ -1726,7 +1764,7 @@ def _is_place_like(raw: str) -> bool:
     # A question is not an answer — "Gujarat price?" asks something else.
     if "?" in raw:
         return False
-    if any(w in low for w in _PRICE_ASK):
+    if _mentions(low, _PRICE_ASK):
         return False
     # An acknowledgement, a yes/no, or "same place" — the last of which is
     # already recorded as a confirmation rather than an address.
@@ -1961,7 +1999,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "is_greeting": is_greeting,
             # Unchanged meaning and unchanged readers: "did they raise money
             # at all". commercial_intent says WHICH ask it was.
-            "asked_price": any(w in low for w in _PRICE_ASK),
+            "asked_price": _mentions(low, _PRICE_ASK),
             "commercial_intent": commercial_intent(text),
             # None when no approval question was asked, which leaves every
             # reply exactly as it was.
@@ -2165,6 +2203,9 @@ def asked_terms(text: str) -> tuple:
     return tuple(t for t in ("transport", "warranty", "payment") if t in hit)
 
 
+_KANNADA_DIGITS = str.maketrans("೦೧೨೩೪೫೬೭೮೯", "0123456789")
+
+
 def callback_request(text: str, awaiting=()):
     """now / evening / tomorrow when the customer asked for a call, else None.
 
@@ -2173,6 +2214,9 @@ def callback_request(text: str, awaiting=()):
     those three options — otherwise "2" is still a quantity.
     """
     bare = re.sub(r"[\s.!,🙏️⃣]+", " ", (text or "").lower()).strip()
+    # "೩" is 3 in Kannada script (2026-09-26: offered 1/2/3, the customer
+    # typed "೩" and was recorded as ordering 3 units). Same digit, same choice.
+    bare = bare.translate(_KANNADA_DIGITS)
     if bare in _CALL_WORDS:
         return CALLBACK_NOW
     if AWAITING_CALLBACK in (awaiting or ()):
