@@ -424,6 +424,12 @@ def parse(text: str) -> dict:
     is_form = is_lead_form(text)
     raw_loc = _field(text, _FIELD_PATTERNS["location"]) or None
     loc, form_app = _form_location(raw_loc)
+    # THE CUSTOMER'S OWN NAME IN THE LOCATION FIELD. On 2026-09-27 a customer
+    # answered "where is the project?" with "Shivakumar sadashiva ambi" — his
+    # own name (Full name: "shivakumar s ambi") — and the bot asked to deliver
+    # to it. Compared with the form's own name answer only: no place list.
+    if loc and _is_the_name(loc, _field(text, _FIELD_PATTERNS["name"])):
+        loc = None
     # A PLACE WRITTEN BELOW THE FORM. On 2026-09-26 a customer left the
     # location answer empty and typed "ಮುದಿಗೆರೆ ಅಜ್ಜಂಪ" on its own line after
     # the last answer; the bot then asked "which place?". Only when the form's
@@ -471,6 +477,20 @@ def parse(text: str) -> dict:
         # location field when the customer put their purpose there.
         "application": form_app,
     }
+
+
+def _name_words(text) -> set:
+    """Lower-case words of 3+ letters, invisible characters removed."""
+    clean = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", str(text or "")).lower()
+    return {w for w in re.findall(r"[^\W\d_]+", clean) if len(w) >= 3}
+
+
+def _is_the_name(location, name) -> bool:
+    """True when a location answer is, in the main, the customer's name:
+    at least two of its words, and at least half of them, are name words."""
+    loc_w, name_w = _name_words(location), _name_words(name)
+    shared = loc_w & name_w
+    return bool(loc_w) and len(shared) >= 2 and 2 * len(shared) >= len(loc_w)
 
 
 def _unlabelled_form_lines(text: str) -> list:
@@ -1933,6 +1953,18 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # name in a follow-up cannot be told apart from an application, a company
     # or a person, and a guessed delivery address is a lorry sent to the wrong
     # district.
+    # EMOJI ARE NOT WORDS (2026-09-27: "🙏🏻" went to the model, and "Ok 👍"
+    # answering "deliver to X?" was stored as the ADDRESS "Ok 👍"). A message
+    # with no letters or digits is an acknowledgement; emoji around a word do
+    # not hide the word. Computed BEFORE any place is read.
+    bare = low.strip(_TRIM)
+    no_words = bool(bare) and not re.search(r"\w", bare)
+    # Kannada / Devanagari vowel signs and the virama are not \w, so the script
+    # blocks are kept whole — only symbols and emoji are removed ("ಸರಿ" must
+    # stay "ಸರಿ").
+    bare = re.sub(r"\s+", " ", re.sub(r"[^\w\s\u0900-\u097F\u0C80-\u0CFF\u200c\u200d]", " ",
+                                     bare)).strip() or bare
+    plain_reply = no_words or bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS
     dl = None
     m = _DELIVERY_STRICT_RE.search(text or "")
     if m:
@@ -1954,7 +1986,8 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # explicit "deliver to X" above and a taluk/district address below still
     # read exactly as before.
     if (dl is None and AWAITING_DELIVERY in (awaiting or ())
-            and customer_question(text) != QUESTION_DELIVERY_TIME):
+            and customer_question(text) != QUESTION_DELIVERY_TIME
+            and not plain_reply):
         dl = _bare_delivery_answer(text)
     # AN ADDRESS THAT SAYS WHAT IT IS. On 2026-09-23 a customer wrote
     # "ಹರಿಯಬ್ಬೆ,ಹಿರಿಯೂರು ತಾಲೂಕು,ಚಿತ್ರದುರ್ಗ ಜಿಲ್ಲೆ" — village, taluk, district —
@@ -1975,7 +2008,6 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # the project location the form already captured, so it is recorded as a
     # confirmation rather than as an address.
     same = any(w in low for w in _SAME_PLACE) if not dl else False
-    bare = low.strip(_TRIM)
     if (not dl and not same and AWAITING_DELIVERY in (awaiting or ())
             and (known or {}).get("location") and bare in _AFFIRMATIONS):
         same = True
@@ -1983,7 +2015,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # asking one produced a paragraph re-introducing the company to someone
     # who had just typed "Ok".
     is_greeting = _is_greeting(bare)
-    is_ack = bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or is_greeting
+    is_ack = bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or is_greeting or no_words
 
     callback = callback_request(text, awaiting)
     if callback and AWAITING_CALLBACK in (awaiting or ()) and len(low.split()) <= 2:
