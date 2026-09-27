@@ -818,6 +818,31 @@ def update_memory(phone: str, lead: dict, new_summary: str, history: list, exist
     except Exception as e:
         print(f"update_memory error: {e}")
 
+NEW_CONTACT_RECHECK_SECONDS = 2.0
+
+
+def bairavi_arrived_meanwhile(phone: str) -> bool:
+    """Look once more before greeting a "new" contact: a Bairavi lead form
+    sent in the same second is processed by a parallel invocation, so the
+    first read could not see it. Any doubt (short deadline, failed or
+    degraded read) returns False and the menu is sent exactly as before."""
+    if ai_seconds_left() < NEW_CONTACT_RECHECK_SECONDS + POST_AI_RESERVE_SECONDS:
+        return False
+    time.sleep(NEW_CONTACT_RECHECK_SECONDS)
+    try:
+        ctx = fetch_context(phone)
+    except Exception:
+        return False
+    if ctx.get("degraded"):
+        return False
+    for m in ctx.get("history") or []:
+        c = m.get("content") or ""
+        if ((m.get("role") == "user" and bairavi.is_lead_form(c))
+                or (m.get("role") == "assistant" and c.startswith(bairavi.FLOW_MARKER))):
+            return True
+    return False
+
+
 def fetch_context(phone: str) -> dict:
     """ONE query returns everything the handler needs for this chat:
     AI history, last inbound message (dedupe), pause state, alert markers.
@@ -6058,6 +6083,11 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             notify_owner(f"⚠️ Brochure FAILED for wa.me/{sender} — send it manually")
 
     # ── New contact: greet with services menu ─────────────────────
+    elif is_new_contact and bairavi_arrived_meanwhile(sender):
+        # Lead form and "Hi" in the same second, handled in parallel: the
+        # form's invocation already answered. The Asthra menu here would be
+        # a second, wrong welcome (live: ...3450, 2026-09-27). Keep the words.
+        save_message(sender, "user", user_text)
     elif is_new_contact:
         if BIC_AVAILABLE:
             bic_decision.mark_deterministic_branch(
