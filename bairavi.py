@@ -490,7 +490,10 @@ def _is_the_name(location, name) -> bool:
     at least two of its words, and at least half of them, are name words."""
     loc_w, name_w = _name_words(location), _name_words(name)
     shared = loc_w & name_w
-    return bool(loc_w) and len(shared) >= 2 and 2 * len(shared) >= len(loc_w)
+    # Or it IS the whole name: "Jagadish" for "Jagadish R" (live ...0962).
+    # One shared word of a longer name stays a place ("Shivakumar").
+    return bool(loc_w) and (loc_w == name_w
+                            or (len(shared) >= 2 and 2 * len(shared) >= len(loc_w)))
 
 
 def _unlabelled_form_lines(text: str) -> list:
@@ -1118,7 +1121,10 @@ _ASK_NAME = ("my name", "ನನ್ನ ಹೆಸರು", "who am i", "ನಾನ�
 _ASK_WHO = ("who are you", "who is this", "your company", "about your company",
             "about you", "company details", "where are you", "your address",
             "your factory", "ನಿಮ್ಮ ಕಂಪನಿ", "ನೀವು ಯಾರು", "ಎಲ್ಲಿದೆ",
-            "ನಿಮ್ಮ ವಿಳಾಸ", "ಫ್ಯಾಕ್ಟರಿ")
+            "ನಿಮ್ಮ ವಿಳಾಸ", "ಫ್ಯಾಕ್ಟರಿ",
+            # "Ur from" (live ...1497, 2026-09-29) got "ಧನ್ಯವಾದಗಳು."
+            "ur from", "you from", "where from", "which place are you",
+            "ಎಲ್ಲಿಂದ", "ಎಲ್ಲಿಯವರು", "ellinda", "ellinavru", "ellinavaru")
 _ASK_RANGE = ("what do you make", "what do you manufacture", "which models",
               "what models", "your range", "available sizes", "which kva",
               "what kva", "which capacity", "your products",
@@ -2158,7 +2164,11 @@ _PURPOSE_KN = {"AGRICULTURE": "ಕೃಷಿ", "INDUSTRY": "ಕೈಗಾರಿಕ
 def display_name(name) -> str:
     """"PUNITH SINCHANA 2024" -> "Punith Sinchana". Letters only, two words at
     most; empty when nothing presentable is left."""
-    words = [w for w in re.findall(r"[^\W\d_]+", name or "") if len(w) > 1][:2]
+    # Kannada vowel signs and the virama are not \w: without the block,
+    # "ಶಿವ ಕುಮಾರ್" fell apart into single letters and the name vanished.
+    words = [w for w in re.findall(r"(?:[^\W\d_]|[\u0C80-\u0CE5\u0CF0-\u0CFF\u200c\u200d])+",
+                                   (name or "").replace("\u200c", "").replace("\u200d", ""))
+             if len(w) > 1][:2]
     return " ".join(w.capitalize() if w.isascii() else w for w in words)
 
 
@@ -2769,7 +2779,9 @@ def compose_followup_reply(followup: dict, known: dict = None,
     # What was genuinely read. Never a field that stayed None — a claim to
     # have understood something we did not is worse than admitting we did not.
     got = []
-    if followup.get("capacity_kva") is not None:
+    # A size they only repeat ("25 kva price sir") is not news to thank for.
+    if (followup.get("capacity_kva") is not None
+            and followup["capacity_kva"] != (known or {}).get("capacity_kva")):
         got.append(f"{followup['capacity_kva']} kVA")
     if followup["quantity"] is not None:
         got.append(f"{followup['quantity']} unit"
