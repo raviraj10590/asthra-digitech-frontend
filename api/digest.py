@@ -229,6 +229,44 @@ def record_health(value: str) -> bool:
         return False
 
 
+CRM_SUPABASE_URL         = os.environ.get("CRM_SUPABASE_URL", "")
+CRM_SUPABASE_SERVICE_KEY = os.environ.get("CRM_SUPABASE_SERVICE_KEY", "")
+CRM_OWNER_USER_ID        = os.environ.get("CRM_OWNER_USER_ID", "")
+BRIEFING_LOOKBACK_DAYS = 45   # wider than the 14-day list: yesterday's calls may be on older leads
+
+
+def _crm_get(table: str, params: dict) -> list:
+    r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/{table}",
+                     headers={"apikey": CRM_SUPABASE_SERVICE_KEY,
+                              "Authorization": f"Bearer {CRM_SUPABASE_SERVICE_KEY}"},
+                     params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def build_call_briefing() -> str:
+    """Today's call plan from the CRM (see call_briefing.py)."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        print("call briefing: CRM not configured")
+        return ""
+    import call_briefing
+    since = (datetime.now(timezone.utc) - timedelta(days=BRIEFING_LOOKBACK_DAYS)).isoformat()
+    clients = _crm_get("clients", {
+        "source": "eq.bairavi-transformer", "user_id": f"eq.{CRM_OWNER_USER_ID}",
+        "created_at": f"gte.{since}",
+        "select": "name,phone,created_at,pipeline_stage,last_contacted_at,notes",
+        "order": "created_at.desc", "limit": "500"})
+    phones = [c["phone"] for c in clients if c.get("phone")]
+    messages = []
+    for i in range(0, len(phones), 50):          # keep the URL short
+        messages += _crm_get("whatsapp_messages", {
+            "phone": "in.(" + ",".join(phones[i:i + 50]) + ")",
+            "created_at": f"gte.{since}",
+            "select": "phone,direction,body,created_at",
+            "order": "created_at.asc", "limit": "5000"})
+    return call_briefing.build(clients, messages, owner_phones=OWNER_PHONES)
+
+
 def send_to_owner(text: str):
     ok_any = False
     for phone in OWNER_PHONES:
@@ -273,6 +311,17 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"digest error: {e}")
             body = {"ok": False, "error": str(e)}
+
+        # MORNING CALL BRIEFING — its own message, after the digest, and
+        # strictly best-effort: a CRM outage must never cost the digest.
+        try:
+            briefing = build_call_briefing()
+            if briefing:
+                print(f"call briefing sent={send_to_owner(briefing)}")
+            else:
+                print("call briefing: nothing to send")
+        except Exception as e:
+            print(f"call briefing FAILED type={type(e).__name__}")
 
         # BIC Slice 1C: 30-day retention for the replay diagnostic table.
         # Rides the existing daily cron rather than adding a fourth scheduler,
