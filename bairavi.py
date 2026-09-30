@@ -1022,6 +1022,11 @@ _DISCOM_APPROVAL_STATED = {
     "mescom": "APPROVED",
     "gescom": "IN_PROGRESS",
     "bescom": "IN_PROGRESS",
+    # OWNER, 2026-10-01: "other than mscom whithin three month we get
+    # permission for all others". CESC is also written CESCOM.
+    "hescom": "IN_PROGRESS",
+    "cesc": "IN_PROGRESS",
+    "cescom": "IN_PROGRESS",
 }
 _DISCOM_IN_PROGRESS_ETA_KN = "3 ತಿಂಗಳೊಳಗೆ"
 
@@ -1069,18 +1074,19 @@ def approval_answer_kn(asked) -> str:
     unknown = [d for d in asked if d not in _DISCOM_APPROVAL_STATED]
 
     # Asked without naming one: state everything that has a stated status.
+    # "cescom" is CESC's other name; it is listed once.
     if not asked:
         approved = [d for d, v in _DISCOM_APPROVAL_STATED.items()
-                    if v == "APPROVED"]
+                    if v == "APPROVED" and d != "cescom"]
         pending = [d for d, v in _DISCOM_APPROVAL_STATED.items()
-                   if v == "IN_PROGRESS"]
+                   if v == "IN_PROGRESS" and d != "cescom"]
 
     parts = []
     if approved:
         parts.append("✅ *" + "*, *".join(d.upper() for d in approved)
                      + "* approval ಆಗಿದೆ.")
     if pending:
-        parts.append("*" + "*, *".join(d.upper() for d in pending) + "* — "
+        parts.append("*" + "*, *".join(d.upper() for d in pending) + "* approval — "
                      + _DISCOM_IN_PROGRESS_ETA_KN + " ಆಗುತ್ತದೆ ಎಂದು "
                      "ನಿರೀಕ್ಷಿಸುತ್ತಿದ್ದೇವೆ.")
     if unknown:
@@ -2041,6 +2047,55 @@ def is_decline(text: str) -> bool:
     return bare in _DECLINES
 
 
+# ── A SHARED WHATSAPP LOCATION ────────────────────────────────────────────
+# api/webhook.py turns a location pin into ONE transcript line (reverse
+# geocoded by geo_escom.py) and passes it through the same reader as any
+# message, so a replay of the conversation reaches the same state:
+#     📍 Location: Halebeedu, Belur, Hassan | ESCOM: CESC | 13.21330,75.99440
+LOCATION_PREFIX = "📍 Location:"
+_LOCATION_RE = re.compile(r"^📍 Location: (?P<place>.*?) \| ESCOM: (?P<escom>[A-Z]+) "
+                          r"\| (?P<lat>-?\d+\.\d+),(?P<lon>-?\d+\.\d+)$")
+
+
+def location_text(place: str, escom, lat: float, lon: float) -> str:
+    return (f"{LOCATION_PREFIX} {place} | ESCOM: {(escom or 'unknown').upper()} "
+            f"| {lat:.5f},{lon:.5f}")
+
+
+def parse_location_text(text: str):
+    """(place or None, escom or None, lat, lon) for a location line, else None."""
+    m = _LOCATION_RE.match((text or "").strip())
+    if not m:
+        return None
+    escom = m.group("escom").lower()
+    return (m.group("place").strip() or None, None if escom == "unknown" else escom,
+            float(m.group("lat")), float(m.group("lon")))
+
+
+# ── WHAT A VOICE REPLY SAYS ───────────────────────────────────────────────
+# The same words as the text reply, made speakable: no WhatsApp formatting,
+# no emoji, keycap digits read as digits, no links. Capped, because a voice
+# note that runs for minutes is not a reply.
+_KEYCAP = {"0️⃣": "0", "1️⃣": "1", "2️⃣": "2", "3️⃣": "3", "4️⃣": "4",
+           "5️⃣": "5", "6️⃣": "6", "7️⃣": "7", "8️⃣": "8", "9️⃣": "9"}
+VOICE_MAX_CHARS = 600
+
+
+def speech_text(reply: str) -> str:
+    t = reply or ""
+    for k, v in _KEYCAP.items():
+        t = t.replace(k, v + ".")
+    t = re.sub(r"https?://\S+|wa\.me/\S+", "", t)
+    t = t.replace("*", "").replace("_", " ").replace("·", ",")
+    t = re.sub(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200d]", "", t)
+    parts = [re.sub(r"\s{2,}", " ", p).strip() for p in t.split("\n")]
+    parts = [p for p in parts if p]
+    t = " ".join(p if p[-1] in ".?!:,;" else p + "." for p in parts)
+    if len(t) > VOICE_MAX_CHARS:
+        t = t[:VOICE_MAX_CHARS].rsplit(" ", 1)[0]
+    return t
+
+
 def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     """Quantity, application and whether a price was asked. None when unread.
 
@@ -2054,6 +2109,14 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     question is finally readable — which is how customers actually answer,
     and the reason one of them had to say it four times.
     """
+    # A LOCATION PIN IS ONLY A PLACE. Read before anything else: its
+    # coordinates would otherwise look like a quantity ("13" units).
+    _pin = parse_location_text(text)
+    if _pin:
+        out = parse_followup("", awaiting, known)
+        out.update(delivery_location=_pin[0], delivery_mentioned=True,
+                   delivery_same=False, is_ack=False, escom_area=_pin[1])
+        return out
     low = (text or "").lower()
     cap = capacity_kva(text)
 
@@ -2157,6 +2220,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "asked_discount": asked_discount(text),
             "asks_call": asks_about_call(text),
             "declined": is_decline(text),
+            "escom_area": None,
             "commercial_intent": commercial_intent(text),
             # None when no approval question was asked, which leaves every
             # reply exactly as it was.
@@ -2973,6 +3037,11 @@ def compose_followup_reply(followup: dict, known: dict = None,
                 else "ಹೇಳಿ, ನಿಮ್ಮ transformer ವಿಚಾರದಲ್ಲಿ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?"))
     if got:
         lines.append("ಧನ್ಯವಾದಗಳು — *" + ", ".join(got) + "* ಗಮನಿಸಿದ್ದೇವೆ.")
+        # FROM A LOCATION PIN: which supply company serves it, and our
+        # approval there — generated from _DISCOM_APPROVAL_STATED only.
+        if followup.get("escom_area"):
+            lines.append(f"📍 ಈ ಸ್ಥಳ *{followup['escom_area'].upper()}* ವ್ಯಾಪ್ತಿಗೆ ಬರುತ್ತದೆ. "
+                         + approval_answer_kn((followup["escom_area"],)))
     elif not (followup.get("asked_price") or followup.get("callback")
               or followup.get("asked_terms")
               or (followup.get("asks_call") and (known or {}).get("callback"))):

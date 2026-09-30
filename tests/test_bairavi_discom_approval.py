@@ -83,8 +83,10 @@ class OnlyWhatTheOwnerSaid(unittest.TestCase):
                 self.assertNotIn("ಆಗಿದೆ", answer)
 
     def test_an_unstated_utility_is_routed_to_a_human(self):
-        """The evidence rule. No status exists for these, so none is claimed."""
-        for d in ("hescom", "cescom", "kptcl"):
+        """The evidence rule. No status exists for these, so none is claimed.
+        (HESCOM and CESCOM moved out of this list with the owner's
+        2026-10-01 ruling; KPTCL is transmission, not a supply company.)"""
+        for d in ("kptcl",):
             with self.subTest(d=d):
                 answer = b.approval_answer_kn((d,))
                 self.assertIn(d.upper(), answer)
@@ -110,10 +112,23 @@ class OnlyWhatTheOwnerSaid(unittest.TestCase):
     def test_the_status_table_is_the_only_source(self):
         """The reply is generated from the table, so the owner's position is
         stated in exactly one place."""
+        # Owner 2026-09-22, then 2026-10-01: "other than mscom whithin three
+        # month we get permission for all others".
         self.assertEqual(b._DISCOM_APPROVAL_STATED,
                          {"mescom": "APPROVED",
                           "gescom": "IN_PROGRESS",
-                          "bescom": "IN_PROGRESS"})
+                          "bescom": "IN_PROGRESS",
+                          "hescom": "IN_PROGRESS",
+                          "cesc": "IN_PROGRESS",
+                          "cescom": "IN_PROGRESS"})
+
+    def test_the_2026_10_01_ruling(self):
+        for d in ("hescom", "cesc", "cescom", "bescom", "gescom"):
+            answer = b.approval_answer_kn((d,))
+            self.assertIn("3 ತಿಂಗಳೊಳಗೆ", answer, d)
+            self.assertNotIn("ಆಗಿದೆ", answer, d)          # pending never reads as done
+        self.assertIn("✅ *MESCOM* approval ಆಗಿದೆ.", b.approval_answer_kn(("mescom",)))
+        self.assertEqual(b.approval_answer_kn(()).count("CESC"), 1)   # one company, one mention
 
     def test_no_price_or_certificate_is_ever_quoted(self):
         """An approval answer must not become a place where other unevidenced

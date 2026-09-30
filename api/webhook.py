@@ -87,6 +87,7 @@ SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in V
 # Bearer header — the same normalisation bic/config.py already applies.
 import bairavi
 import call_log
+import geo_escom
 import interpretation  # Step 2: shadow mode only — see shadow_interpret()
 
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -1658,6 +1659,107 @@ def extract_lead_info(history: list) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # VOICE MESSAGE TRANSCRIPTION (OpenAI Whisper)
 # ══════════════════════════════════════════════════════════════════════════════
+# Per-request extras the dispatcher hands to the pipeline without changing
+# run_client_pipeline's signature. Cleared at the start of every POST.
+_TURN_EXTRAS = {}
+
+
+# ── VOICE REPLIES (owner request 2026-10-01) ──────────────────────────────
+# A customer who sent a voice note gets the normal text reply AND the same
+# answer as a Kannada voice note. Text stays the reply of record; the voice
+# note is extra and best-effort. OFF until the owner has heard a sample
+# (#voicetest) and set VOICE_REPLIES=on — the Kannada voice quality cannot
+# be judged by reading code.
+VOICE_TTS_MODEL = os.environ.get("VOICE_TTS_MODEL", "gpt-4o-mini-tts")
+VOICE_TTS_VOICE = os.environ.get("VOICE_TTS_VOICE", "shimmer")
+VOICE_MIN_SECONDS = 8.0     # synthesis + upload + send need this much of the turn
+
+
+def voice_replies_on() -> bool:
+    return os.environ.get("VOICE_REPLIES", "").strip().lower() in ("on", "true", "1")
+
+
+def synthesize_kannada(text: str) -> bytes:
+    """Speech for `text` as OGG/Opus (WhatsApp's voice-note format), or b""."""
+    try:
+        resp = get_openai().audio.speech.create(
+            model=VOICE_TTS_MODEL, voice=VOICE_TTS_VOICE, input=text,
+            response_format="opus",
+            instructions=("Speak in natural, warm, professional Kannada, like a helpful "
+                          "sales assistant from Karnataka. Read English technical words "
+                          "(kVA, transformer, engineer) naturally."))
+        return resp.content or b""
+    except Exception as e:
+        print(f"VOICE_TTS_FAILED type={type(e).__name__}")
+        return b""
+
+
+def send_voice_note(to: str, audio: bytes) -> bool:
+    """Upload the audio to WhatsApp and send it. True when sent."""
+    try:
+        up = requests.post(f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/media",
+                           headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+                           data={"messaging_product": "whatsapp", "type": "audio/ogg"},
+                           files={"file": ("reply.ogg", audio, "audio/ogg")}, timeout=8)
+        media_id = (up.json() or {}).get("id") if up.ok else None
+        if not media_id:
+            print(f"VOICE_UPLOAD_FAILED status={up.status_code}")
+            return False
+        r = _wa_post({"messaging_product": "whatsapp", "to": to, "type": "audio",
+                      "audio": {"id": media_id}})
+        return bool(r.ok)
+    except Exception as e:
+        print(f"VOICE_SEND_FAILED type={type(e).__name__}")
+        return False
+
+
+def maybe_voice_reply(to: str, reply: str) -> bool:
+    """After the text reply: a voice note of it, when the customer spoke."""
+    if not (_TURN_EXTRAS.get("voice") and voice_replies_on()):
+        return False
+    if ai_seconds_left() < VOICE_MIN_SECONDS:
+        print("VOICE_SKIPPED reason='turn deadline'")
+        return False
+    speech = bairavi.speech_text(reply)
+    if not speech:
+        return False
+    audio = synthesize_kannada(speech)
+    ok = bool(audio) and send_voice_note(to, audio)
+    print(f"VOICE_REPLY sent={ok} phone=...{str(to)[-4:]}")
+    return ok
+
+
+def tool_voice_test(sender: str, text: str = "", **_) -> str:
+    """#voicetest [text] — a sample voice note to the person asking, so the
+    owner can hear the Kannada voice before switching VOICE_REPLIES on."""
+    sample = (text or "").strip() or (
+        "ನಮಸ್ಕಾರ. Bairavi Trans Solutions ಅನ್ನು ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು. ನಿಮ್ಮ 25 kVA "
+        "ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ವಿಚಾರಣೆ ನಮಗೆ ತಲುಪಿದೆ. ನಮ್ಮ engineer ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
+    audio = synthesize_kannada(bairavi.speech_text(sample))
+    if not audio:
+        return "⚠️ Voice synthesis failed — check OPENAI_API_KEY / model access."
+    if not send_voice_note(sender, audio):
+        return "⚠️ The voice note could not be sent."
+    state = "ON" if voice_replies_on() else "OFF (set VOICE_REPLIES=on in Vercel to enable)"
+    return f"🎙️ Sample sent above. Voice replies to customers are {state}."
+
+
+def reverse_geocode(lat: float, lon: float) -> dict:
+    """OpenStreetMap Nominatim reverse lookup: the 'address' dict, or {}.
+    3 s cap — a slow lookup only costs the place name; the coordinates,
+    map link and distance still reach the owner."""
+    try:
+        r = requests.get("https://nominatim.openstreetmap.org/reverse",
+                         params={"format": "jsonv2", "lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
+                                 "zoom": "14", "accept-language": "en"},
+                         headers={"User-Agent": "AsthraBrain/1.0 (+https://asthradigitech.com)"},
+                         timeout=3)
+        return (r.json() or {}).get("address") or {} if r.ok else {}
+    except Exception as e:
+        print(f"REVERSE_GEOCODE_FAILED type={type(e).__name__}")
+        return {}
+
+
 def transcribe_audio(media_id: str) -> str:
     """Download WhatsApp voice note and transcribe with Whisper (Kannada)."""
     try:
@@ -1686,9 +1788,12 @@ def transcribe_audio(media_id: str) -> str:
                 model="whisper-1",
                 file=audio_file,
                 language="kn",
+                # Words these customers actually say. Transformer buyers
+                # were being heard through a digital-marketing vocabulary.
                 prompt=(
-                    "ಕನ್ನಡ ಭಾಷೆ. ಡಿಜಿಟಲ್ ಮಾರ್ಕೆಟಿಂಗ್, "
-                    "ವೆಬ್‌ಸೈಟ್, ಸೋಷಿಯಲ್ ಮೀಡಿಯಾ, ಬ್ರೋಚರ್, "
+                    "ಕನ್ನಡ ಭಾಷೆ. ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್, 25 kVA, 63 kVA, 100 kVA, ಕೃಷಿ, "
+                    "ಪಂಪ್ ಸೆಟ್, ಬೋರ್‌ವೆಲ್, ಕಂಬ, MESCOM, BESCOM, ತಾಲ್ಲೂಕು, ಜಿಲ್ಲೆ, "
+                    "ರೇಟ್, ಡೆಲಿವರಿ, Bairavi. ಡಿಜಿಟಲ್ ಮಾರ್ಕೆಟಿಂಗ್, ವೆಬ್‌ಸೈಟ್, "
                     "Asthra DigiTech."
                 ),
             )
@@ -4597,6 +4702,7 @@ OWNER_COMMANDS_HELP = (
     "(permanent, owner only)\n"
     "#status — quick business snapshot\n"
     "#calls — Bairavi leads still to call; mark one with e.g. 5711 called interested\n"
+    "#voicetest [text] — hear the Kannada voice-reply sample\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
     "#memory — show the assistant's current long-term memory note\n"
@@ -5385,6 +5491,9 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
                         digits=digits, stage=stage, words=words)
     if low in ("#calls", "#call", "#tocall"):
         return run_tool(sender, "crm_calls_to_make", _fallback=tool_calls_to_make)
+    if low == "#voicetest" or low.startswith("#voicetest "):
+        return run_tool(sender, "voice_test", _fallback=tool_voice_test,
+                        text=stripped[len("#voicetest"):].strip())
 
     cmd_result = try_owner_command(sender, role, stripped)
     if cmd_result is not None:
@@ -6032,6 +6141,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # extra notification costs a glance.
             alert = bairavi.compose_followup_alert(sender, followup,
                                                    user_text, known)
+            if _TURN_EXTRAS.get("owner_note"):
+                alert += "\n" + _TURN_EXTRAS["owner_note"]
             upsert_lead(sender, {"source": "bairavi-transformer",
                                  "notes": alert})
             notify_owner(alert)
@@ -6050,6 +6161,9 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                 notify_owner(bairavi.compose_quotation_signal(
                     sender, followup, user_text, known, _quote_goal))
             # SHADOW (Step 2): observe only, after every production side effect.
+            # Voice note of the reply, after every write and alert above: it is
+            # the slowest step and the only optional one.
+            maybe_voice_reply(sender, _reply)
             shadow_interpret(sender, user_text, ctx["history"], followup, known, message_id)
             return
 
@@ -6991,6 +7105,10 @@ if BIC_AVAILABLE:
     def _tool_h_crm_calls_to_make(principal, **_):
         return tool_calls_to_make(principal.sender_id)
 
+    @bic_tools.register("voice_test")
+    def _tool_h_voice_test(principal, text="", **_):
+        return tool_voice_test(principal.sender_id, text=text)
+
     @bic_tools.register("crm_call_outcome")
     def _tool_h_crm_call_outcome(principal, digits, stage, words, **_):
         return tool_call_outcome(principal.sender_id, digits=digits, stage=stage, words=words)
@@ -7296,7 +7414,9 @@ class handler(BaseHTTPRequestHandler):
                 bic_events.mark(wamid, bic_events.PROCESSING)
 
             # Blue ticks + typing… within ~1s, before the slow work starts
-            if msg.get("id") and msg_type in ("text", "audio", "interactive", "image", "video", "document"):
+            _TURN_EXTRAS.clear()
+            if msg.get("id") and msg_type in ("text", "audio", "interactive", "image", "video",
+                                              "document", "location"):
                 send_typing(msg["id"])
 
             # ── Interactive replies (buttons + welcome-menu list) ─────────
@@ -7325,6 +7445,7 @@ class handler(BaseHTTPRequestHandler):
                     self._ok(); return
                 send_text(sender, f'🎤 ನಿಮ್ಮ ಧ್ವನಿ ಸಂದೇಶ:\n"{transcribed}"')
                 user_text = transcribed
+                _TURN_EXTRAS["voice"] = True
 
             # ── Text message ──────────────────────────────────────────────
             elif msg_type == "text":
@@ -7350,6 +7471,32 @@ class handler(BaseHTTPRequestHandler):
                     save_message(sender, "user", "[ಚಿತ್ರ ಕಳುಹಿಸಿದ್ದಾರೆ]")
                     notify_owner(f"📸 Image from wa.me/{sender} — open WhatsApp to view (vision unavailable).")
                 self._ok(); return
+
+            # ── Location pin: exact place + supply company (ESCOM) ─────────
+            # Turned into ONE transcript line and handled like any message, so
+            # the Bairavi reader confirms the place and states the approval
+            # for that ESCOM (bairavi.parse_location_text). Owner-only extras
+            # (map link, distance) ride on the alert.
+            elif msg_type == "location":
+                loc = msg.get("location") or {}
+                try:
+                    lat, lon = float(loc["latitude"]), float(loc["longitude"])
+                except (KeyError, TypeError, ValueError):
+                    lat = lon = None
+                if lat is None:
+                    send_text(sender, "ಸ್ಥಳ ಸಿಕ್ಕಿದೆ 🙏 ದಯವಿಟ್ಟು ಊರು ಮತ್ತು ತಾಲ್ಲೂಕು ಟೈಪ್ ಮಾಡಿ.")
+                    save_message(sender, "user", "[ಸ್ಥಳ — ಓದಲಾಗಲಿಲ್ಲ]")
+                    self._ok(); return
+                geo = reverse_geocode(lat, lon)
+                where = geo_escom.place_from_address(geo, loc.get("name", ""), loc.get("address", ""))
+                escom = geo_escom.escom_for(where["district"], where["state"])
+                user_text = bairavi.location_text(where["place"] or f"{lat:.4f},{lon:.4f}",
+                                                  escom, lat, lon)
+                _TURN_EXTRAS["owner_note"] = (
+                    f"📍 Location pin: {geo_escom.maps_link(lat, lon)}\n"
+                    f"   {where['place'] or '—'} · {where['state'] or '?'} · "
+                    f"ESCOM {(escom or 'unknown').upper()} · "
+                    f"~{geo_escom.distance_km(lat, lon)} km from Kadaba (straight line)")
 
             # ── Video / document: warm ack + instant owner alert ────────────
             elif msg_type in ("video", "document"):

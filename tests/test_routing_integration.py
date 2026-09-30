@@ -269,7 +269,9 @@ class TestHandlerRegistration(unittest.TestCase):
         than through the registry (2G §5.1). → 23 with the call-outcome
         pair (2026-09-30): `crm_calls_to_make` (#calls, STAFF, read-only) and
         `crm_call_outcome` ("5711 called interested", STAFF, writes the CRM
-        lead's existing stage / last_contacted_at / notes)."""
+        lead's existing stage / last_contacted_at / notes). → 24 with
+        `voice_test` (#voicetest, STAFF: a voice-reply sample sent to the
+        requester only, 2026-10-01)."""
         self.assertEqual(
             sorted(tools._HANDLERS),
             ["add_role", "aitest", "business_new_enquiries",
@@ -280,7 +282,7 @@ class TestHandlerRegistration(unittest.TestCase):
              "crm_capture_self", "crm_list_clients", "crm_sync_lead",
              "knowledge_suffice", "knowledge_why", "leads_today",
              "memory_clear", "memory_show", "remove_role", "roles_list",
-             "send_brochure", "service_interest"])
+             "send_brochure", "service_interest", "voice_test"])
 
     def test_handlers_wrap_not_reimplement(self):
         """Each handler delegates to the existing function."""
