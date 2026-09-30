@@ -266,13 +266,17 @@ class TestHandlerRegistration(unittest.TestCase):
         invocations at the dispatch site, not a tool that invokes tools
         (compose_status); `knowledge_why` composes the same way, calling
         knowledge.describe and knowledge.explain as library calls rather
-        than through the registry (2G §5.1)."""
+        than through the registry (2G §5.1). → 23 with the call-outcome
+        pair (2026-09-30): `crm_calls_to_make` (#calls, STAFF, read-only) and
+        `crm_call_outcome` ("5711 called interested", STAFF, writes the CRM
+        lead's existing stage / last_contacted_at / notes)."""
         self.assertEqual(
             sorted(tools._HANDLERS),
             ["add_role", "aitest", "business_new_enquiries",
              "business_reasoning", "business_status",
              "chat_pause",
              "chat_resume", "commitment_resolve", "commitments_list",
+             "crm_call_outcome", "crm_calls_to_make",
              "crm_capture_self", "crm_list_clients", "crm_sync_lead",
              "knowledge_suffice", "knowledge_why", "leads_today",
              "memory_clear", "memory_show", "remove_role", "roles_list",

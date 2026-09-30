@@ -86,6 +86,7 @@ SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in V
 # .strip() because a trailing newline in an env var silently corrupts the
 # Bearer header — the same normalisation bic/config.py already applies.
 import bairavi
+import call_log
 import interpretation  # Step 2: shadow mode only — see shadow_interpret()
 
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -4595,6 +4596,7 @@ OWNER_COMMANDS_HELP = (
     "#paid 91XXXXXXXXXX [YYYY-MM-DD] confirm — record FIRST payment received "
     "(permanent, owner only)\n"
     "#status — quick business snapshot\n"
+    "#calls — Bairavi leads still to call; mark one with e.g. 5711 called interested\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
     "#memory — show the assistant's current long-term memory note\n"
@@ -5269,6 +5271,75 @@ def owner_reasoning_query(text: str) -> bool:
             or any(m in low for m in _CONFIDENCE_MARKERS))
 
 
+def _crm_leads_ending(digits: str) -> list:
+    r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=_crm_headers(),
+                     params={"phone": f"like.*{digits}",
+                             "user_id": f"eq.{CRM_OWNER_USER_ID}",
+                             "select": "id,name,phone,notes,pipeline_stage",
+                             "order": "created_at.desc", "limit": "10"},
+                     timeout=5)
+    r.raise_for_status()
+    return call_log.matches(digits, r.json())
+
+
+def tool_call_outcome(sender: str, digits: str, stage, words: str, **_) -> str:
+    """The owner's call outcome onto the CRM lead's EXISTING fields."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        return "⚠️ CRM is not connected, so the call was not saved."
+    try:
+        rows = _crm_leads_ending(digits)
+    except Exception as e:
+        print(f"CALL_OUTCOME_LOOKUP_FAILED type={type(e).__name__}")
+        return "⚠️ Could not reach the CRM. Please send it again in a minute."
+    if not rows:
+        return call_log.not_found_reply(digits)
+    if len(rows) > 1:
+        return call_log.ambiguous_reply(digits, rows)
+    lead = rows[0]
+    now = datetime.now(timezone.utc)
+    when = now.astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%d %b %H:%M")
+    line = call_log.note_line(stage, words, when)
+    patch = {"notes": ((lead.get("notes") or "").rstrip() + "\n" + line).strip()}
+    if stage is not call_log.NO_ANSWER:
+        patch["pipeline_stage"] = stage
+        patch["last_contacted_at"] = now.isoformat()
+    try:
+        r = requests.patch(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=_crm_headers(),
+                           params={"id": f"eq.{lead['id']}"}, json=patch, timeout=5)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"CALL_OUTCOME_SAVE_FAILED type={type(e).__name__}")
+        return "⚠️ Could not save to the CRM. Please send it again in a minute."
+    print(f"CALL_OUTCOME_SAVED stage={call_log.stage_label(stage)} phone=...{lead['phone'][-4:]}")
+    return call_log.reply(stage, lead.get("name"), lead["phone"])
+
+
+def tool_calls_to_make(sender: str, **_) -> str:
+    """#calls — Bairavi leads not yet marked, newest first."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        return "⚠️ CRM is not connected."
+    try:
+        r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=_crm_headers(),
+                         params={"source": "eq.bairavi-transformer",
+                                 "user_id": f"eq.{CRM_OWNER_USER_ID}",
+                                 "pipeline_stage": "eq.Lead",
+                                 "created_at": f"gte.{(datetime.now(timezone.utc) - timedelta(days=14)).isoformat()}",
+                                 "select": "name,phone,created_at",
+                                 "order": "created_at.desc", "limit": "15"},
+                         timeout=5)
+        r.raise_for_status()
+        rows = r.json()
+    except Exception as e:
+        print(f"CALLS_LIST_FAILED type={type(e).__name__}")
+        return "⚠️ Could not reach the CRM."
+    if not rows:
+        return "✅ No unmarked Bairavi leads in the last 14 days."
+    lines = [f"📞 *To call* ({len(rows)} not marked, last 14 days):"]
+    lines += [f"• {x.get('name') or '—'} — {x['phone']}" for x in rows]
+    lines.append("\n" + call_log.HELP)
+    return "\n".join(lines)
+
+
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
     """Single entry point for OWNER/STAFF messages: pending confirmation →
     deterministic # command → keyword-routed read-only lookup → AI chat."""
@@ -5303,6 +5374,17 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
     if pending and low in CANCEL_WORDS:
         save_message(sender, "system", "PENDING_CLEARED")
         return "❌ Cancelled."
+
+    # A CALL OUTCOME ("5711 called interested"): written to the CRM lead.
+    # Checked before # commands and the AI, and only when the message starts
+    # with digits AND names an outcome — anything else falls through as before.
+    outcome = call_log.parse(stripped)
+    if outcome is not None:
+        digits, stage, words = outcome
+        return run_tool(sender, "crm_call_outcome", _fallback=tool_call_outcome,
+                        digits=digits, stage=stage, words=words)
+    if low in ("#calls", "#call", "#tocall"):
+        return run_tool(sender, "crm_calls_to_make", _fallback=tool_calls_to_make)
 
     cmd_result = try_owner_command(sender, role, stripped)
     if cmd_result is not None:
@@ -6904,6 +6986,14 @@ if BIC_AVAILABLE:
     @bic_tools.register("crm_list_clients")
     def _tool_h_crm_list_clients(principal, timeout=10, **_):
         return tool_clients(principal.sender_id, timeout=timeout)
+
+    @bic_tools.register("crm_calls_to_make")
+    def _tool_h_crm_calls_to_make(principal, **_):
+        return tool_calls_to_make(principal.sender_id)
+
+    @bic_tools.register("crm_call_outcome")
+    def _tool_h_crm_call_outcome(principal, digits, stage, words, **_):
+        return tool_call_outcome(principal.sender_id, digits=digits, stage=stage, words=words)
 
     @bic_tools.register("service_interest")
     def _tool_h_service_interest(principal, timeout=10, **_):

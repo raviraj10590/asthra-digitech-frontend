@@ -90,7 +90,10 @@ class ExistingToolsUnaffected(unittest.TestCase):
         # -> 21 with `business_reasoning` (the Business Reasoning Core:
         # situation -> patterns -> diagnosis -> priorities -> recommendations,
         # advisory only; it authorizes nothing and executes nothing).
-        self.assertEqual(len(tools._HANDLERS), 21)
+        # -> 23 with the call-outcome pair (2026-09-30): `crm_calls_to_make`
+        # (#calls, read-only) and `crm_call_outcome` (the owner's "5711 called
+        # interested", writing the CRM lead's existing stage fields).
+        self.assertEqual(len(tools._HANDLERS), 23)
 
     def test_legacy_act_tool_validates_without_2G_fields(self):
         """A Phase-1 row carries no freshness/degradation and must stay valid."""
