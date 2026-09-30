@@ -1828,7 +1828,7 @@ def bairavi_model_reply(phone: str, user_text: str, history: list,
         print(f"BAIRAVI_MODEL_REFUSED reason='truncated' "
               f"phone=...{str(phone)[-4:]}")
         return ""
-    reply, reason = bairavi.compose_model_reply(raw, followup, known)
+    reply, reason = bairavi.compose_model_reply(raw, followup, known, customer_text=user_text)
     if reply is None:
         # Counted and named, never silently swallowed. The phone is reduced
         # to its last four digits and the refused text is NOT printed.

@@ -114,3 +114,51 @@ class PurposeAndPlaceInOneAnswer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelRepliesAreInKannada(unittest.TestCase):
+    def test_through_the_composer(self):
+        en = "We are a manufacturer of oil-immersed 3-phase distribution transformers, based at Kadaba."
+        reply, reason = b.compose_model_reply(en, {}, {}, customer_text="ಅಲ್ಲಿ ಒಂದು ಹಳ್ಳಿ")
+        self.assertIsNone(reply)
+        self.assertEqual(reason, "not in Kannada")
+
+    """2026-09-30 night: "ಅಲ್ಲಿ ಒಂದು ಹಳ್ಳಿ" got a whole English paragraph."""
+
+    def test_english_prose_is_refused(self):
+        for t in ("We are a manufacturer of oil-immersed 3-phase distribution transformers, "
+                  "based at Kadaba in Dakshina Kannada.",
+                  "Thank you for reaching out, Rohit. Cost is something only our engineer "
+                  "can address with you directly."):
+            self.assertEqual(b.reply_violates_evidence(t, "ಅಲ್ಲಿ ಒಂದು ಹಳ್ಳಿ"), "not in Kannada", t)
+            # the same reply to a customer who wrote English is still allowed
+            self.assertIsNone(b.reply_violates_evidence(t, "No thanx"), t)
+
+    def test_kannada_with_technical_english_is_allowed(self):
+        for t in ("ನಾವು ಕಡಬದಲ್ಲಿ oil-immersed 3-phase distribution transformer ತಯಾರಕರು; "
+                  "ನಿಮ್ಮ 25 kVA ವಿಚಾರಣೆ ನಮ್ಮ engineer ಗೆ ತಲುಪಿಸಿದ್ದೇವೆ.",
+                  "ಸರಿ, ನಮ್ಮ engineer ಕರೆ ಮಾಡುತ್ತಾರೆ. MESCOM approval ಇದೆ.",
+                  "OK 🙏"):
+            self.assertIsNone(b.reply_violates_evidence(t, "ಅಲ್ಲಿ ಒಂದು ಹಳ್ಳಿ"), t)
+
+
+class ThroughTheLiveModelPath(unittest.TestCase):
+    """webhook.bairavi_model_reply hands the customer's own words to the guard."""
+
+    def reply_for(self, customer_text, model_text):
+        from unittest import mock
+        import webhook as w
+        f = b.parse_followup(customer_text, (b.AWAITING_DELIVERY,), known={"location": "Channarayapattana"})
+        with mock.patch.object(w, "_generate_ai_reply", lambda *a, **k: model_text), \
+             mock.patch.object(b, "should_ask_model", lambda *a, **k: True), \
+             mock.patch.dict(w._LAST_AI_TRUNCATED, {"value": False}):
+            return w.bairavi_model_reply("910000000000", customer_text, [], f,
+                                         {"location": "Channarayapattana"})
+
+    EN = "We are a manufacturer of oil-immersed 3-phase distribution transformers, based at Kadaba."
+
+    def test_kannada_customer_english_model_reply_is_refused(self):
+        self.assertEqual(self.reply_for("ಅಲ್ಲಿ ಒಂದು ಹಳ್ಳಿ", self.EN), "")
+
+    def test_english_customer_english_model_reply_passes(self):
+        self.assertTrue(self.reply_for("where is your factory located", self.EN).startswith("We are"))

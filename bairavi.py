@@ -1360,7 +1360,7 @@ _REPLY_LEADTIME_RE = re.compile(
     re.IGNORECASE)
 
 
-def reply_violates_evidence(text: str):
+def reply_violates_evidence(text: str, customer_text: str = None):
     """Why this generated reply may not be sent, or None if it may.
 
     Returns a short reason, so a refusal can be logged and counted rather
@@ -1390,6 +1390,17 @@ def reply_violates_evidence(text: str):
     kannada_chars = sum(1 for ch in raw if "\u0c80" <= ch <= "\u0cff")
     if kannada_chars < 10 and sum(w in low for w in _latin_kn) >= 2:
         return "Kannada in English letters"
+    # NOT IN KANNADA AT ALL. Two customers in two days got a whole English
+    # paragraph from the model ("ಅಲ್ಲಿ ಒಂದು ಹಳ್ಳಿ" -> "We are a manufacturer
+    # of..."; "No thanx" -> "Thank you for reaching out..."). The bot speaks
+    # Kannada with English technical words; mostly-Latin prose is not that.
+    # An English reply to a customer writing English is still fine (owner
+    # retest 2026-09-25); only a customer who wrote in Kannada script is owed
+    # a Kannada answer.
+    latin_letters = sum(1 for ch in raw if "a" <= ch.lower() <= "z")
+    wrote_kannada = any("\u0c80" <= ch <= "\u0cff" for ch in (customer_text or ""))
+    if wrote_kannada and latin_letters >= 40 and kannada_chars < latin_letters:
+        return "not in Kannada"
     # A capacity we do not offer, stated as if we do.
     for figure in re.findall(r"(\d{2,4})\s*k\s*v\s*a", low):
         if int(figure) not in CATALOGUE_KVA and int(figure) not in PLANNED_KVA:
@@ -1465,7 +1476,8 @@ def _known_lines_kn(known: dict = None) -> str:
     return "\n" + "\n".join(lines)
 
 
-def compose_model_reply(ai_text: str, followup: dict, known: dict = None):
+def compose_model_reply(ai_text: str, followup: dict, known: dict = None,
+                        customer_text: str = None):
     """(reply, refusal_reason) for a generated answer.
 
     The guard runs FIRST, so a reply that states a price or a certification
@@ -1478,7 +1490,7 @@ def compose_model_reply(ai_text: str, followup: dict, known: dict = None):
     conversation does not stall just because the customer changed the
     subject for one turn.
     """
-    reason = reply_violates_evidence(ai_text)
+    reason = reply_violates_evidence(ai_text, customer_text)
     if reason:
         return None, reason
     lines = [(ai_text or "").strip()]
