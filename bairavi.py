@@ -1670,6 +1670,11 @@ _NOT_A_PLACE_EXACT = (
     # urgency the timing table does not carry
     "soon", "asap", "later", "today", "tomorrow", "quick", "quickly",
     "ಇವತ್ತು", "ನಾಳೆ",
+    # A WHEN, NOT A WHERE (owner-approved 2026-10-01)
+    "next week", "this week", "next month", "this month", "month end",
+    "end of month", "end of the month", "weekend", "week end", "after a week",
+    "after a month", "ಮುಂದಿನ ವಾರ", "ಈ ವಾರ", "ಮುಂದಿನ ತಿಂಗಳು", "ಈ ತಿಂಗಳು",
+    "ತಿಂಗಳ ಕೊನೆ", "ತಿಂಗಳ ಕೊನೆಗೆ", "mundina vara", "mundina tingalu",
     # uncertainty — a refusal to answer, not an answer
     "idk", "dunno", "maybe", "ಗೊತ್ತಿಲ್ಲ", "ತಿಳಿದಿಲ್ಲ",
     # greeting and terms of address
@@ -2426,7 +2431,7 @@ def established_from_history(history) -> dict:
     # a bare "ಗುಜರಾತ್" as nothing while the live turn reads it as an address,
     # and the two would disagree about the same conversation.
     awaiting = ()
-    ignored_where = 0
+    ignored = {}
     for msg in list(history or []):        # OLDEST FIRST — merge forward
         role = msg.get("role")
         text = msg.get("content") or ""
@@ -2442,16 +2447,19 @@ def established_from_history(history) -> dict:
                 else parse_followup(text, awaiting, known=state))
         before = {f: state.get(f) for f in _PERSISTENT_FIELDS}
         state = merged_state(state, turn)
-        if (awaiting[:1] == (AWAITING_DELIVERY,)
+        if (awaiting[:1] in ((AWAITING_DELIVERY,), (AWAITING_PURPOSE,))
                 and before == {f: state.get(f) for f in _PERSISTENT_FIELDS}):
-            ignored_where += 1
-    # IGNORED TWICE: MOVE ON (owner-approved 2026-09-30). Live ...4996 was
+            ignored[awaiting[0]] = ignored.get(awaiting[0], 0) + 1
+    # IGNORED TWICE: MOVE ON (owner-approved 2026-09-30; purpose too,
+    # 2026-10-01). Live ...4996 was
     # asked "which place?" five times. An ask counts only when the reply
     # told us NOTHING new: a customer answering size, units or purpose
     # instead is still talking to us, and then gives the place (the
     # "ಗುಜರಾತ್" replay). After two ignored asks the place is left for the call.
-    if ignored_where:
-        state["delivery_ignored"] = ignored_where
+    if ignored:
+        state["ignored_asks"] = ignored
+    if awaiting:
+        state["last_asked"] = awaiting[0]
     return state
 
 
@@ -2584,16 +2592,19 @@ def outstanding(followup: dict, known: dict = None) -> tuple:
     out = []
     # The ignored asks so far (from the history) plus THIS reply, when it is
     # one and tells us nothing new. See established_from_history.
-    ignored = (known or {}).get("delivery_ignored") or 0
-    if followup and all(state.get(f) == (known or {}).get(f) for f in _PERSISTENT_FIELDS):
-        ignored += 1
+    known = known or {}
+    ignored = dict(known.get("ignored_asks") or {})
+    if (followup and known.get("last_asked")
+            and all(state.get(f) == known.get(f) for f in _PERSISTENT_FIELDS)):
+        ignored[known["last_asked"]] = ignored.get(known["last_asked"], 0) + 1
     if not (state.get("delivery_location") or state.get("delivery_same")
             or state.get("delivery_mentioned")
             # A quotation needs the place (transport), so it is still asked.
-            or (ignored >= DELIVERY_ASK_LIMIT
+            or (ignored.get(AWAITING_DELIVERY, 0) >= DELIVERY_ASK_LIMIT
                 and followup.get("commercial_intent") != QUOTATION_REQUEST)):
         out.append(AWAITING_DELIVERY)
-    if not state.get("application"):
+    if not (state.get("application")
+            or ignored.get(AWAITING_PURPOSE, 0) >= DELIVERY_ASK_LIMIT):
         out.append(AWAITING_PURPOSE)
     return tuple(out)
 

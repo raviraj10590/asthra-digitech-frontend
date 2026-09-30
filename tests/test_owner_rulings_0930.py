@@ -80,7 +80,7 @@ class IgnoredTwiceMoveOn(unittest.TestCase):
     def test_rule(self):
         m = {"role": "assistant", "content": b.flow_marker(D)}
         h = [m, {"role": "user", "content": "hmm"}, m, {"role": "user", "content": "hmm"}]
-        self.assertEqual(b.established_from_history(h)["delivery_ignored"], 2)
+        self.assertEqual(b.established_from_history(h)["ignored_asks"], {b.AWAITING_DELIVERY: 2})
         self.assertNotIn(b.AWAITING_DELIVERY, b.outstanding({}, b.established_from_history(h)))
         one = b.established_from_history(h[:2])
         self.assertIn(b.AWAITING_DELIVERY, b.outstanding({}, one))
@@ -90,6 +90,36 @@ class IgnoredTwiceMoveOn(unittest.TestCase):
         # ...but a reply with news is not ignoring
         self.assertIn(b.AWAITING_DELIVERY,
                       b.outstanding(b.parse_followup("2 units", D, known=one), one))
+
+
+class PurposeIgnoredTwiceMoveOn(unittest.TestCase):
+    """Owner, 2026-10-01: the same limit for the purpose question."""
+
+    def test_rule(self):
+        m = {"role": "assistant", "content": b.flow_marker((b.AWAITING_PURPOSE,))}
+        base = {"role": "user", "content": FORM.format(loc="Sira")}
+        yes = [{"role": "assistant", "content": b.flow_marker(D)},
+               {"role": "user", "content": "yes"}]
+        h1 = [base] + yes + [m, {"role": "user", "content": "hmm"}]
+        known = b.established_from_history(h1)
+        self.assertIn(b.AWAITING_PURPOSE, b.outstanding({}, known))
+        self.assertNotIn(b.AWAITING_PURPOSE,
+                         b.outstanding(b.parse_followup("hmm", (b.AWAITING_PURPOSE,), known=known), known))
+        self.assertIn(b.AWAITING_PURPOSE,
+                      b.outstanding(b.parse_followup("2 units", (b.AWAITING_PURPOSE,), known=known), known))
+
+    def test_the_ravi_replay_ends_with_the_call_question(self):
+        run = history_of([FORM.format(loc="land"), "ರೇಟ್ ಹೇಳಿ", "2 units",
+                          "ರೇಟ್ ಕಡಿಮೆ madabeku", "No", "No"])
+        self.assertIn("1️⃣ ಈಗಲೇ", run.sent[-1])
+        purpose = [s for s in run.sent if b.question_for(b.AWAITING_PURPOSE) in s]
+        self.assertLessEqual(len(purpose), 2)
+
+    def test_delivery_ignores_do_not_count_against_purpose(self):
+        m = {"role": "assistant", "content": b.flow_marker(D)}
+        h = [m, {"role": "user", "content": "hmm"}, m, {"role": "user", "content": "hmm"}]
+        known = b.established_from_history(h)
+        self.assertIn(b.AWAITING_PURPOSE, b.outstanding({}, known))
 
 
 class AQuotationStillNeedsThePlace(unittest.TestCase):

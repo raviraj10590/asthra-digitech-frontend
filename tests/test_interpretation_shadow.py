@@ -401,11 +401,11 @@ class NothingUnsupportedIsAccepted(unittest.TestCase):
         acc, _ = self.accepted("call me", contract(delivery_place=("call me", "call me")), self.D)
         self.assertEqual(acc, {})
 
-    def test_next_week_is_the_known_gap(self):
-        """KNOWN RISK, not fixed here (no new deny-list without approval):
-        "next week" still passes the existing place rules."""
-        acc, _ = self.accepted("next week", contract(delivery_place=("next week", "next week")), self.D)
-        self.assertEqual(acc.get("delivery_location"), "next week")
+    def test_next_week_is_not_a_place(self):
+        """Was the known gap; closed by the owner's 2026-10-01 approval."""
+        for t in ("next week", "month end"):
+            acc, _ = self.accepted(t, contract(delivery_place=(t, t)), self.D)
+            self.assertNotIn("delivery_location", acc, t)
 
     def test_bare_numbers_depend_on_the_question(self):
         for n in ("1", "2"):

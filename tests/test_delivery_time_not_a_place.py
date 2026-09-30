@@ -119,11 +119,9 @@ class TimePhrasesAsPlaces(unittest.TestCase):
     vocabulary, remove the marker.
     """
 
-    @unittest.expectedFailure
     def test_next_week_is_not_a_place(self):
         self.assertIsNone(b.parse_followup("next week", D, known=KNOWN)["delivery_location"])
 
-    @unittest.expectedFailure
     def test_month_end_is_not_a_place(self):
         self.assertIsNone(b.parse_followup("month end", D, known=KNOWN)["delivery_location"])
 
