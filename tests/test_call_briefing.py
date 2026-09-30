@@ -164,3 +164,15 @@ class TheNineOClockRun(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NaraRouterExtras(unittest.TestCase):
+    def test_summary_under_the_lead_and_bot_check_count(self):
+        c = lead("919000005555", "Summ Arized", "2026-09-30T14:00:00+00:00",
+                 notes="Service: x\n🧠 AI 01 Oct 08:15 — 63 kVA x2, Gokak; asked about poles")
+        t = cb.build([c], [form("919000005555", "2026-09-30T14:00:00+00:00")], NOW, bot_checks=2)
+        self.assertIn("1. Summ Arized · 25 kVA · Sira\n   🧠 63 kVA x2, Gokak; asked about poles\n   wa.me/", t)
+        self.assertIn("🤖 *Bot check*: 2 chats flagged for a look — CRM → Follow-ups", t)
+
+    def test_bot_checks_alone_still_send(self):
+        self.assertIn("🤖 *Bot check*: 1 chat flagged", cb.build([], [], NOW, bot_checks=1))

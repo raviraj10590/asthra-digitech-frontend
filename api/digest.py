@@ -264,7 +264,18 @@ def build_call_briefing() -> str:
             "created_at": f"gte.{since}",
             "select": "phone,direction,body,created_at",
             "order": "created_at.asc", "limit": "5000"})
-    return call_briefing.build(clients, messages, owner_phones=OWNER_PHONES)
+    # Flagged by ops/nara_jobs.py's 08:15 health check. Best-effort: the
+    # briefing is still useful without the count.
+    bot_checks = 0
+    try:
+        today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
+        bot_checks = len(_crm_get("follow_ups", {
+            "due_date": f"eq.{today}", "note": "like.🤖 Bot check:*",
+            "user_id": f"eq.{CRM_OWNER_USER_ID}", "select": "id"}))
+    except Exception as e:
+        print(f"call briefing: bot-check count skipped type={type(e).__name__}")
+    return call_briefing.build(clients, messages, owner_phones=OWNER_PHONES,
+                               bot_checks=bot_checks)
 
 
 def send_to_owner(text: str):

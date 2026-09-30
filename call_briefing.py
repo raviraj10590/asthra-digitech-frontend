@@ -86,6 +86,17 @@ def _form_facts(inbound: list) -> dict:
     return {"kva": None, "place": None, "urgency": None}
 
 
+SUMMARY_TAG = "🧠 AI"   # written by ops/nara_jobs.py at 08:15
+
+
+def ai_summary(notes: str):
+    """The newest NaraRouter summary on the lead, without its date stamp."""
+    for line in reversed((notes or "").splitlines()):
+        if line.startswith(SUMMARY_TAG) and " — " in line:
+            return line.split(" — ", 1)[1].strip() or None
+    return None
+
+
 def _line(n: int, lead: dict, now: datetime) -> str:
     bits = [lead["name"] or "—"]
     if lead["kva"]:
@@ -96,7 +107,10 @@ def _line(n: int, lead: dict, now: datetime) -> str:
         bits.append(_SLOT_EN[lead["slot"]] + _when(lead["slot_at"], now))
     elif lead["urgency"] == "IMMEDIATE":
         bits.append("needs it NOW")
-    return f"{n}. " + " · ".join(bits) + f"\n   wa.me/{lead['phone']} · …{lead['phone'][-4:]}"
+    text = f"{n}. " + " · ".join(bits)
+    if lead.get("summary"):
+        text += f"\n   🧠 {lead['summary'][:140]}"
+    return text + f"\n   wa.me/{lead['phone']} · …{lead['phone'][-4:]}"
 
 
 def _when(iso, now: datetime) -> str:
@@ -123,7 +137,7 @@ def yesterdays_calls(clients: list, now: datetime) -> dict:
 
 
 def build(clients: list, messages: list, now: datetime = None,
-          owner_phones=()) -> str:
+          owner_phones=(), bot_checks: int = 0) -> str:
     """The briefing text, or "" when there is nothing to say."""
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(days=WINDOW_DAYS)
@@ -142,7 +156,7 @@ def build(clients: list, messages: list, now: datetime = None,
         slot, slot_at = chosen_slot([m for m in msgs if m.get("direction") == "outbound"])
         todo.append({"name": bairavi.display_name(c.get("name")) or c.get("name"),
                      "phone": c["phone"], "created_at": c["created_at"],
-                     "slot": slot, "slot_at": slot_at,
+                     "slot": slot, "slot_at": slot_at, "summary": ai_summary(c.get("notes")),
                      **_form_facts([m for m in msgs if m.get("direction") == "inbound"])})
 
     first = [l for l in todo if l["slot"] == "now" or (not l["slot"] and l["urgency"] == "IMMEDIATE")]
@@ -159,7 +173,7 @@ def build(clients: list, messages: list, now: datetime = None,
     new_yesterday = sum(1 for c in recent if y_start <= _ts(c["created_at"]).astimezone(IST) < y_end)
     calls = yesterdays_calls(clients or [], now)
 
-    if not todo and not new_yesterday and not calls:
+    if not todo and not new_yesterday and not calls and not bot_checks:
         return ""
     today = now.astimezone(IST).strftime("%d %b")
     lines = [f"📞 *Today's call plan* — {today}", ""]
@@ -187,6 +201,9 @@ def build(clients: list, messages: list, now: datetime = None,
     else:
         summary.append("no calls marked")
     lines.append("📊 *Yesterday*: " + " — ".join(summary))
+    if bot_checks:
+        lines.append(f"🤖 *Bot check*: {bot_checks} chat{'s' if bot_checks != 1 else ''} "
+                     "flagged for a look — CRM → Follow-ups")
     lines.append("")
     lines.append("After a call, reply e.g. *5711 called interested* · full list: asthra.website/calls")
     return "\n".join(lines)

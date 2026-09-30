@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  NaraRouter morning jobs at 08:15 on the owner's Mac (ops/nara_jobs.py):
+  lead summaries + bot health check, ready for the 09:00 call briefing.
+
+  Replaces com.asthra.nara-call-list, which never ran on schedule: launchd
+  may not read ~/Documents ("Operation not permitted"). This path is under
+  ~/Projects, which it can.
+
+  Install:
+    cp ops/com.asthra.nara-jobs.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asthra.nara-jobs.plist
+  If the Mac is asleep at 08:15, launchd runs it on wake.
+  The NaraRouter key is NOT in this file: it is read from the Keychain
+  (service "asthra-nararouter").
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.asthra.nara-jobs</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/apple/Projects/Products/Asthra-DigiTech-Brain/ops/nara_jobs.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CRM_OWNER_EMAIL</key><string>raviraj10590@gmail.com</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>15</integer></dict>
+  <key>StandardOutPath</key><string>/tmp/asthra-nara-jobs.log</string>
+  <key>StandardErrorPath</key><string>/tmp/asthra-nara-jobs.log</string>
+</dict>
+</plist>
