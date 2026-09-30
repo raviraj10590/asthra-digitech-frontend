@@ -1450,6 +1450,21 @@ def compose_model_reply(ai_text: str, followup: dict, known: dict = None):
     return "\n".join(lines), None
 
 
+# ASKING FOR A LOWER PRICE (owner-approved 2026-09-30). Live ...4996 wrote
+# "ರೇಟ್ ಕಡಿಮೆ madabeku" and was sent the same price again. The bot never
+# offers a discount; it says the team will call and the owner is alerted.
+_DISCOUNT_WORDS = ("discount", "negotiable", "negotiate", "best price",
+                   "final price", "last price", "ಡಿಸ್ಕೌಂಟ್")
+# "less" alone is also "less than a month": these count only beside a price word.
+_LOWER_WORDS = ("less", "reduce", "kadime", "kammi", "ಕಡಿಮೆ", "ಕಮ್ಮಿ")
+
+
+def asked_discount(text: str) -> bool:
+    low = (text or "").lower()
+    return (_mentions(low, _DISCOUNT_WORDS)
+            or (_mentions(low, _LOWER_WORDS) and _mentions(low, _PRICE_WORDS)))
+
+
 def commercial_intent(text: str):
     """QUOTATION_REQUEST, PRICE_REQUEST, or None.
 
@@ -1679,6 +1694,9 @@ _NOT_A_PLACE_EXACT = (
     "huccha", "huchcha", "ಹುಚ್ಚ", "mad", "stupid", "idiot", "waste",
     "fraud", "fake",
     "ಸೈಟ್", "ಜಮೀನು", "ಗ್ರಾಮ", "ಹಳ್ಳಿ", "ನಗರ",
+    # "I NEED IT" IN THE PLACE SLOT (owner-approved 2026-09-30; live
+    # ...3476 answered "ನನಗೆ ಬೇಕಾ ಆಗಿದಿ" and was asked to deliver there).
+    "ಬೇಕು", "ಬೇಕಾಗಿದೆ", "ಬೇಕಾಗಿದಿ", "need", "needed", "required", "beku",
 )
 
 # Phrases that cannot occur inside a place name, so these may be matched
@@ -1687,6 +1705,7 @@ _NOT_A_PLACE_PHRASE = (
     "call me", "call back", "callback", "phone me", "whatsapp me",
     "message me", "ಕರೆ ಮಾಡಿ", "ಫೋನ್ ಮಾಡಿ",
     "dont know", "don't know", "do not know", "not sure", "no idea",
+    "ನನಗೆ ಬೇಕ", "ನಮಗೆ ಬೇಕ", "i need", "we need", "nanage beku", "namage beku",
 )
 
 
@@ -2038,6 +2057,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             # Unchanged meaning and unchanged readers: "did they raise money
             # at all". commercial_intent says WHICH ask it was.
             "asked_price": _mentions(low, _PRICE_ASK),
+            "asked_discount": asked_discount(text),
             "commercial_intent": commercial_intent(text),
             # None when no approval question was asked, which leaves every
             # reply exactly as it was.
@@ -2378,6 +2398,9 @@ def merged_state(known: dict, turn: dict = None) -> dict:
     return state
 
 
+DELIVERY_ASK_LIMIT = 2
+
+
 def established_from_history(history) -> dict:
     """Everything this conversation has already told us, accumulated.
 
@@ -2403,6 +2426,7 @@ def established_from_history(history) -> dict:
     # a bare "ಗುಜರಾತ್" as nothing while the live turn reads it as an address,
     # and the two would disagree about the same conversation.
     awaiting = ()
+    ignored_where = 0
     for msg in list(history or []):        # OLDEST FIRST — merge forward
         role = msg.get("role")
         text = msg.get("content") or ""
@@ -2416,7 +2440,18 @@ def established_from_history(history) -> dict:
         # read by its own extractor. Neither is trusted to invent a field.
         turn = (parse(text) if is_lead_form(text)
                 else parse_followup(text, awaiting, known=state))
+        before = {f: state.get(f) for f in _PERSISTENT_FIELDS}
         state = merged_state(state, turn)
+        if (awaiting[:1] == (AWAITING_DELIVERY,)
+                and before == {f: state.get(f) for f in _PERSISTENT_FIELDS}):
+            ignored_where += 1
+    # IGNORED TWICE: MOVE ON (owner-approved 2026-09-30). Live ...4996 was
+    # asked "which place?" five times. An ask counts only when the reply
+    # told us NOTHING new: a customer answering size, units or purpose
+    # instead is still talking to us, and then gives the place (the
+    # "ಗುಜರಾತ್" replay). After two ignored asks the place is left for the call.
+    if ignored_where:
+        state["delivery_ignored"] = ignored_where
     return state
 
 
@@ -2547,8 +2582,16 @@ def outstanding(followup: dict, known: dict = None) -> tuple:
     """
     state = merged_state(known, followup)
     out = []
+    # The ignored asks so far (from the history) plus THIS reply, when it is
+    # one and tells us nothing new. See established_from_history.
+    ignored = (known or {}).get("delivery_ignored") or 0
+    if followup and all(state.get(f) == (known or {}).get(f) for f in _PERSISTENT_FIELDS):
+        ignored += 1
     if not (state.get("delivery_location") or state.get("delivery_same")
-            or state.get("delivery_mentioned")):
+            or state.get("delivery_mentioned")
+            # A quotation needs the place (transport), so it is still asked.
+            or (ignored >= DELIVERY_ASK_LIMIT
+                and followup.get("commercial_intent") != QUOTATION_REQUEST)):
         out.append(AWAITING_DELIVERY)
     if not state.get("application"):
         out.append(AWAITING_PURPOSE)
@@ -2834,7 +2877,11 @@ def compose_followup_reply(followup: dict, known: dict = None,
     if followup.get("asked_terms"):
         # Only the term they asked about — one line each.
         lines.append("\n" + "\n".join(TERM_LINES[t] for t in followup["asked_terms"]))
-    if followup["asked_price"]:
+    if followup.get("asked_discount"):
+        # Never a discount and never the same price again: a person calls.
+        lines.append("\nದರದ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ ನೇರವಾಗಿ ಕರೆ ಮಾಡಿ "
+                     "ಮಾತನಾಡುತ್ತಾರೆ.")
+    elif followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
         # never a number — the evidence for one does not exist.
         # THE PRICE THEY ASKED FOR, from the owner's list (2026-09-24).
@@ -2946,6 +2993,9 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
     _cb = followup.get("callback")
     return (
         (f"🔥📞 *CALL {CALLBACK_LABEL_EN[_cb].upper()}* — customer asked for a call\n" if _cb else "")
+        + ("💰🔥 *PRICE NEGOTIATION* — customer asked for a lower price. "
+           "Bot promised a call from sales; no discount was offered.\n"
+           if followup.get("asked_discount") else "")
         + "🔌 *BAIRAVI — follow-up*\n"
         f"From: wa.me/{phone}\n"
         # Reported when a follow-up RESTATES it — "100kv" on 2026-09-17 was a

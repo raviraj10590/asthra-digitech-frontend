@@ -77,8 +77,9 @@ class AbuseIsNotAnAddress(unittest.TestCase):
                    {"role": "user", "content": "Ninage huccha"}]
         known = b.established_from_history(history)
         self.assertIsNone(known["delivery_location"])
-        self.assertIn(b.AWAITING_DELIVERY,
-                      b.outstanding(b.parse_followup("ok"), known))
+        # Asked with no new turn: "ok" would now be a second ignored ask,
+        # and after two the owner's 2026-09-30 ruling moves on.
+        self.assertIn(b.AWAITING_DELIVERY, b.outstanding({}, known))
 
 
 class AGreetingDoesNotLeaveTheTransformerConversation(unittest.TestCase):

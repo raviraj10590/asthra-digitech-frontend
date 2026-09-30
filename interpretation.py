@@ -19,7 +19,8 @@ WHO OWNS WHAT
     is_ack, is_greeting
   Brain-owned (always computed deterministically from the text + context,
   whatever an interpreter says):
-    delivery_same, delivery_mentioned, discom_approval_ask, callback_offered
+    delivery_same, delivery_mentioned, discom_approval_ask, callback_offered,
+    asked_discount (it raises a sales alert, so never an interpreter's guess)
 
 Pure module: imports only json, re and bairavi. Never produces customer-facing text.
 """
@@ -213,6 +214,7 @@ def validate(interp, text: str, awaiting=(), known: dict = None) -> dict:
            "is_ack": False, "is_greeting": False,
            "asked_price": False, "commercial_intent": None,
            "discom_approval_ask": brain["discom_approval_ask"],
+           "asked_discount": brain["asked_discount"],
            "customer_question": None}
     ambiguous = interp.get("ambiguous") or None
     correction = bool(interp.get("is_correction"))
