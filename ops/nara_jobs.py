@@ -391,6 +391,15 @@ def main():
     started = datetime.now(IST).strftime("%Y-%m-%d %H:%M")
     stats = run(dry, limit, owner_email)
     print(f"{started} nara_jobs {'DRY ' if dry else ''}{json.dumps(stats)}")
+    # MONDAYS: the weekly learning report (ops/learning_report.py). Separate
+    # and best-effort — it must never cost the summaries or the health check.
+    if datetime.now(IST).weekday() == 0 and not dry:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import learning_report
+            learning_report.report()
+        except BaseException as e:          # SystemExit included: no key yet is not a crash
+            print(f"learning report skipped: {type(e).__name__}: {str(e)[:120]}")
 
 
 if __name__ == "__main__":

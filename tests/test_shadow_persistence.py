@@ -399,7 +399,18 @@ class ShadowFeedsNothing(unittest.TestCase):
                     path = os.path.join(dirpath, f)
                     if "bairavi_shadow_interpretations" in open(path, errors="ignore").read():
                         hits.append(os.path.relpath(path, ROOT))
-        self.assertEqual(sorted(hits), ["api/webhook.py", "interpretation.py"])
+        # ops/learning_report.py is the OFFLINE reviewer the design names
+        # ("with the secret, a reviewer can find the original message"): it
+        # runs on the owner's Mac, reads for a weekly report, and nothing in
+        # the live pipeline imports it (checked below). 2026-10-01.
+        self.assertEqual(sorted(hits), ["api/webhook.py", "interpretation.py",
+                                        "ops/learning_report.py"])
+        for dirpath, _, files in os.walk(os.path.join(ROOT, "api")):
+            for f in files:
+                if f.endswith(".py"):
+                    self.assertNotIn("learning_report", open(os.path.join(dirpath, f)).read(), f)
+        for f in ("bairavi.py", "interpretation.py", "call_briefing.py", "call_log.py", "geo_escom.py"):
+            self.assertNotIn("learning_report", open(os.path.join(ROOT, f)).read(), f)
         # interpretation.py only NAMES it in a comment; no code there touches it
         for line in open(os.path.join(ROOT, "interpretation.py")).read().splitlines():
             if "bairavi_shadow_interpretations" in line:

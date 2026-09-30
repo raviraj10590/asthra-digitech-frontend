@@ -1,0 +1,12 @@
+[
+ {"id": "seed0930a", "text": "Krasige.bekku.", "awaiting": ["purpose"], "expect": {"application": "AGRICULTURE"}, "added": "2026-09-30"},
+ {"id": "seed0930b", "text": "Beligalige.niru.hasalu.bekku", "awaiting": ["purpose"], "expect": {"application": "AGRICULTURE"}, "added": "2026-09-30"},
+ {"id": "seed0930c", "text": "32 ಕಹಬ", "awaiting": [], "expect": {"quantity": null}, "added": "2026-09-30"},
+ {"id": "seed0930d", "text": "Too cost", "awaiting": [], "expect": {"asked_discount": true}, "added": "2026-09-30"},
+ {"id": "seed0930e", "text": "No thanx", "awaiting": [], "expect": {"declined": true}, "added": "2026-09-30"},
+ {"id": "seed0930f", "text": "ಧನ್ಯವಾದಗಳು ಸಿಸ್ಟಮ್", "awaiting": [], "expect": {"is_ack": true}, "added": "2026-09-30"},
+ {"id": "seed0930g", "text": "Idi", "awaiting": ["delivery"], "known": {"location": "thirthahalli"}, "expect": {"delivery_same": true, "delivery_location": null}, "added": "2026-09-30"},
+ {"id": "seed0930h", "text": "yavaga call madtira", "awaiting": ["delivery"], "expect": {"delivery_location": null}, "added": "2026-09-30"},
+ {"id": "seed0926a", "text": "Yavaga barate", "awaiting": [], "expect": {"asked_price": false}, "added": "2026-09-26"},
+ {"id": "seed0927a", "text": "Ok 👍", "awaiting": ["delivery"], "known": {"location": "Sira"}, "expect": {"delivery_same": true, "delivery_location": null}, "added": "2026-09-27"}
+]
