@@ -1124,6 +1124,10 @@ _ASK_WHO = ("who are you", "who is this", "your company", "about your company",
             "ನಿಮ್ಮ ವಿಳಾಸ", "ಫ್ಯಾಕ್ಟರಿ",
             # "Ur from" (live ...1497, 2026-09-29) got "ಧನ್ಯವಾದಗಳು."
             "ur from", "you from", "where from", "which place are you",
+            # "Nimdu tc yav company du" — whose make (live ...5711) — got
+            # "ಧನ್ಯವಾದಗಳು."; the answer is that we manufacture it.
+            "yav company", "yaav company", "which company", "company yavdu",
+            "which brand", "yav brand", "ಯಾವ ಕಂಪನಿ", "yavdu company",
             "ಎಲ್ಲಿಂದ", "ಎಲ್ಲಿಯವರು", "ellinda", "ellinavru", "ellinavaru")
 _ASK_RANGE = ("what do you make", "what do you manufacture", "which models",
               "what models", "your range", "available sizes", "which kva",
@@ -1249,6 +1253,9 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
     if followup.get("discom_approval_ask") is not None:
         return False
     if followup.get("is_ack"):
+        return False
+    # A call time is on record: confirming it is the answer, not a paraphrase.
+    if followup.get("asks_call") and (known or {}).get("callback"):
         return False
     # The owner's ruling is the answer; a model paraphrase could add a number.
     if followup.get("customer_question") == QUESTION_DELIVERY_TIME:
@@ -1878,6 +1885,9 @@ def _is_place_like(raw: str) -> bool:
         return False
     if any(p in low for p in _NOT_A_PLACE_PHRASE):
         return False
+    # "yavaga call madtira" (when will you call?) is about a call, not a site.
+    if asks_about_call(low):
+        return False
     # Must contain an actual letter — a number or emoji is not a place.
     if not re.search(r"[^\W\d_]", raw):
         return False
@@ -1948,7 +1958,11 @@ def _bare_delivery_answer(text: str):
 # is awaited, and only when there is a location to be the same as.
 _AFFIRMATIONS = ("ok", "okay", "ok sir", "k", "kk", "okk", "okey", "oky", "okie", "oki", "ok ok", "ಓಕೆ", "sari", "aytu", "ayitu", "yes", "yes sir", "yeah", "yep",
                  "haan", "ha", "ಸರಿ", "ಆಯ್ತು", "correct", "right", "👍",
-                 "ಹೌದು", "houdu", "howdu")
+                 "ಹೌದು", "houdu", "howdu",
+                 # "Idi" (it is) confirming "is this the place?" — live
+                 # ...5711, 2026-09-29, was stored as the address "Idi".
+                 "idi", "ide", "ಇದಿ", "ಇದೆ", "houdu idi", "haudu idi", "ಹೌದು ಇದೆ",
+                 "adhe", "ade", "ಅದೇ")
 
 
 def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
@@ -2063,6 +2077,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             # at all". commercial_intent says WHICH ask it was.
             "asked_price": _mentions(low, _PRICE_ASK),
             "asked_discount": asked_discount(text),
+            "asks_call": asks_about_call(text),
             "commercial_intent": commercial_intent(text),
             # None when no approval question was asked, which leaves every
             # reply exactly as it was.
@@ -2271,6 +2286,18 @@ def asked_terms(text: str) -> tuple:
 
 
 _KANNADA_DIGITS = str.maketrans("೦೧೨೩೪೫೬೭೮೯", "0123456789")
+
+
+# "WILL YOU CALL NOW?" AFTER A CALL TIME WAS CHOSEN. Live ...5711 chose
+# "now", then asked "Ivag cl madtiya" and got "the engineer will explain".
+# Mentions a call inside a longer message; the bare "call" / "ಕಾಲ್ ಮಾಡಿ"
+# asks stay with callback_request.
+_ASK_CALL_WORDS = ("call", "cl", "kal", "phone", "ph", "ಕಾಲ್", "ಕರೆ", "ಫೋನ್")
+
+
+def asks_about_call(text: str) -> bool:
+    low = (text or "").lower()
+    return len(low.split()) >= 2 and _mentions(low, _ASK_CALL_WORDS)
 
 
 def callback_request(text: str, awaiting=()):
@@ -2862,7 +2889,8 @@ def compose_followup_reply(followup: dict, known: dict = None,
     if got:
         lines.append("ಧನ್ಯವಾದಗಳು — *" + ", ".join(got) + "* ಗಮನಿಸಿದ್ದೇವೆ.")
     elif not (followup.get("asked_price") or followup.get("callback")
-              or followup.get("asked_terms")):
+              or followup.get("asked_terms")
+              or (followup.get("asks_call") and (known or {}).get("callback"))):
         # A price question or a call choice is answered directly below; a
         # "message received" line above it is filler.
         lines.append("ಧನ್ಯವಾದಗಳು.")
@@ -2888,6 +2916,12 @@ def compose_followup_reply(followup: dict, known: dict = None,
     if followup.get("asked_terms"):
         # Only the term they asked about — one line each.
         lines.append("\n" + "\n".join(TERM_LINES[t] for t in followup["asked_terms"]))
+    _chosen = (known or {}).get("callback")
+    if followup.get("asks_call") and _chosen and not followup.get("callback"):
+        _who = display_name(merged_state(known, followup).get("name"))
+        lines.append(("ಹೌದು " + _who + " ಅವರೇ" if _who else "ಹೌದು")
+                     + f", ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[_chosen]}* ನಿಮಗೆ "
+                     "ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏")
     if followup.get("asked_discount"):
         # Never a discount and never the same price again: a person calls.
         lines.append("\nದರದ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ ನೇರವಾಗಿ ಕರೆ ಮಾಡಿ "
@@ -3004,6 +3038,9 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
     _cb = followup.get("callback")
     return (
         (f"🔥📞 *CALL {CALLBACK_LABEL_EN[_cb].upper()}* — customer asked for a call\n" if _cb else "")
+        + ("⏰📞 *WAITING FOR YOUR CALL* — customer asked again when you will call "
+           f"(chose: {CALLBACK_LABEL_EN[(known or {})['callback']]})\n"
+           if followup.get("asks_call") and (known or {}).get("callback") else "")
         + ("💰🔥 *PRICE NEGOTIATION* — customer asked for a lower price. "
            "Bot promised a call from sales; no discount was offered.\n"
            if followup.get("asked_discount") else "")
