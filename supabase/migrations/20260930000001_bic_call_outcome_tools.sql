@@ -18,7 +18,8 @@
 insert into bic_tool_defs
   (code, label, description, kind, module, semver,
    min_role, risk_tier, side_effects, customer_safe, active, status,
-   timeout_seconds, expected_latency_ms, audit_level)
+   timeout_seconds, expected_latency_ms, audit_level,
+   freshness, provenance_tiers, degradation, explainability)
 values (
   'crm_calls_to_make',
   'Leads still to call',
@@ -28,7 +29,18 @@ values (
   'STAFF', 1, false, false,
   true,
   'LIMITED',
-  10, 700, 'basic'
+  10, 700, 'basic',
+
+  'Live. Read straight from the CRM clients table on every call, no cache: '
+    || 'a lead marked a minute ago must already be off the list.',
+
+  array[0,1,2,3,4,5]::smallint[],
+
+  'CRM unreachable -> "Could not reach the CRM", never an empty list: an '
+    || 'empty list reads as "everyone has been called".',
+
+  'Each row is a name and the number to call; the list says it covers '
+    || 'unmarked Bairavi leads from the last 14 days.'
 )
 on conflict (code) do nothing;
 
