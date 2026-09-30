@@ -95,7 +95,8 @@ class ExistingToolsUnaffected(unittest.TestCase):
         # interested", writing the CRM lead's existing stage fields).
         # -> 24 with `voice_test` (#voicetest: a sample voice note to the
         # requester, so the owner hears the Kannada voice before enabling it).
-        self.assertEqual(len(tools._HANDLERS), 24)
+        # -> 25 with `crm_customer_brief` (the owner asks about one lead).
+        self.assertEqual(len(tools._HANDLERS), 25)
 
     def test_legacy_act_tool_validates_without_2G_fields(self):
         """A Phase-1 row carries no freshness/degradation and must stay valid."""

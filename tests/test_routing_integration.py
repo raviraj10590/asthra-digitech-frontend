@@ -271,7 +271,8 @@ class TestHandlerRegistration(unittest.TestCase):
         `crm_call_outcome` ("5711 called interested", STAFF, writes the CRM
         lead's existing stage / last_contacted_at / notes). → 24 with
         `voice_test` (#voicetest, STAFF: a voice-reply sample sent to the
-        requester only, 2026-10-01)."""
+        requester only, 2026-10-01). → 25 with `crm_customer_brief` ("5711" /
+        "#who <name>": one lead from the CRM, STAFF, read-only)."""
         self.assertEqual(
             sorted(tools._HANDLERS),
             ["add_role", "aitest", "business_new_enquiries",
@@ -279,7 +280,7 @@ class TestHandlerRegistration(unittest.TestCase):
              "chat_pause",
              "chat_resume", "commitment_resolve", "commitments_list",
              "crm_call_outcome", "crm_calls_to_make",
-             "crm_capture_self", "crm_list_clients", "crm_sync_lead",
+             "crm_capture_self", "crm_customer_brief", "crm_list_clients", "crm_sync_lead",
              "knowledge_suffice", "knowledge_why", "leads_today",
              "memory_clear", "memory_show", "remove_role", "roles_list",
              "send_brochure", "service_interest", "voice_test"])

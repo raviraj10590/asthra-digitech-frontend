@@ -87,6 +87,7 @@ SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in V
 # Bearer header — the same normalisation bic/config.py already applies.
 import bairavi
 import call_log
+import customer_brief
 import geo_escom
 import interpretation  # Step 2: shadow mode only — see shadow_interpret()
 
@@ -4703,6 +4704,7 @@ OWNER_COMMANDS_HELP = (
     "#status — quick business snapshot\n"
     "#calls — Bairavi leads still to call; mark one with e.g. 5711 called interested\n"
     "#voicetest [text] — hear the Kannada voice-reply sample\n"
+    "5711 or #who <name> — everything the CRM knows about one customer\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
     "#memory — show the assistant's current long-term memory note\n"
@@ -5420,6 +5422,51 @@ def tool_call_outcome(sender: str, digits: str, stage, words: str, **_) -> str:
     return call_log.reply(stage, lead.get("name"), lead["phone"])
 
 
+def tool_customer_brief(sender: str, kind: str, value: str, **_) -> str:
+    """One lead's brief from the CRM, or "" when nothing matched."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        return "⚠️ CRM is not connected."
+    try:
+        sel = "id,name,phone,notes,pipeline_stage,last_contacted_at,created_at"
+        if kind == "phone":
+            digits = re.sub(r"\D", "", value)
+            params = {"phone": f"like.*{digits}"}
+        else:
+            name = re.sub(r"[^\w .-]", "", value, flags=re.UNICODE).strip()[:40]
+            params = {"name": f"ilike.*{name}*"}
+        params.update({"user_id": f"eq.{CRM_OWNER_USER_ID}", "select": sel,
+                       "order": "created_at.desc", "limit": "8"})
+        r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=_crm_headers(),
+                         params=params, timeout=5)
+        r.raise_for_status()
+        rows = r.json()
+        if kind == "phone":
+            rows = call_log.matches(digits, rows)
+    except Exception as e:
+        print(f"CUSTOMER_BRIEF_LOOKUP_FAILED type={type(e).__name__}")
+        return "⚠️ Could not reach the CRM. Please try again in a minute."
+    if not rows:
+        return ""
+    other = customer_brief.choose_reply((kind, value), rows)
+    if other:
+        return other
+    lead = rows[0]
+    try:
+        m = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/whatsapp_messages", headers=_crm_headers(),
+                         params={"phone": f"eq.{lead['phone']}", "select": "direction,body,created_at",
+                                 "order": "created_at.desc", "limit": "40"}, timeout=5)
+        m.raise_for_status()
+        f = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/follow_ups", headers=_crm_headers(),
+                         params={"client_id": f"eq.{lead['id']}", "select": "note,due_date,is_done",
+                                 "order": "due_date.desc", "limit": "5"}, timeout=5)
+        followups = f.json() if f.ok else []
+        messages = m.json()
+    except Exception as e:
+        print(f"CUSTOMER_BRIEF_DETAIL_FAILED type={type(e).__name__}")
+        messages, followups = [], []
+    return customer_brief.build(lead, messages, followups)
+
+
 def tool_calls_to_make(sender: str, **_) -> str:
     """#calls — Bairavi leads not yet marked, newest first."""
     if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
@@ -5491,6 +5538,16 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
                         digits=digits, stage=stage, words=words)
     if low in ("#calls", "#call", "#tocall"):
         return run_tool(sender, "crm_calls_to_make", _fallback=tool_calls_to_make)
+    # ONE CUSTOMER, FROM THE CRM ("5711", "5711 enu helidru?", "#who Sudarshan").
+    # After call outcomes, so "5711 called interested" still marks the call.
+    # A digits-first message that matches no lead falls through to the normal
+    # owner handling ("2026 sales report" is not a lookup); #who always answers.
+    lookup = customer_brief.query_of(stripped)
+    if lookup is not None:
+        found = run_tool(sender, "crm_customer_brief", _fallback=tool_customer_brief,
+                         kind=lookup[0], value=lookup[1])
+        if found or low.startswith("#who"):
+            return found or customer_brief.choose_reply(lookup, [])
     if low == "#voicetest" or low.startswith("#voicetest "):
         return run_tool(sender, "voice_test", _fallback=tool_voice_test,
                         text=stripped[len("#voicetest"):].strip())
@@ -7104,6 +7161,10 @@ if BIC_AVAILABLE:
     @bic_tools.register("crm_calls_to_make")
     def _tool_h_crm_calls_to_make(principal, **_):
         return tool_calls_to_make(principal.sender_id)
+
+    @bic_tools.register("crm_customer_brief")
+    def _tool_h_crm_customer_brief(principal, kind, value, **_):
+        return tool_customer_brief(principal.sender_id, kind=kind, value=value)
 
     @bic_tools.register("voice_test")
     def _tool_h_voice_test(principal, text="", **_):
