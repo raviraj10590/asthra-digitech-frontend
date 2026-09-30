@@ -519,6 +519,13 @@ def _form_location(value):
         return None, None
     low = value.lower()
     app = _application_of(low)
+    if app and not _is_place_like(value.strip(_TRIM)):
+        # "Agriculture Kanakagiri" (live ...2829): the purpose AND the place.
+        # Words that are themselves a purpose are removed; the rest may be
+        # the place, judged by the same filter.
+        rest = " ".join(w for w in value.split() if not _application_of(w.lower()))
+        if rest and rest != value and _is_place_like(rest.strip(_TRIM)):
+            return rest.strip(_TRIM), app
     if _is_place_like(value.strip(_TRIM)):
         return value, app
     return None, app
@@ -641,6 +648,10 @@ _QTY_RE = re.compile(
     r")?", re.IGNORECASE)
 
 
+_NOT_TRANSFORMERS = ("ಕಂಬ", "ಕಹಬ", "ಕಂಭ", "kamba", "kamb", "pole", "ಪೋಲ್",
+                     "acre", "ekare", "ಎಕರೆ", "gunte", "ಗುಂಟೆ", "wire", "ವೈರ್")
+
+
 def _read_quantity(low: str, cap=None):
     """How many units this text states, or None.
 
@@ -695,6 +706,10 @@ def _read_quantity(low: str, cap=None):
             # still fifteen.
             rest = low[m.end():].lstrip(" \t.-")
             if any(rest.startswith(u) for u in _MEASUREMENT_UNIT):
+                continue
+            # OTHER THINGS BEING COUNTED. "32 ಕಹಬ" (32 poles, ಕಂಬ misspelt;
+            # live ...4109) was recorded as 32 transformers.
+            if any(rest.startswith(u) for u in _NOT_TRANSFORMERS):
                 continue
         return n
     # A COUNT IN WORDS. "Agriculture / Single unit" (2026-09-24) was stored as
@@ -827,8 +842,22 @@ def _edit_distance(a: str, b: str, limit: int) -> int:
     return prev[-1]
 
 
+# KANNADA IN LATIN LETTERS INFLECTS. "Krasige.bekku" (for farming) and
+# "krushige beku" were not read (live ...1743, 2026-09-30): the whole-word
+# table cannot see a stem with "-ge" on it. Stems at a word start, any ending.
+_LATIN_FARM_STEM_RE = re.compile(
+    r"(?<![a-z])(?:kr[ua]s{1,2}h?[iy]|krishi|kurshi|krash[iy]|raith|vyavasa|borewell)")
+# "Beligalige niru hasalu" — to water the crops — is irrigation.
+_WATERING_RE = re.compile(r"(?<![a-z])(?:niru|neeru|neer|nīru)\s+(?:hasal|hayis|haays|hakal|haakal|bidal)"
+                          r"|ನೀರು\s*(?:ಹಾಯಿಸ|ಹಾಸ|ಹಾಕ|ಬಿಡ)")
+
+
 def _application_of(low: str):
     """The purpose this text states, or None. The single reader for it."""
+    # "Krasige.bekku." — dots typed between words are spaces.
+    low = re.sub(r"[._]+", " ", low or "")
+    if _LATIN_FARM_STEM_RE.search(low) or _WATERING_RE.search(low):
+        return "AGRICULTURE"
     for needle, value in _APPLICATIONS:
         if needle in low:
             return value
@@ -1254,6 +1283,8 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
         return False
     if followup.get("is_ack"):
         return False
+    if followup.get("declined"):
+        return False
     # A call time is on record: confirming it is the answer, not a paraphrase.
     if followup.get("asks_call") and (known or {}).get("callback"):
         return False
@@ -1461,9 +1492,14 @@ def compose_model_reply(ai_text: str, followup: dict, known: dict = None):
 # "ರೇಟ್ ಕಡಿಮೆ madabeku" and was sent the same price again. The bot never
 # offers a discount; it says the team will call and the owner is alerted.
 _DISCOUNT_WORDS = ("discount", "negotiable", "negotiate", "best price",
-                   "final price", "last price", "ಡಿಸ್ಕೌಂಟ್")
+                   "final price", "last price", "ಡಿಸ್ಕೌಂಟ್",
+                   # THE PRICE IS TOO HIGH — the same ask, said as an objection.
+                   # "Too cost" (live ...2829) got the same price again, then
+                   # the model said it could not discuss figures.
+                   "costly", "expensive", "dubari", "ದುಬಾರಿ", "too cost")
 # "less" alone is also "less than a month": these count only beside a price word.
-_LOWER_WORDS = ("less", "reduce", "kadime", "kammi", "ಕಡಿಮೆ", "ಕಮ್ಮಿ")
+_LOWER_WORDS = ("less", "reduce", "kadime", "kammi", "ಕಡಿಮೆ", "ಕಮ್ಮಿ",
+                "too", "jasti", "ಜಾಸ್ತಿ", "heavy", "high")
 
 
 def asked_discount(text: str) -> bool:
@@ -1965,6 +2001,34 @@ _AFFIRMATIONS = ("ok", "okay", "ok sir", "k", "kk", "okk", "okey", "oky", "okie"
                  "adhe", "ade", "ಅದೇ")
 
 
+# THANKS, WITH A WORD OR TWO AROUND IT. "ಧನ್ಯವಾದಗಳು ಸಿಸ್ಟಮ್" (live ...3554)
+# went to the model, which answered a question nobody asked.
+_THANKS_STEMS = ("thank", "thanx", "thnx", "thnks", "thanku", "tq", "ty",
+                 "dhanyavad", "ಧನ್ಯವಾದ", "ಥ್ಯಾಂಕ್")
+_THANKS_FILLER = {"sir", "sar", "madam", "mam", "system", "ಸಿಸ್ಟಮ್", "ಸರ್", "ji",
+                  "very", "much", "so", "ok", "okay", "you", "u", "ಸರಿ", "anna",
+                  "ಅಣ್ಣ", "all", "for", "info", "information", "ಮಾಹಿತಿಗೆ", "🙏"}
+# "No thanks" / "not interested": a close, answered once, and flagged.
+_DECLINES = ("no thanks", "no thanx", "no thank you", "no thanku", "not interested",
+             "not intrested", "no need", "not needed", "beda", "ಬೇಡ", "nange beda",
+             "ನಮಗೆ ಬೇಡ", "ಬೇಡ ಸರ್", "beda sir")
+
+
+def _is_thanks(bare: str) -> bool:
+    words = (bare or "").split()
+    if not words:
+        return False
+    if not any(w.startswith(_THANKS_STEMS) for w in words):
+        return False
+    return all(w.startswith(_THANKS_STEMS) or w in _THANKS_FILLER for w in words)
+
+
+def is_decline(text: str) -> bool:
+    bare = re.sub(r"[^\w\s\u0C80-\u0CFF]", " ", (text or "").lower())
+    bare = " ".join(bare.split())
+    return bare in _DECLINES
+
+
 def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     """Quantity, application and whether a price was asked. None when unread.
 
@@ -2008,7 +2072,8 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # stay "ಸರಿ").
     bare = re.sub(r"\s+", " ", re.sub(r"[^\w\s\u0900-\u097F\u0C80-\u0CFF\u200c\u200d]", " ",
                                      bare)).strip() or bare
-    plain_reply = no_words or bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS
+    thanks = _is_thanks(bare)
+    plain_reply = no_words or bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or thanks
     dl = None
     m = _DELIVERY_STRICT_RE.search(text or "")
     if m:
@@ -2059,7 +2124,8 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # asking one produced a paragraph re-introducing the company to someone
     # who had just typed "Ok".
     is_greeting = _is_greeting(bare)
-    is_ack = bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or is_greeting or no_words
+    is_ack = (bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or is_greeting
+              or no_words or thanks)
 
     callback = callback_request(text, awaiting)
     if callback and AWAITING_CALLBACK in (awaiting or ()) and len(low.split()) <= 2:
@@ -2078,6 +2144,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "asked_price": _mentions(low, _PRICE_ASK),
             "asked_discount": asked_discount(text),
             "asks_call": asks_about_call(text),
+            "declined": is_decline(text),
             "commercial_intent": commercial_intent(text),
             # None when no approval question was asked, which leaves every
             # reply exactly as it was.
@@ -2877,6 +2944,12 @@ def compose_followup_reply(followup: dict, known: dict = None,
         got.append("ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳಕ್ಕೆ")
 
     _state_now = merged_state(known, followup)
+    if followup.get("declined") and not got:
+        # A courteous close, once. No more questions; the owner is told why.
+        _who = display_name(_state_now.get("name"))
+        return (("ಸರಿ " + _who + " ಅವರೇ 🙏" if _who else "ಸರಿ 🙏")
+                + " ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು. ಮುಂದೆ ಅಗತ್ಯವಿದ್ದರೆ ಯಾವಾಗ "
+                "ಬೇಕಾದರೂ ಈ ನಂಬರ್‌ಗೆ ಸಂದೇಶ ಕಳಿಸಿ.")
     if followup.get("is_greeting") and not got:
         # "Hii namaste" is a hello, not an answer. It was met with the
         # call-back close on 2026-09-25; it gets a hello and the one open
@@ -3041,6 +3114,8 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
         + ("⏰📞 *WAITING FOR YOUR CALL* — customer asked again when you will call "
            f"(chose: {CALLBACK_LABEL_EN[(known or {})['callback']]})\n"
            if followup.get("asks_call") and (known or {}).get("callback") else "")
+        + ("❌ *NOT INTERESTED* — customer declined; a call may still save it\n"
+           if followup.get("declined") else "")
         + ("💰🔥 *PRICE NEGOTIATION* — customer asked for a lower price. "
            "Bot promised a call from sales; no discount was offered.\n"
            if followup.get("asked_discount") else "")
