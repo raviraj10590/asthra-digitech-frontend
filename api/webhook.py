@@ -1958,7 +1958,15 @@ def bairavi_model_reply(phone: str, user_text: str, history: list,
 # marks "AI consulted" in the immutable Decision Record, and a shadow call
 # must not change what production records say happened.
 # ══════════════════════════════════════════════════════════════════════════
-SHADOW_MAX_TOKENS = 1200
+# THE SHADOW'S OWN LIMITS (2026-10-01). The chat primary, DeepSeek
+# V4.1-Flash, is a reasoning model: with 1200 tokens and the 6 s budget meant
+# for a LIVE interpretation, all 12 first live turns ended provider_failed
+# ("deepseek TRUNCATED at max_tokens" or out of time) and shadow mode measured
+# nothing. Shadow runs AFTER the customer has been answered, so it may take
+# longer — still inside the function's deadline (ai_seconds_left).
+# INTERPRET_TIMEOUT_SECONDS stays 6 s for any future live use.
+SHADOW_MAX_TOKENS = int(os.environ.get("SHADOW_MAX_TOKENS", "4000"))
+SHADOW_TIMEOUT_SECONDS = float(os.environ.get("SHADOW_TIMEOUT_SECONDS", "15"))
 
 
 def shadow_enabled() -> bool:
@@ -2072,7 +2080,7 @@ def _shadow_interpret(turn_key, user_text, history, followup, known):
     history = list(history or [])
     awaiting = bairavi_awaiting(history)          # exactly what the parser was given
     left = ai_seconds_left()
-    budget = min(INTERPRET_TIMEOUT_SECONDS, left)
+    budget = min(SHADOW_TIMEOUT_SECONDS, left)
     if budget < MIN_PROVIDER_SECONDS:
         _shadow_sink(interpretation.shadow_record(
             status=interpretation.S_SKIPPED_DEADLINE, turn_key=turn_key, awaiting=awaiting,

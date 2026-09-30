@@ -209,10 +209,13 @@ class ShadowObeysTheTurnDeadline(unittest.TestCase):
                                "wamid.deadline")
         return recs
 
-    def test_the_call_gets_at_most_the_interpret_budget(self):
+    def test_the_call_gets_at_most_the_shadow_budget(self):
+        """The shadow's own cap (2026-10-01: DeepSeek-Flash needs longer than
+        the 6 s live-interpretation budget), never the whole turn."""
         seen = []
-        self._once(lambda m, t=None: seen.append(w.ai_seconds_left()) or "", left=20)
-        self.assertLessEqual(seen[0], w.INTERPRET_TIMEOUT_SECONDS + 0.01)
+        self._once(lambda m, t=None: seen.append(w.ai_seconds_left()) or "", left=40)
+        self.assertLessEqual(seen[0], w.SHADOW_TIMEOUT_SECONDS + 0.01)
+        self.assertGreater(w.SHADOW_TIMEOUT_SECONDS, w.INTERPRET_TIMEOUT_SECONDS)
 
     def test_never_more_than_the_turn_has_left(self):
         seen = []
@@ -238,8 +241,9 @@ class ShadowObeysTheTurnDeadline(unittest.TestCase):
 
         with mock.patch.dict(sys.modules, {"openai": mock.Mock(OpenAI=FakeClient)}), \
              mock.patch.object(w, "DEEPSEEK_API_KEY", "k"):
-            self._once(w._call_deepseek, left=20)
-        self.assertLessEqual(captured["timeout"], w.INTERPRET_TIMEOUT_SECONDS + 0.01)
+            self._once(w._call_deepseek, left=40)
+        self.assertLessEqual(captured["timeout"], w.SHADOW_TIMEOUT_SECONDS + 0.01)
+        self.assertEqual(captured["max_tokens"], w.SHADOW_MAX_TOKENS)
 
     def test_chain_deadline_and_truncation_flag_are_restored(self):
         w._LAST_AI_TRUNCATED["value"] = True
