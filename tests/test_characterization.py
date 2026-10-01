@@ -162,7 +162,8 @@ class TestPureHelpers(unittest.TestCase):
         from unittest import mock
         with mock.patch.object(w, "AI_PROVIDERS_ALLOWED", {"deepseek", "gemini", "openai"}):
             names = [n for n, _ in w._provider_chain()]
-        self.assertEqual(sorted(names), ["deepseek", "gemini", "openai"])
+        # OpenAI is no longer a provider at all (owner, 2026-10-01).
+        self.assertEqual(sorted(names), ["deepseek", "gemini"])
 
     def test_duplicate_webhook_detection(self):
         long = "I need a quotation for a 63 kVA transformer at Tumkur"

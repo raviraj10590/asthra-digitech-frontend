@@ -1634,84 +1634,16 @@ def extract_lead_info(history: list) -> dict:
 _TURN_EXTRAS = {}
 
 
-# ── VOICE REPLIES (owner request 2026-10-01) ──────────────────────────────
-# A customer who sent a voice note gets the normal text reply AND the same
-# answer as a Kannada voice note. Text stays the reply of record; the voice
-# note is extra and best-effort. OFF until the owner has heard a sample
-# (#voicetest) and set VOICE_REPLIES=on — the Kannada voice quality cannot
-# be judged by reading code.
-VOICE_TTS_MODEL = os.environ.get("VOICE_TTS_MODEL", "gpt-4o-mini-tts")
-VOICE_TTS_VOICE = os.environ.get("VOICE_TTS_VOICE", "shimmer")
-VOICE_MIN_SECONDS = 8.0     # synthesis + upload + send need this much of the turn
-
-
-def voice_replies_on() -> bool:
-    return os.environ.get("VOICE_REPLIES", "").strip().lower() in ("on", "true", "1")
-
-
-def synthesize_kannada(text: str) -> bytes:
-    """Speech for `text` as OGG/Opus (WhatsApp's voice-note format), or b""."""
-    try:
-        resp = get_openai().audio.speech.create(
-            model=VOICE_TTS_MODEL, voice=VOICE_TTS_VOICE, input=text,
-            response_format="opus",
-            instructions=("Speak in natural, warm, professional Kannada, like a helpful "
-                          "sales assistant from Karnataka. Read English technical words "
-                          "(kVA, transformer, engineer) naturally."))
-        return resp.content or b""
-    except Exception as e:
-        print(f"VOICE_TTS_FAILED type={type(e).__name__}")
-        return b""
-
-
-def send_voice_note(to: str, audio: bytes) -> bool:
-    """Upload the audio to WhatsApp and send it. True when sent."""
-    try:
-        up = requests.post(f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/media",
-                           headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
-                           data={"messaging_product": "whatsapp", "type": "audio/ogg"},
-                           files={"file": ("reply.ogg", audio, "audio/ogg")}, timeout=8)
-        media_id = (up.json() or {}).get("id") if up.ok else None
-        if not media_id:
-            print(f"VOICE_UPLOAD_FAILED status={up.status_code}")
-            return False
-        r = _wa_post({"messaging_product": "whatsapp", "to": to, "type": "audio",
-                      "audio": {"id": media_id}})
-        return bool(r.ok)
-    except Exception as e:
-        print(f"VOICE_SEND_FAILED type={type(e).__name__}")
-        return False
-
-
-def maybe_voice_reply(to: str, reply: str) -> bool:
-    """After the text reply: a voice note of it, when the customer spoke."""
-    if not (_TURN_EXTRAS.get("voice") and voice_replies_on()):
-        return False
-    if ai_seconds_left() < VOICE_MIN_SECONDS:
-        print("VOICE_SKIPPED reason='turn deadline'")
-        return False
-    speech = bairavi.speech_text(reply)
-    if not speech:
-        return False
-    audio = synthesize_kannada(speech)
-    ok = bool(audio) and send_voice_note(to, audio)
-    print(f"VOICE_REPLY sent={ok} phone=...{str(to)[-4:]}")
-    return ok
-
-
+# ── VOICE REPLIES: REMOVED (owner, 2026-10-01) ────────────────────────────
+# Built the same day on OpenAI text-to-speech, then removed with OpenAI:
+# "remove open ai from system because we not recharge this api presently".
+# DeepSeek has no speech, and Gemini's free tier returns raw PCM that would
+# need an Opus encoder WhatsApp accepts. Voice notes IN are still read
+# (transcribe_audio, Gemini). #voicetest stays registered and says so.
 def tool_voice_test(sender: str, text: str = "", **_) -> str:
-    """#voicetest [text] — a sample voice note to the person asking, so the
-    owner can hear the Kannada voice before switching VOICE_REPLIES on."""
-    sample = (text or "").strip() or (
-        "ನಮಸ್ಕಾರ. Bairavi Trans Solutions ಅನ್ನು ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು. ನಿಮ್ಮ 25 kVA "
-        "ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ವಿಚಾರಣೆ ನಮಗೆ ತಲುಪಿದೆ. ನಮ್ಮ engineer ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
-    audio = synthesize_kannada(bairavi.speech_text(sample))
-    if not audio:
-        return "⚠️ Voice synthesis failed — check OPENAI_API_KEY / model access."
-    if not send_voice_note(sender, audio):
-        return "⚠️ The voice note could not be sent."
-    state = "ON" if voice_replies_on() else "OFF (set VOICE_REPLIES=on in Vercel to enable)"
-    return f"🎙️ Sample sent above. Voice replies to customers are {state}."
+    return ("🎙️ Voice replies are switched off: OpenAI is not recharged, and DeepSeek "
+            "and Gemini's free tier cannot send voice notes. Customers' voice notes "
+            "are still understood (Gemini) and answered in text.")
 
 
 def reverse_geocode(lat: float, lon: float) -> dict:
@@ -1730,56 +1662,48 @@ def reverse_geocode(lat: float, lon: float) -> dict:
         return {}
 
 
+GEMINI_MEDIA_MODEL = os.environ.get("GEMINI_MEDIA_MODEL", "gemini-2.5-flash").strip()
+_TRANSCRIBE_PROMPT = (
+    "Transcribe this WhatsApp voice note exactly as spoken. It is usually Kannada, "
+    "sometimes mixed with English, from a farmer or business enquiring about electrical "
+    "transformers (kVA, ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್, ಕೃಷಿ, ಪಂಪ್ ಸೆಟ್, MESCOM) or digital marketing. "
+    "Write Kannada in Kannada script and English words as spoken. Output ONLY the "
+    "transcript — no translation, no notes. If nothing intelligible is said, output nothing.")
+
+
 def transcribe_audio(media_id: str) -> str:
-    """Download WhatsApp voice note and transcribe with Whisper (Kannada)."""
+    """A WhatsApp voice note as text, via Gemini's free tier (owner, 2026-10-01:
+    OpenAI is not recharged — Whisper failed every time in 30 days). '' on any
+    failure, and the caller asks the customer to type."""
+    if not GEMINI_API_KEY:
+        return ""
+    audio, mime = download_wa_media(media_id, max_bytes=8 * 1024 * 1024)
+    if not audio:
+        print("transcribe_audio: no media")
+        return ""
     try:
-        meta_resp = requests.get(
-            f"https://graph.facebook.com/v19.0/{media_id}",
-            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
-            timeout=10,
-        )
-        media_url = meta_resp.json().get("url", "")
-        if not media_url:
-            print("transcribe_audio: no media URL")
+        import base64
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{GEMINI_MEDIA_MODEL}:generateContent?key={GEMINI_API_KEY}",
+            json={"contents": [{"parts": [
+                {"text": _TRANSCRIBE_PROMPT},
+                {"inline_data": {"mime_type": (mime or "audio/ogg").split(";")[0],
+                                 "data": base64.b64encode(audio).decode()}}]}],
+                  "generationConfig": {"temperature": 0}},
+            timeout=_bounded(15))
+        if not r.ok:
+            print(f"transcribe_audio gemini {r.status_code}")
             return ""
-
-        audio_resp = requests.get(
-            media_url,
-            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
-            timeout=30,
-        )
-
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
-            f.write(audio_resp.content)
-            tmp = f.name
-
-        with open(tmp, "rb") as audio_file:
-            result = get_openai().audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="kn",
-                # Words these customers actually say. Transformer buyers
-                # were being heard through a digital-marketing vocabulary.
-                prompt=(
-                    "ಕನ್ನಡ ಭಾಷೆ. ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್, 25 kVA, 63 kVA, 100 kVA, ಕೃಷಿ, "
-                    "ಪಂಪ್ ಸೆಟ್, ಬೋರ್‌ವೆಲ್, ಕಂಬ, MESCOM, BESCOM, ತಾಲ್ಲೂಕು, ಜಿಲ್ಲೆ, "
-                    "ರೇಟ್, ಡೆಲಿವರಿ, Bairavi. ಡಿಜಿಟಲ್ ಮಾರ್ಕೆಟಿಂಗ್, ವೆಬ್‌ಸೈಟ್, "
-                    "Asthra DigiTech."
-                ),
-            )
-        os.unlink(tmp)
-        text = result.text.strip()
-        print(f"🎤 Whisper: {text}")
+        parts = r.json()["candidates"][0]["content"]["parts"]
+        text = " ".join(p.get("text", "") for p in parts).strip()
+        print(f"🎤 transcribed chars={len(text)}")
         return text
-
     except Exception as e:
-        print(f"transcribe_audio error: {e}")
+        print(f"transcribe_audio error type={type(e).__name__}")
         return ""
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MEDIA (image / video / document) HANDLING
-# ══════════════════════════════════════════════════════════════════════════════
 def download_wa_media(media_id: str, max_bytes: int = 5 * 1024 * 1024):
     """Fetch a WhatsApp media file. Returns (bytes, mime_type) or (None, None)."""
     try:
@@ -1800,14 +1724,33 @@ def download_wa_media(media_id: str, max_bytes: int = 5 * 1024 * 1024):
         return None, None
 
 
-def analyze_image_with_gemini(image_bytes: bytes, mime: str, caption: str) -> str:
-    """Look at a customer image with Gemini (free tier) and reply as ಆಸ್ತ್ರ AI.
+# A BAIRAVI LEAD'S PHOTO (2026-10-01). The only image prompt was Asthra's:
+# a farmer sending a transformer nameplate would have been offered posters
+# and social media. Their photo now gets a transformer-aware answer, checked
+# by the same evidence guard as every model reply (no price, no spec claim).
+_BAIRAVI_IMAGE_PROMPT = (
+    "ನೀವು *Bairavi Trans Solutions* (Kadaba, ದಕ್ಷಿಣ ಕನ್ನಡ — transformer ತಯಾರಕರು) ನ "
+    "WhatsApp ಸಹಾಯಕ. ಗ್ರಾಹಕರು ಈ ಫೋಟೋ ಕಳುಹಿಸಿದ್ದಾರೆ{caption}. 2-3 ಚಿಕ್ಕ ಕನ್ನಡ ವಾಕ್ಯ: "
+    "ಫೋಟೋದಲ್ಲಿ ಏನಿದೆ ಎಂದು ಹೇಳಿ (ಉದಾ: transformer nameplate — ಕಾಣುವ kVA/ಕಂಪನಿ ಹೆಸರು; "
+    "site; ಕಂಬ; ದಾಖಲೆ), ಧನ್ಯವಾದ ಹೇಳಿ, ನಮ್ಮ engineer ಕರೆಯಲ್ಲಿ ಪರಿಶೀಲಿಸುತ್ತಾರೆ ಎಂದು "
+    "ತಿಳಿಸಿ. ಬೆಲೆ, delivery ದಿನ, certificate, technical ಅಂಕಿ ಹೇಳಬೇಡಿ. 'ನೀವು' ಬಳಸಿ. "
+    "ಉತ್ತರ ಮಾತ್ರ ಕೊಡಿ.")
+
+
+def analyze_image_with_gemini(image_bytes: bytes, mime: str, caption: str,
+                              bairavi_lead: bool = False) -> str:
+    """Look at a customer image with Gemini (free tier) and reply — as Asthra
+    AI, or as Bairavi's assistant for a transformer lead.
     Returns the Kannada reply text, or '' on any failure."""
     if not GEMINI_API_KEY:
         return ""
     try:
         import base64
-        prompt = (
+        if bairavi_lead:
+            prompt = _BAIRAVI_IMAGE_PROMPT.format(
+                caption=f' (ಜೊತೆ ಸಂದೇಶ: "{caption}")' if caption else "")
+        else:
+            prompt = (
             "ನೀವು Asthra DigiTech (ಡಿಜಿಟಲ್ ಮಾರ್ಕೆಟಿಂಗ್ ಏಜೆನ್ಸಿ, ಜಯನಗರ ಬೆಂಗಳೂರು) ಕಂಪನಿಯ "
             "WhatsApp ಸಹಾಯಕ 'ಆಸ್ತ್ರ AI'. ಗ್ರಾಹಕರು ಈ ಚಿತ್ರ ಕಳುಹಿಸಿದ್ದಾರೆ"
             + (f' (ಜೊತೆ ಸಂದೇಶ: "{caption}")' if caption else "")
@@ -1831,7 +1774,11 @@ def analyze_image_with_gemini(image_bytes: bytes, mime: str, caption: str) -> st
         if not r.ok:
             print(f"gemini vision {r.status_code}: {r.text[:120]}")
             return ""
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        if bairavi_lead and bairavi.reply_violates_evidence(text, caption or "ಫೋಟೋ"):
+            print("BAIRAVI_IMAGE_REPLY_REFUSED")
+            return ""
+        return text
     except Exception as e:
         print(f"analyze_image_with_gemini error: {e}")
         return ""
@@ -2295,9 +2242,11 @@ def _call_deepseek(messages: list, max_tokens: int = None, temperature: float = 
 
 # Provider registry — name → callable. Adding a provider means one entry here
 # plus its config block; ordering is env-driven and needs no code change.
+# OpenAI is not a provider any more (owner, 2026-10-01: not recharged —
+# "remove open ai from system"). _call_openai is kept only as dormant code
+# for history; nothing reaches it (tests/test_no_openai.py).
 _PROVIDERS = {
     "deepseek": _call_deepseek,
-    "openai":   _call_openai,
     "gemini":   generate_reply_gemini,
 }
 
@@ -2313,7 +2262,7 @@ def _provider_chain() -> list:
     if AI_PROVIDER_ORDER:
         names = [n.strip() for n in AI_PROVIDER_ORDER.split(",") if n.strip() in _PROVIDERS]
     else:
-        primary = AI_PROVIDER_PRIMARY if AI_PROVIDER_PRIMARY in _PROVIDERS else "openai"
+        primary = AI_PROVIDER_PRIMARY if AI_PROVIDER_PRIMARY in _PROVIDERS else "deepseek"
         names = [primary]
     for n in _PROVIDERS:
         if n not in names:
@@ -2321,7 +2270,7 @@ def _provider_chain() -> list:
     # OWNER, 2026-10-01: "select everything to deep seek only". OpenAI and
     # Gemini are no longer fallbacks for text; AI_PROVIDERS_ALLOWED (env,
     # comma-separated) can widen it again without a code change.
-    allowed = [n for n in names if n in AI_PROVIDERS_ALLOWED] or ["deepseek"]
+    allowed = [n for n in names if n in AI_PROVIDERS_ALLOWED and n in _PROVIDERS] or ["deepseek"]
     return [(n, _PROVIDERS[n]) for n in allowed]
 
 # WAS THE LAST REPLY CUT OFF? Set by each provider when it stopped at the
@@ -4685,7 +4634,7 @@ OWNER_COMMANDS_HELP = (
     "(permanent, owner only)\n"
     "#status — quick business snapshot\n"
     "#calls — Bairavi leads still to call; mark one with e.g. 5711 called interested\n"
-    "#voicetest [text] — hear the Kannada voice-reply sample\n"
+    "#voicetest — voice-reply status (off: no free text-to-speech)\n"
     "5711 or #who <name> — everything the CRM knows about one customer\n"
     "#roles — list OWNER/STAFF numbers\n"
     "#aitest — check OpenAI + Gemini are both reachable right now\n"
@@ -6200,9 +6149,6 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                 notify_owner(bairavi.compose_quotation_signal(
                     sender, followup, user_text, known, _quote_goal))
             # SHADOW (Step 2): observe only, after every production side effect.
-            # Voice note of the reply, after every write and alert above: it is
-            # the slowest step and the only optional one.
-            maybe_voice_reply(sender, _reply)
             shadow_interpret(sender, user_text, ctx["history"], followup, known, message_id)
             return
 
@@ -7499,7 +7445,12 @@ class handler(BaseHTTPRequestHandler):
                 media_id = msg.get("image", {}).get("id", "")
                 caption  = msg.get("image", {}).get("caption", "")
                 img, mime = download_wa_media(media_id) if media_id else (None, None)
-                reply = analyze_image_with_gemini(img, mime, caption) if img else ""
+                try:
+                    _bairavi_photo = bairavi.in_transformer_flow(fetch_context(sender)["history"])
+                except Exception:
+                    _bairavi_photo = False
+                reply = (analyze_image_with_gemini(img, mime, caption, bairavi_lead=_bairavi_photo)
+                         if img else "")
                 if reply:
                     send_text(sender, reply)
                     save_messages([(sender, "user", f"[ಚಿತ್ರ ಕಳುಹಿಸಿದ್ದಾರೆ{': ' + caption if caption else ''}]"),

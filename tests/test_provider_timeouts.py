@@ -322,7 +322,7 @@ class NothingElseChanged(unittest.TestCase):
         src = inspect.getsource(w._provider_chain)
         self.assertIn("AI_PROVIDER_ORDER", src)
         self.assertIn("AI_PROVIDER_PRIMARY", src)
-        self.assertEqual(set(w._PROVIDERS), {"deepseek", "openai", "gemini"})
+        self.assertEqual(set(w._PROVIDERS), {"deepseek", "gemini"})   # OpenAI removed, 2026-10-01
 
     def test_11_model_selection_is_unchanged(self):
         # V4.1-Flash, named explicitly (2026-09-23). deepseek-v4-pro was a
