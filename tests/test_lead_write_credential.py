@@ -225,32 +225,28 @@ class TheSecretIsNeverExposed(unittest.TestCase):
 # 4 · the shared helper and every other caller are untouched
 # ══════════════════════════════════════════════════════════════════════════
 
-class SharedHelperUnchanged(unittest.TestCase):
+class SharedHelperIsServerSide(unittest.TestCase):
+    """REVERSED by Phase 1A (2026-10-01, owner-approved credential separation):
+    the shared helper was deliberately left on the public anon key; it is now
+    the service-role server credential, so no Brain call depends on a public
+    RLS policy. See tests/test_credential_separation.py."""
 
-    def test_supa_headers_still_returns_the_anon_key(self):
+    def test_supa_headers_returns_the_server_key(self):
         with mock.patch.object(w, "SUPABASE_KEY", ANON), \
              mock.patch.object(w, "SUPABASE_SERVICE_ROLE_KEY", SERVICE_ROLE):
             h = w._supa_headers()
-        self.assertEqual(h["apikey"], ANON)
-        self.assertEqual(h["Authorization"], f"Bearer {ANON}")
-        self.assertNotIn(SERVICE_ROLE, str(h))
+        self.assertEqual(h["apikey"], SERVICE_ROLE)
+        self.assertEqual(h["Authorization"], f"Bearer {SERVICE_ROLE}")
+        self.assertNotIn(ANON, str(h))
 
     def test_supa_headers_default_prefer_is_unchanged(self):
-        with mock.patch.object(w, "SUPABASE_KEY", ANON):
+        with mock.patch.object(w, "SUPABASE_SERVICE_ROLE_KEY", SERVICE_ROLE):
             self.assertEqual(w._supa_headers()["Prefer"], "return=minimal")
             self.assertNotIn("Prefer", w._supa_headers(""))
             self.assertEqual(w._supa_headers("count=exact")["Prefer"],
                              "count=exact")
 
-    def test_the_shared_helper_source_never_mentions_service_role(self):
-        """STRUCTURAL: proves the 19 shared call sites were not escalated."""
-        import inspect
-        src = inspect.getsource(w._supa_headers)
-        self.assertNotIn("SERVICE_ROLE", src)
-
-    def test_other_callers_still_send_the_anon_key(self):
-        """save_messages writes whatsapp_messages with anon and SUCCEEDS in
-        production — it must keep that credential."""
+    def test_save_messages_uses_the_server_key(self):
         posts = []
         with mock.patch.object(w.requests, "post",
                                lambda url, headers=None, json=None, timeout=None:
@@ -260,8 +256,8 @@ class SharedHelperUnchanged(unittest.TestCase):
              redirect_stdout(io.StringIO()):
             w.save_messages([(PHONE, "user", "hi")])
         self.assertIn("whatsapp_messages", posts[0]["url"])
-        self.assertEqual(posts[0]["headers"]["apikey"], ANON)
-        self.assertNotIn(SERVICE_ROLE, str(posts[0]["headers"]))
+        self.assertEqual(posts[0]["headers"]["apikey"], SERVICE_ROLE)
+        self.assertNotIn(ANON, str(posts[0]["headers"]))
 
     def test_only_the_leads_write_uses_the_new_builder(self):
         """One call site, and it is the write. A second would mean the

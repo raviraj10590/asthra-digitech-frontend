@@ -33,7 +33,10 @@ VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN",    "asthra_secret_2024")
 WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN",  "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://kpzprllzgqlqkqgcgrbp.supabase.co")
-SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in Vercel env vars
+# Server-only credential (Phase 1A, 2026-10-01): the daily report reads the
+# Brain's private tables, which must not depend on public policies. The
+# project's public anon key is NOT used here.
+SUPABASE_SERVER_KEY    = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 # OWNER_PHONE may be a comma-separated list (same env var the webhook uses).
 OWNER_PHONES    = [p.strip() for p in
     os.environ.get("OWNER_PHONE", "918861369951").split(",") if p.strip()]
@@ -42,7 +45,7 @@ OWNER_PHONES    = [p.strip() for p in
 def _supa_get(table: str, params: dict) -> list:
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/{table}",
-        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+        headers={"apikey": SUPABASE_SERVER_KEY, "Authorization": f"Bearer {SUPABASE_SERVER_KEY}"},
         params=params,
         timeout=10,
     )

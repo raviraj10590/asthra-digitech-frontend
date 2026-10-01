@@ -38,7 +38,9 @@ WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL",
                                  "https://kpzprllzgqlqkqgcgrbp.supabase.co")
-SUPABASE_KEY    = os.environ.get("SUPABASE_KEY", "")
+# Server-only credential (Phase 1A, 2026-10-01): reads and writes the Brain's
+# private whatsapp_messages. The project's public anon key is NOT used here.
+SUPABASE_SERVER_KEY    = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 # A sweep must never run away. Even a broken query cannot cost more than this
 # many messages, which is the difference between a bug and an incident.
@@ -47,8 +49,8 @@ CANDIDATE_LOOKBACK_HOURS = 24
 
 
 def _headers():
-    return {"apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
+    return {"apikey": SUPABASE_SERVER_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVER_KEY}",
             "Content-Type": "application/json"}
 
 

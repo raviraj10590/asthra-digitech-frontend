@@ -21,7 +21,9 @@ import requests
 
 VERIFY_TOKEN   = os.environ.get("VERIFY_TOKEN", "asthra_secret_2024")
 SUPABASE_URL   = os.environ.get("SUPABASE_URL", "https://kpzprllzgqlqkqgcgrbp.supabase.co")
-SUPABASE_KEY   = os.environ.get("SUPABASE_KEY", "")
+# Server-only credential (Phase 1A, 2026-10-01): reads the Brain's private
+# whatsapp_messages. The project's public anon key is NOT used here.
+SUPABASE_SERVER_KEY   = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 EVAL_TABLE     = os.environ.get("EVAL_TABLE", "").strip()          # e.g. "conversation_evals"
 LOOKBACK_HOURS = int(os.environ.get("EVAL_LOOKBACK_HOURS", "24"))
 COMPLETED_AFTER_MIN = int(os.environ.get("EVAL_COMPLETED_AFTER_MIN", "60"))
@@ -121,7 +123,7 @@ def format_report(ev: dict) -> str:
 
 # ── I/O (network) ─────────────────────────────────────────────────────────────
 def _headers(prefer="return=minimal"):
-    h = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+    h = {"apikey": SUPABASE_SERVER_KEY, "Authorization": f"Bearer {SUPABASE_SERVER_KEY}",
          "Content-Type": "application/json"}
     if prefer:
         h["Prefer"] = prefer

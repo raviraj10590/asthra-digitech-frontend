@@ -336,11 +336,12 @@ class UnrelatedPathsUnchanged(unittest.TestCase):
         for banned in ("depth", "extract_lead_info", "stored_messages"):
             self.assertNotIn(banned, src)
 
-    def test_the_shared_supabase_helper_is_still_anon(self):
+    def test_the_shared_supabase_helper_is_the_server_key(self):
+        """Phase 1A (2026-10-01): service role, never the public key."""
         import inspect
         src = inspect.getsource(w._supa_headers)
-        self.assertIn("SUPABASE_KEY", src)
-        self.assertNotIn("SERVICE_ROLE", src)
+        self.assertIn("SUPABASE_SERVICE_ROLE_KEY", src)
+        self.assertNotIn('"apikey": SUPABASE_KEY', src)
 
 
 if __name__ == "__main__":

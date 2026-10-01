@@ -80,7 +80,13 @@ VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN",    "asthra_secret_2024")
 WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN",  "")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL",    "https://kpzprllzgqlqkqgcgrbp.supabase.co")
-SUPABASE_KEY    = os.environ.get("SUPABASE_KEY",    "")  # anon key — set in Vercel env vars
+# PUBLIC (anon/publishable) key of this project. It is shared with AI Kannada's
+# browser apps, so it is PUBLIC by design. Brain server code does NOT use it for
+# any table any more (Phase 1A, 2026-10-01): every Brain database call goes
+# through _supa_headers / the service-role builders below. Kept only so the
+# name has one documented meaning; SUPABASE_ANON_KEY is the preferred name.
+SUPABASE_KEY    = (os.environ.get("SUPABASE_ANON_KEY")
+                   or os.environ.get("SUPABASE_KEY", ""))
 # SERVER-ONLY. Used by exactly one caller: the `leads` WRITE path. See
 # _leads_write_headers for why that write cannot use the anon key above.
 # .strip() because a trailing newline in an env var silently corrupts the
@@ -523,9 +529,27 @@ def is_election_message(text: str) -> bool:
 # SUPABASE HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 def _supa_headers(prefer="return=minimal"):
+    """Headers for EVERY Brain server-side database call — SERVICE ROLE.
+
+    PHASE 1A, CREDENTIAL SEPARATION (2026-10-01). This used the project's
+    public anon key, which AI Kannada ships in its browser JavaScript, and
+    the Brain's private tables (whatsapp_messages, bot_roles) were readable
+    and writable with it through `true` policies. The Brain is server-only
+    code, so it now authenticates as the server: these calls stop depending
+    on any public policy, and Phase 1B can remove those policies without
+    breaking a single turn.
+
+    NO SILENT FALLBACK, as for _leads_write_headers / _shadow_write_headers
+    and bic/config.py: a missing service-role key is a named misconfiguration
+    (BRAIN_DB_CREDENTIAL_MISSING), never a quiet downgrade to the public key.
+    The returned dict CONTAINS the secret — never log it.
+    """
+    key = (SUPABASE_SERVICE_ROLE_KEY or "").strip()
+    if not key:
+        print("BRAIN_DB_CREDENTIAL_MISSING — SUPABASE_SERVICE_ROLE_KEY is not set")
     h = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
     if prefer:
@@ -535,11 +559,10 @@ def _supa_headers(prefer="return=minimal"):
 def _leads_write_headers(prefer="return=minimal"):
     """Service-role headers for the `leads` WRITE path — and nothing else.
 
-    WHY THIS EXISTS RATHER THAN A CHANGE TO _supa_headers.
-    _supa_headers has 19 call sites. Switching it to the service-role key
-    would silently escalate every one of them — including reads that are
-    correctly anon today — turning a one-table fix into a blanket RLS bypass.
-    A separate builder keeps the escalation to the single write that needs it.
+    HISTORY. Built when _supa_headers still used the anon key, to escalate
+    only this one write. Since Phase 1A (2026-10-01) _supa_headers is also
+    service-role; this builder is kept for its explicit None-when-absent
+    contract, which upsert_lead relies on.
 
     WHY THE ANON KEY CANNOT DO THIS WRITE. Proven in production: the anon key
     can SELECT `leads` (HTTP 200) but its INSERT is refused with HTTP 401.
