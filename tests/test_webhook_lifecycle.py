@@ -463,6 +463,14 @@ class HistoricalRows(Base):
             if name.startswith("20260903000021") and not any(
                     d in low for d in destructive):
                 continue
+            # Phase 1B (20261001000003) only REVOKES privileges on it: every
+            # statement naming the table must be a REVOKE — no row, column or
+            # constraint is touched. Any other statement still fails.
+            if name.startswith("20261001000003"):
+                stmts = [s.strip().lower() for s in sql.split(";")
+                         if "bic_webhook_events" in s]
+                if stmts and all(s.startswith("revoke ") for s in stmts):
+                    continue
             offenders.append(name)
         self.assertEqual(offenders, [],
                          f"a later migration touches bic_webhook_events: {offenders}")
