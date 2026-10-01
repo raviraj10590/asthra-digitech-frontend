@@ -25,6 +25,13 @@
     {
       "src": "api/nudge.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/recovery.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxDuration": 300
+      }
     }
   ],
   "routes": [
@@ -51,6 +58,10 @@
     {
       "src": "/api/nudge",
       "dest": "api/nudge.py"
+    },
+    {
+      "src": "/api/recovery",
+      "dest": "api/recovery.py"
     }
   ],
   "crons": [

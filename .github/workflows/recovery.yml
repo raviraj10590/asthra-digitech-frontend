@@ -1,0 +1,50 @@
+name: Brain recovery sweep
+
+# Phase 2C. Runs ONE Phase 2B recovery sweep (api/redrive.py) every ~5 min.
+# Vercel Hobby cron is daily-only, so GitHub schedules it; GitHub cron is not
+# exact and runs land every 5-15 min, which the worker's thresholds tolerate.
+#
+# Authentication: Authorization: Bearer <CRON_SECRET>, the same value stored
+# in Vercel's production environment. Never echoed; GitHub also masks it.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# One sweep at a time. Correctness does not depend on this — every event is
+# claimed with a database compare-and-swap — it only avoids pointless overlap.
+concurrency:
+  group: brain-recovery
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Run one recovery sweep
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          RECOVERY_URL: https://asthra-digitech-frontend.vercel.app/api/recovery
+        run: |
+          set -euo pipefail
+          if [ -z "${CRON_SECRET:-}" ]; then
+            echo "::error::CRON_SECRET is not configured in GitHub Actions secrets"
+            exit 1
+          fi
+          body="$(mktemp)"
+          # The function may run up to 300 s; curl gives up a little after.
+          code="$(curl --silent --show-error --output "$body" --write-out '%{http_code}' \
+            --max-time 310 --request POST \
+            --header "Authorization: Bearer ${CRON_SECRET}" \
+            "$RECOVERY_URL" || true)"
+          echo "recovery sweep: HTTP ${code}"
+          head -c 500 "$body" || true
+          echo
+          case "$code" in
+            2??) exit 0 ;;
+            *) echo "::error::recovery sweep failed (HTTP ${code})"; exit 1 ;;
+          esac

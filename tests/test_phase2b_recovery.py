@@ -728,13 +728,19 @@ class L_AcceptedUntouched(World):
 # ── N · no endpoint ─────────────────────────────────────────────────────────
 
 class N_NoEndpoint(unittest.TestCase):
-    """No secure cron mechanism exists, so no route reaches the worker."""
+    """The worker itself is never routed. Since Phase 2C the ONLY way in is
+    POST /api/recovery, which requires Authorization: Bearer <CRON_SECRET>
+    (tests/test_phase2c_recovery_scheduler.py)."""
 
-    def test_no_route_or_build_reaches_the_worker(self):
+    def test_the_only_route_to_the_worker_is_the_authenticated_endpoint(self):
         cfg = json.load(open(os.path.join(ROOT, "vercel.json")))
-        text = json.dumps(cfg)
-        self.assertNotIn("redrive", text)
-        self.assertNotIn("recover", text.lower())
+        self.assertNotIn("redrive", json.dumps(cfg))
+        recover_routes = [r for r in cfg["routes"] if "recover" in json.dumps(r).lower()]
+        self.assertEqual(recover_routes, [{"src": "/api/recovery", "dest": "api/recovery.py"}])
+        self.assertNotIn("recover", json.dumps(cfg.get("crons", [])).lower())
+        import recovery
+        with mock.patch.dict(os.environ, {"CRON_SECRET": "s" * 40}):
+            self.assertFalse(recovery.authorized(None))
 
     def test_the_worker_is_not_an_http_handler_and_webhook_does_not_import_it(self):
         self.assertFalse(hasattr(redrive, "handler"))
