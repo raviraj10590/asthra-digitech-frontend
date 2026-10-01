@@ -846,7 +846,9 @@ def _edit_distance(a: str, b: str, limit: int) -> int:
 # "krushige beku" were not read (live ...1743, 2026-09-30): the whole-word
 # table cannot see a stem with "-ge" on it. Stems at a word start, any ending.
 _LATIN_FARM_STEM_RE = re.compile(
-    r"(?<![a-z])(?:kr[ua]s{1,2}h?[iy]|krishi|kurshi|krash[iy]|raith|vyavasa|borewell)")
+    r"(?<![a-z])(?:kr[ua]s{1,2}h?[iy]|krishi|kurshi|krash[iy]|raith|vyavasa|borewell)"
+    # "Krish" alone (live ...1945) — but never Krishna, Krishnarajpet
+    r"|(?<![a-z])krish(?![a-z])")
 # "Beligalige niru hasalu" — to water the crops — is irrigation.
 _WATERING_RE = re.compile(r"(?<![a-z])(?:niru|neeru|neer|nīru)\s+(?:hasal|hayis|haays|hakal|haakal|bidal)"
                           r"|ನೀರು\s*(?:ಹಾಯಿಸ|ಹಾಸ|ಹಾಕ|ಬಿಡ)")
@@ -970,7 +972,10 @@ _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
                 # The same English words, typed in Kannada letters (2026-09-26:
                 # "ರೇಟ್" was not read as a price question, and the model then
                 # told the customer it could not say the rate).
-                "ರೇಟ್", "ರೇಟು", "ಪ್ರೈಸ್")
+                "ರೇಟ್", "ರೇಟು", "ಪ್ರೈಸ್",
+                # "ಹಣ" alone (live ...4599, 2026-10-01) got "the engineer will
+                # tell you about money" instead of the price.
+                "ಹಣ", "ದುಡ್ಡು", "duddu", "hana")
 # Already the bot's own words for this: the follow-up button is titled
 # "📋 ಕೋಟೇಶನ್" and its id is "quotation".
 _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
@@ -1172,7 +1177,10 @@ _ASK_DELIVERY_AREA = ("do you deliver", "can you deliver", "deliver to",
                       "delivery available", "do you supply", "supply to",
                       "outside karnataka", "other state", "all india",
                       "ಡೆಲಿವರಿ ಇದೆಯಾ", "ಡೆಲಿವರಿ ಮಾಡುತ್ತೀರಾ", "ಕಳಿಸುತ್ತೀರಾ",
-                      "ಸಪ್ಲೈ ಮಾಡುತ್ತೀರಾ")
+                      "ಸಪ್ಲೈ ಮಾಡುತ್ತೀರಾ",
+                      # "ಲೊಕೇಶನ್ all ಓವರ್ ಕರ್ನಾಟಕ ನ" (live ...1709, 2026-10-01)
+                      "all over karnataka", "all karnataka", "whole karnataka",
+                      "ಓವರ್ ಕರ್ನಾಟಕ", "ಎಲ್ಲಾ ಕರ್ನಾಟಕ", "ಇಡೀ ಕರ್ನಾಟಕ", "karnataka full")
 
 
 def customer_question(text: str):
@@ -1221,7 +1229,7 @@ def answer_question_kn(tag, known: dict = None) -> str:
     if tag == QUESTION_WHO:
         return ("*Bairavi Trans Solutions* — oil-immersed 3-phase "
                 "distribution transformer ತಯಾರಕರು, Kadaba, ದಕ್ಷಿಣ ಕನ್ನಡ.\n"
-                + _range_line_kn())
+                + _range_line_kn() + "\n" + value_line_kn((known or {}).get("capacity_kva")))
     if tag == QUESTION_RANGE:
         return _range_line_kn()
     if tag == QUESTION_DELIVERY_TIME:
@@ -1366,6 +1374,27 @@ _REPLY_LEADTIME_RE = re.compile(
     re.IGNORECASE)
 
 
+# Kannada typed in English letters ("Sari", "Krish", "beku"): the customer
+# is a Kannada speaker, and an English paragraph is the wrong answer
+# (live ...1945, 2026-10-01).
+_LATIN_KANNADA = ("sari", "beku", "bekku", "idi", "houdu", "haudu", "krish", "krushi",
+                  "nale", "sanje", "egale", "yestu", "eshtu", "madi", "kodi", "illa",
+                  "hana", "duddu", "helu", "gottilla", "ide", "agutte", "aagutte", "bantha")
+
+
+def _writes_latin_kannada(text) -> bool:
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    return any(w in _LATIN_KANNADA for w in words)
+
+
+# "We can't share the price here" — said right after the price list was sent
+# (live ...1709, 2026-10-01). Prices are public in this flow; a refusal is false.
+_PRICE_REFUSAL_RE = re.compile(
+    r"ಹಂಚಿಕೊಳ್ಳಲು ಸಾಧ್ಯವಿಲ್ಲ|ಹೇಳಲು ಸಾಧ್ಯವಿಲ್ಲ|ತಿಳಿಸಲು ಸಾಧ್ಯವಿಲ್ಲ|"
+    r"unable to (?:discuss|share)|can(?:no|')t (?:share|discuss)|not able to (?:share|discuss)",
+    re.I)
+
+
 def reply_violates_evidence(text: str, customer_text: str = None):
     """Why this generated reply may not be sent, or None if it may.
 
@@ -1378,6 +1407,8 @@ def reply_violates_evidence(text: str, customer_text: str = None):
         return "empty"
     if _REPLY_MONEY_RE.search(raw):
         return "a price"
+    if _PRICE_REFUSAL_RE.search(raw):
+        return "refuses to share a price"
     if _REPLY_LEADTIME_RE.search(raw):
         return "a delivery time"
     for term, reason in _REPLY_BANNED_TERMS:
@@ -1404,7 +1435,8 @@ def reply_violates_evidence(text: str, customer_text: str = None):
     # retest 2026-09-25); only a customer who wrote in Kannada script is owed
     # a Kannada answer.
     latin_letters = sum(1 for ch in raw if "a" <= ch.lower() <= "z")
-    wrote_kannada = any("\u0c80" <= ch <= "\u0cff" for ch in (customer_text or ""))
+    wrote_kannada = (any("\u0c80" <= ch <= "\u0cff" for ch in (customer_text or ""))
+                     or _writes_latin_kannada(customer_text))
     if wrote_kannada and latin_letters >= 40 and kannada_chars < latin_letters:
         return "not in Kannada"
     # A capacity we do not offer, stated as if we do.
@@ -1437,13 +1469,17 @@ def model_brief_kn(known: dict = None) -> str:
         f"ನಮ್ಮ standard range: {offered}. ಯೋಜನೆಯಲ್ಲಿ: {planned}.\n"
         f"DISCOM approval: {approved} ಆಗಿದೆ; {pending} ನಿರೀಕ್ಷೆಯಲ್ಲಿ.\n"
         "ಡೆಲಿವರಿ: ಈಗ MESCOM ವ್ಯಾಪ್ತಿ; ಕರ್ನಾಟಕದ ಉಳಿದ ಭಾಗಗಳಿಗೆ ವಿಸ್ತರಣೆ ಆಗುತ್ತಿದೆ.\n"
+        "ನಮ್ಮ ವಿಶೇಷತೆ (ಮಾಲೀಕರ ಮಾತು): premium transformer, Star rating "
+        "(25 kVA 4 Star; 63/100/250 kVA 5 Star), best-grade aluminium winding, "
+        "ಕಡಿಮೆ ನಷ್ಟ (lower losses). ನಾವು ಹೊಸ ಕಂಪನಿ — ವರ್ಷಗಳ ಅನುಭವ ಎಂದು ಹೇಳಬೇಡಿ.\n"
         "\n"
         "ನಿಯಮಗಳು — ಇವು ಕಡ್ಡಾಯ:\n"
-        "1. ಬೆಲೆ, ದರ, ಯಾವುದೇ ಹಣದ ಅಂಕಿ ಎಂದಿಗೂ ಹೇಳಬೇಡಿ.\n"
+        "1. ಬೆಲೆಯ ಅಂಕಿ ನೀವು ಬರೆಯಬೇಡಿ — ದರಪಟ್ಟಿಯನ್ನು ನಮ್ಮ ವ್ಯವಸ್ಥೆ ಕಳುಹಿಸುತ್ತದೆ. "
+        "'ದರ ಹೇಳಲು ಸಾಧ್ಯವಿಲ್ಲ' ಎಂದು ಎಂದಿಗೂ ಹೇಳಬೇಡಿ.\n"
         "2. ಡೆಲಿವರಿ ಎಷ್ಟು ದಿನ/ವಾರ/ತಿಂಗಳು ಎಂದು ಹೇಳಬೇಡಿ.\n"
         "3. ISO / BIS / BEE / certificate / warranty / guarantee ಬಗ್ಗೆ "
         "ಏನೂ ಹೇಳಬೇಡಿ.\n"
-        "4. Technical spec (loss, impedance, ಅಳತೆ, ತೂಕ, GTP) ಹೇಳಬೇಡಿ.\n"
+        "4. Technical ಅಂಕಿಗಳು (loss values, impedance, ಅಳತೆ, ತೂಕ, GTP) ಹೇಳಬೇಡಿ.\n"
         "5. ಮೇಲಿನ range ನಲ್ಲಿ ಇಲ್ಲದ kVA ಇದೆ ಎಂದು ಹೇಳಬೇಡಿ.\n"
         "6. ಗೊತ್ತಿಲ್ಲದಿದ್ದರೆ: 'ನಮ್ಮ engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ' ಎಂದು ಹೇಳಿ.\n"
         "7. ಕನ್ನಡ ಲಿಪಿಯಲ್ಲೇ ಉತ್ತರಿಸಿ (ಗ್ರಾಹಕ English ನಲ್ಲಿ ಬರೆದರೆ ಮಾತ್ರ "
@@ -2032,6 +2068,26 @@ _DECLINES = ("no thanks", "no thanx", "no thank you", "no thanku", "not interest
              "ನಮಗೆ ಬೇಡ", "ಬೇಡ ಸರ್", "beda sir")
 
 
+# "ಸರಿ ಇದೆ" (yes, that's right; live ...1709) was stored as the ADDRESS.
+# A reply made only of yes-words is a yes, however they are combined.
+_AFFIRMATION_WORDS = {"ಸರಿ", "ಇದೆ", "ಇದಿ", "ಹೌದು", "ಅದೇ", "ಸರಿಯಾಗಿದೆ", "ok", "okay",
+                      "yes", "sari", "idi", "ide", "houdu", "haudu", "howdu", "correct",
+                      "right", "same", "sir", "sar", "ಸರ್", "ji", "adhe", "ade"}
+
+
+def _all_affirmation_words(bare: str) -> bool:
+    words = (bare or "").split()
+    return len(words) >= 2 and all(w in _AFFIRMATION_WORDS for w in words)
+
+
+# Kannada written in English letters, asking "how much / which / where".
+# Stems that start no Karnataka place name; "yav-" (Yavagal) and a bare "?"
+# ("Kadur?") are deliberately absent.
+_QUESTION_WORD_RE = re.compile(
+    r"(?<![a-z])(?:yesta|yestu|eshtu|estu|yestagutt|eshtagutt|estagutt)[a-z]*(?![a-z])"
+    r"|(?<![a-z])(?:yenu|enu|hege|yake|yavaga|yavag)(?![a-z])|ಎಷ್ಟು|ಏನು|ಹೇಗೆ|ಯಾಕೆ|ಯಾವಾಗ")
+
+
 def _is_thanks(bare: str) -> bool:
     words = (bare or "").split()
     if not words:
@@ -2148,7 +2204,8 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     bare = re.sub(r"\s+", " ", re.sub(r"[^\w\s\u0900-\u097F\u0C80-\u0CFF\u200c\u200d]", " ",
                                      bare)).strip() or bare
     thanks = _is_thanks(bare)
-    plain_reply = no_words or bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or thanks
+    plain_reply = (no_words or bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or thanks
+                   or _all_affirmation_words(bare))
     dl = None
     m = _DELIVERY_STRICT_RE.search(text or "")
     if m:
@@ -2169,9 +2226,12 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # reader that answers it; only this bare-answer path is skipped, so an
     # explicit "deliver to X" above and a taluk/district address below still
     # read exactly as before.
+    # A QUESTION IS NOT AN ADDRESS: "Installation charge yestaguthe" (how
+    # much is installation?, live ...4585) was stored as the delivery place.
+    asking = (customer_question(text) is not None or bool(asked_terms(text))
+              or _mentions(low, _PRICE_ASK) or bool(_QUESTION_WORD_RE.search(low)))
     if (dl is None and AWAITING_DELIVERY in (awaiting or ())
-            and customer_question(text) != QUESTION_DELIVERY_TIME
-            and not plain_reply):
+            and not asking and not plain_reply):
         dl = _bare_delivery_answer(text)
     # AN ADDRESS THAT SAYS WHAT IT IS. On 2026-09-23 a customer wrote
     # "ಹರಿಯಬ್ಬೆ,ಹಿರಿಯೂರು ತಾಲೂಕು,ಚಿತ್ರದುರ್ಗ ಜಿಲ್ಲೆ" — village, taluk, district —
@@ -2193,14 +2253,15 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # confirmation rather than as an address.
     same = any(w in low for w in _SAME_PLACE) if not dl else False
     if (not dl and not same and AWAITING_DELIVERY in (awaiting or ())
-            and (known or {}).get("location") and bare in _AFFIRMATIONS):
+            and (known or {}).get("location")
+            and (bare in _AFFIRMATIONS or _all_affirmation_words(bare))):
         same = True
     # A bare acknowledgement or greeting says nothing a model can answer, and
     # asking one produced a paragraph re-introducing the company to someone
     # who had just typed "Ok".
     is_greeting = _is_greeting(bare)
     is_ack = (bare in _ACKNOWLEDGEMENTS or bare in _AFFIRMATIONS or is_greeting
-              or no_words or thanks)
+              or no_words or thanks or _all_affirmation_words(bare))
 
     callback = callback_request(text, awaiting)
     if callback and AWAITING_CALLBACK in (awaiting or ()) and len(low.split()) <= 2:
@@ -2353,6 +2414,17 @@ def display_name(name) -> str:
                                    (name or "").replace("\u200c", "").replace("\u200d", ""))
              if len(w) > 1][:2]
     return " ".join(w.capitalize() if w.isascii() else w for w in words)
+
+
+# WHY BAIRAVI — the owner's own words, 2026-10-01: "bairavi trans solution
+# supply premium transformer but we are new company five star best grade
+# aluminium winding lower losses". The star rating per size is the price
+# list's (25 kVA is 4 Star). No years in business are claimed: new company.
+def value_line_kn(kva=None) -> str:
+    stars = PRICE_LIST.get(kva, (None, None))[1] if kva in PRICE_LIST else None
+    rating = f"*{stars} Star*" if stars else "*Star-rated*"
+    return (f"⭐ {rating} premium transformer — best-grade aluminium winding, "
+            "ಕಡಿಮೆ ನಷ್ಟ (lower losses), ವಿದ್ಯುತ್ ಉಳಿತಾಯ.")
 
 
 def price_short_kn(kva=None) -> str:
@@ -3078,14 +3150,16 @@ def compose_followup_reply(followup: dict, known: dict = None,
                      "ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏")
     if followup.get("asked_discount"):
         # Never a discount and never the same price again: a person calls.
-        lines.append("\nದರದ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ ನೇರವಾಗಿ ಕರೆ ಮಾಡಿ "
+        # The value answer first (owner's selling points), then a person.
+        lines.append("\n" + value_line_kn(merged_state(known, followup).get("capacity_kva"))
+                     + "\nದರದ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ ನೇರವಾಗಿ ಕರೆ ಮಾಡಿ "
                      "ಮಾತನಾಡುತ್ತಾರೆ.")
     elif followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
         # never a number — the evidence for one does not exist.
         # THE PRICE THEY ASKED FOR, from the owner's list (2026-09-24).
         _kva = merged_state(known, followup).get("capacity_kva")
-        lines.append("\n" + price_short_kn(_kva))
+        lines.append("\n" + price_short_kn(_kva) + "\n" + value_line_kn(_kva))
         if _intent == QUOTATION_REQUEST:
             # Says a REQUEST was recorded and a human will act. Never that a
             # quotation exists — no quotation has been produced, and claiming
