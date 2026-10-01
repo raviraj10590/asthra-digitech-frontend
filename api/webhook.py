@@ -132,6 +132,11 @@ AI_PROVIDER_PRIMARY = os.environ.get("AI_PROVIDER_PRIMARY", "openai").strip().lo
 # var means adding, reordering or dropping a provider is a config change, never
 # a deploy.
 AI_PROVIDER_ORDER = os.environ.get("AI_PROVIDER_ORDER", "").strip().lower()
+AI_PROVIDERS_ALLOWED = {p.strip() for p in
+                        os.environ.get("AI_PROVIDERS_ALLOWED", "deepseek").lower().split(",") if p.strip()}
+# DeepSeek V4.1-Flash reasons before it answers; a small budget is spent on
+# thinking and the answer is cut off. Every text job gets room for both.
+DEEPSEEK_JOB_MAX_TOKENS = int(os.environ.get("DEEPSEEK_JOB_MAX_TOKENS", "3000"))
 # Chat completion model for both pipelines (not lead extraction/Whisper, which
 # stay on mini — see _call_openai). Defaults to the flagship covered by the
 # complimentary 250k-tokens/day data-sharing tier; override here if that
@@ -1590,9 +1595,8 @@ def _usage_of(resp):
 
 
 def extract_lead_info(history: list) -> dict:
-    """Extract structured lead info from conversation history.
-    Tries OpenAI, then falls back to Gemini so lead capture survives an
-    OpenAI outage or quota exhaustion."""
+    """Extract structured lead info from conversation history, with DeepSeek
+    (owner, 2026-10-01: DeepSeek only — it was gpt-4o-mini, then Gemini)."""
     started = time.time()
     if len(history) < 3:
         _record_lead_extraction(EXTRACTION_SKIPPED, started=started)
@@ -1600,61 +1604,26 @@ def extract_lead_info(history: list) -> dict:
     conv = ""
     try:
         conv = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in history[-10:])
-        resp = get_openai().chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
+        raw = _call_deepseek([
                 {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
                 {"role": "user", "content": f"Current date: {datetime.now(IST).strftime('%Y-%m-%d')}\n\n{conv}"},
-            ],
-            max_tokens=380,
-            temperature=0,
-        )
-        raw = resp.choices[0].message.content.strip()
+            ], max_tokens=DEEPSEEK_JOB_MAX_TOKENS, temperature=0)
+        if not raw:
+            raise RuntimeError("deepseek returned nothing")
         match = re.search(r'\{.*\}', raw, re.DOTALL)
-        # Same expression as before, bound to a name so the outcome can be
-        # recorded before returning it. `if match else {}` still returns {}
-        # WITHOUT trying Gemini — that control flow is unchanged.
+        # Bound to a name so the outcome can be recorded before returning it.
         result = json.loads(match.group()) if match else {}
-        tin, tout = _usage_of(resp)
         _record_lead_extraction(
             EXTRACTION_SUCCESS if result else EXTRACTION_EMPTY,
-            provider="openai", model="gpt-4o-mini", fields=result,
-            started=started, tokens_in=tin, tokens_out=tout)
+            provider="deepseek", model=DEEPSEEK_MODEL, fields=result,
+            started=started)
         return result
     except Exception as e:
-        _record_lead_extraction(_extraction_failure_kind(e), provider="openai",
-                                model="gpt-4o-mini", started=started,
+        _record_lead_extraction(_extraction_failure_kind(e), provider="deepseek",
+                                model=DEEPSEEK_MODEL, started=started,
                                 error=type(e).__name__)
-        print(f"extract_lead_info error (openai): {e}")
-
-    # Fallback to Gemini so lead capture, scoring and alerts keep working even
-    # when OpenAI is down — a silent loss of leads is worse than a slower path.
-    try:
-        gem_msgs = [
-            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-            {"role": "user", "content": conv},
-        ]
-        raw = generate_reply_gemini(gem_msgs)
-        match = re.search(r'\{.*\}', raw or "", re.DOTALL)
-        if match:
-            result = json.loads(match.group())
-            _record_lead_extraction(
-                EXTRACTION_SUCCESS if result else EXTRACTION_EMPTY,
-                provider="gemini", model="gemini", fields=result,
-                started=started)
-            print("↪️ lead extraction via Gemini fallback")
-            return result
-        # Fell through: Gemini answered but carried no JSON object. Recorded
-        # as EMPTY rather than a failure — the provider worked, the
-        # conversation simply yielded nothing extractable.
-        _record_lead_extraction(EXTRACTION_EMPTY, provider="gemini",
-                                model="gemini", started=started)
-    except Exception as e:
-        _record_lead_extraction(_extraction_failure_kind(e), provider="gemini",
-                                model="gemini", started=started,
-                                error=type(e).__name__)
-        print(f"extract_lead_info error (gemini): {e}")
-    return {}
+        print(f"extract_lead_info error (deepseek): {e}")
+        return {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2283,7 +2252,7 @@ def _call_openai(messages: list, max_tokens: int = None) -> str:
             print(f"openai error: {e}")
         return ""
 
-def _call_deepseek(messages: list, max_tokens: int = None) -> str:
+def _call_deepseek(messages: list, max_tokens: int = None, temperature: float = 0.75) -> str:
     """DeepSeek via the OpenAI-compatible endpoint. Same '' -on-failure contract
     as the other providers so callers treat them identically."""
     if not DEEPSEEK_API_KEY:
@@ -2295,7 +2264,7 @@ def _call_deepseek(messages: list, max_tokens: int = None) -> str:
         budget = max_tokens or DEEPSEEK_MAX_TOKENS
         resp = client.chat.completions.create(
             model=DEEPSEEK_MODEL, messages=messages,
-            max_tokens=budget, temperature=0.75,
+            max_tokens=budget, temperature=temperature,
             timeout=_bounded(DEEPSEEK_TIMEOUT_SECONDS),
         )
         if getattr(resp.choices[0], "finish_reason", None) == "length":
@@ -2349,7 +2318,11 @@ def _provider_chain() -> list:
     for n in _PROVIDERS:
         if n not in names:
             names.append(n)
-    return [(n, _PROVIDERS[n]) for n in names]
+    # OWNER, 2026-10-01: "select everything to deep seek only". OpenAI and
+    # Gemini are no longer fallbacks for text; AI_PROVIDERS_ALLOWED (env,
+    # comma-separated) can widen it again without a code change.
+    allowed = [n for n in names if n in AI_PROVIDERS_ALLOWED] or ["deepseek"]
+    return [(n, _PROVIDERS[n]) for n in allowed]
 
 # WAS THE LAST REPLY CUT OFF? Set by each provider when it stopped at the
 # token ceiling, reset at the start of every _generate_ai_reply. The providers
@@ -3771,8 +3744,8 @@ def _business_narrator(packet: dict, question: str):
     which DECIDE then treats exactly as "no proposal available".
     """
     try:
-        return _call_openai(_business_consult_brief(packet, question),
-                            max_tokens=220)
+        return _call_deepseek(_business_consult_brief(packet, question),
+                              max_tokens=DEEPSEEK_JOB_MAX_TOKENS) or None
     except Exception as e:
         print(f"business_status consult failed: {type(e).__name__}")
         return None
@@ -4054,7 +4027,8 @@ def _reasoning_brief(result: dict, question: str) -> list:
 def _reasoning_narrator(result: dict, question: str):
     """Default CONSULT provider — packet-only, injectable for tests."""
     try:
-        return _call_openai(_reasoning_brief(result, question), max_tokens=320)
+        return _call_deepseek(_reasoning_brief(result, question),
+                              max_tokens=DEEPSEEK_JOB_MAX_TOKENS) or None
     except Exception as e:
         print(f"business_reasoning consult failed: {type(e).__name__}")
         return None

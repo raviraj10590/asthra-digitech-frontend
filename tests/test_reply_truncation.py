@@ -221,7 +221,7 @@ class UnrelatedBehaviourUnchanged(unittest.TestCase):
 
     def test_extraction_still_asks_for_its_own_budget(self):
         import inspect
-        self.assertIn("max_tokens=380", inspect.getsource(w.extract_lead_info))
+        self.assertIn("max_tokens=DEEPSEEK_JOB_MAX_TOKENS", inspect.getsource(w.extract_lead_info))  # DeepSeek only, 2026-10-01
 
     def test_the_extraction_guard_is_unchanged(self):
         import inspect

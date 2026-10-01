@@ -154,8 +154,14 @@ class TestPureHelpers(unittest.TestCase):
         self.assertEqual(w._parse_json_block("not json at all"), {})
         self.assertEqual(w._parse_json_block(""), {})
 
-    def test_provider_chain_contains_all_providers(self):
-        names = [n for n, _ in w._provider_chain()]
+    def test_provider_chain_is_deepseek_only_by_default(self):
+        """Owner, 2026-10-01: "select everything to deep seek only"."""
+        self.assertEqual([n for n, _ in w._provider_chain()], ["deepseek"])
+
+    def test_provider_chain_contains_all_providers_when_allowed(self):
+        from unittest import mock
+        with mock.patch.object(w, "AI_PROVIDERS_ALLOWED", {"deepseek", "gemini", "openai"}):
+            names = [n for n, _ in w._provider_chain()]
         self.assertEqual(sorted(names), ["deepseek", "gemini", "openai"])
 
     def test_duplicate_webhook_detection(self):

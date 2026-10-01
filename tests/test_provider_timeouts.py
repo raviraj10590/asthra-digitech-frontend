@@ -186,6 +186,7 @@ class TimeoutFallsBack(unittest.TestCase):
             return _GeminiResp({"candidates": [{"finishReason": "STOP",
                                 "content": {"parts": [{"text": "REPLY"}]}}]})
         with ExitStack() as st:
+            st.enter_context(mock.patch.object(w, "AI_PROVIDERS_ALLOWED", {"deepseek", "gemini", "openai"}))
             self._fake_sdk(st)
             st.enter_context(mock.patch.object(w, "DEEPSEEK_API_KEY", "k"))
             st.enter_context(mock.patch.object(w, "GEMINI_API_KEY", "k"))
@@ -208,6 +209,7 @@ class TimeoutFallsBack(unittest.TestCase):
             return _GeminiResp({"candidates": [{"finishReason": "STOP",
                                 "content": {"parts": [{"text": "REPLY"}]}}]})
         with ExitStack() as st:
+            st.enter_context(mock.patch.object(w, "AI_PROVIDERS_ALLOWED", {"deepseek", "gemini", "openai"}))
             self._fake_sdk(st)
             st.enter_context(mock.patch.object(w, "DEEPSEEK_API_KEY", "k"))
             st.enter_context(mock.patch.object(w, "GEMINI_API_KEY", "k"))
@@ -337,7 +339,7 @@ class NothingElseChanged(unittest.TestCase):
         self.assertEqual(w.OPENAI_MAX_TOKENS, 900)
         self.assertEqual(w.GEMINI_MAX_TOKENS, 900)
         import inspect
-        self.assertIn("max_tokens=380",
+        self.assertIn("max_tokens=DEEPSEEK_JOB_MAX_TOKENS",       # DeepSeek only, 2026-10-01
                       inspect.getsource(w.extract_lead_info))
 
     def test_13_the_extraction_parser_is_unchanged(self):
@@ -345,7 +347,8 @@ class NothingElseChanged(unittest.TestCase):
         src = inspect.getsource(w.extract_lead_info)
         self.assertIn("re.search(r'\\{.*\\}'", src)
         self.assertIn("json.loads", src)
-        self.assertIn("generate_reply_gemini", src)
+        # DeepSeek only since 2026-10-01: no Gemini fallback in extraction.
+        self.assertNotIn("generate_reply_gemini", src)
 
     def test_14_the_extraction_cadence_is_unchanged(self):
         import inspect

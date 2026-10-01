@@ -538,7 +538,7 @@ class ExistingBehaviourUnchanged(unittest.TestCase):
         self.assertEqual(w.GEMINI_MAX_TOKENS, 900)
         self.assertEqual(w.DEEPSEEK_TIMEOUT_SECONDS, 35)
         import inspect
-        self.assertIn("max_tokens=380", inspect.getsource(w.extract_lead_info))
+        self.assertIn("max_tokens=DEEPSEEK_JOB_MAX_TOKENS", inspect.getsource(w.extract_lead_info))  # DeepSeek only, 2026-10-01
         self.assertIn('_leads_write_headers("resolution=merge-duplicates")',
                       inspect.getsource(w.upsert_lead))
 

@@ -23,7 +23,13 @@ adding a parameter to carry one would change the call contract, so the
 event deliberately has no sender marker and correlates to the adjacent
 lead_upsert row by timestamp instead.
 
-Offline: fake providers only. No network, no OpenAI, no Gemini.
+Offline: fake providers only. No network.
+
+2026-10-01 — DEEPSEEK ONLY (owner: "select everything to deep seek only").
+The extractor was gpt-4o-mini with a Gemini fallback; it is now one
+DeepSeek call with no fallback. _call_deepseek returns "" on any failure
+(it never raises) and reports no token usage, so tokens are recorded as
+null — inventing a number would be worse.
 """
 
 import io
@@ -70,9 +76,11 @@ class _Resp:
             self.usage = _Usage(1234, 56)
 
 
-def run(openai_content=None, openai_exc=None,
-        gemini_content=None, gemini_exc=None,
-        history=None, audit_raises=None, usage=True):
+SEEN = {}
+
+
+def run(deepseek_content=None, deepseek_fails=False,
+        history=None, audit_raises=None):
     """Drive the REAL extract_lead_info. Returns (result, audits, stdout)."""
     audits = []
 
@@ -81,23 +89,17 @@ def run(openai_content=None, openai_exc=None,
         if audit_raises is not None:
             raise audit_raises
 
-    class _Client:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(**kw):
-                    if openai_exc is not None:
-                        raise openai_exc
-                    return _Resp(openai_content, usage=usage)
+    def fake_deepseek(messages, max_tokens=None, temperature=0.75):
+        SEEN.update(messages=messages, max_tokens=max_tokens, temperature=temperature)
+        return "" if deepseek_fails else deepseek_content
 
-    def fake_gemini(msgs):
-        if gemini_exc is not None:
-            raise gemini_exc
-        return gemini_content
+    def no_other_provider(*a, **k):
+        raise AssertionError("DeepSeek only: no other provider may be called")
 
     buf = io.StringIO()
-    with mock.patch.object(w, "get_openai", lambda: _Client), \
-         mock.patch.object(w, "generate_reply_gemini", fake_gemini), \
+    with mock.patch.object(w, "_call_deepseek", fake_deepseek), \
+         mock.patch.object(w, "get_openai", no_other_provider), \
+         mock.patch.object(w, "generate_reply_gemini", no_other_provider), \
          mock.patch.object(w, "BIC_AVAILABLE", True), \
          mock.patch.object(w.bic_config, "is_configured", lambda: True), \
          mock.patch.object(w.bic_db, "insert", fake_db_insert), \
@@ -117,7 +119,7 @@ class OutcomesAreRecorded(unittest.TestCase):
         return rows[0]
 
     def test_attempt_and_success_are_recorded(self):
-        result, rows, _ = run(openai_content=json.dumps(LEAD))
+        result, rows, _ = run(deepseek_content=json.dumps(LEAD))
         row = self.only(rows)
         self.assertEqual(result, LEAD)
         self.assertEqual(row["tool"], w.LEAD_EXTRACTION_EVENT)
@@ -127,7 +129,7 @@ class OutcomesAreRecorded(unittest.TestCase):
     def test_empty_result_is_recorded_as_empty_not_success(self):
         """"The model answered and found nothing" is the single most likely
         production state, and it must not read as a failure or a success."""
-        result, rows, _ = run(openai_content="{}")
+        result, rows, _ = run(deepseek_content="{}")
         row = self.only(rows)
         self.assertEqual(result, {})
         self.assertEqual(row["args_redacted"]["outcome"], w.EXTRACTION_EMPTY)
@@ -136,25 +138,24 @@ class OutcomesAreRecorded(unittest.TestCase):
     def test_no_json_object_at_all_is_empty(self):
         """No `{...}` match returns {} WITHOUT trying Gemini — existing
         control flow, pinned so instrumentation cannot have altered it."""
-        result, rows, _ = run(openai_content="sorry, nothing here")
+        result, rows, _ = run(deepseek_content="sorry, nothing here")
         row = self.only(rows)
         self.assertEqual(result, {})
         self.assertEqual(row["args_redacted"]["outcome"], w.EXTRACTION_EMPTY)
-        self.assertEqual(row["args_redacted"]["provider"], "openai")
+        self.assertEqual(row["args_redacted"]["provider"], "deepseek")
 
     def test_parse_failure_is_distinct_from_provider_failure(self):
         """Malformed JSON means the provider ANSWERED and we could not read
         it — a different remedy from the call failing."""
         # Must MATCH the `\{.*\}` regex yet fail json.loads — an unclosed
         # brace finds no match at all and is correctly reported EMPTY.
-        _, rows, _ = run(openai_content='{"name": broken}', gemini_content=None)
+        _, rows, _ = run(deepseek_content='{"name": broken}')
         self.assertEqual(rows[0]["args_redacted"]["outcome"],
                          w.EXTRACTION_PARSE_FAILED)
         self.assertIn("Error", rows[0]["error"] or "")
 
     def test_provider_failure_is_recorded(self):
-        _, rows, _ = run(openai_exc=RuntimeError("quota exhausted"),
-                         gemini_content=None)
+        _, rows, _ = run(deepseek_fails=True)
         self.assertEqual(rows[0]["args_redacted"]["outcome"],
                          w.EXTRACTION_PROVIDER_FAILED)
         self.assertEqual(rows[0]["error"], "RuntimeError")
@@ -167,87 +168,49 @@ class OutcomesAreRecorded(unittest.TestCase):
         self.assertIsNone(row["args_redacted"]["provider"])
 
     def test_field_names_and_count_are_recorded(self):
-        _, rows, _ = run(openai_content=json.dumps(LEAD))
+        _, rows, _ = run(deepseek_content=json.dumps(LEAD))
         a = rows[0]["args_redacted"]
         self.assertEqual(a["fields"], ["budget", "city", "company", "name"])
         self.assertEqual(a["field_count"], 4)
 
     def test_latency_and_model_are_recorded(self):
-        _, rows, _ = run(openai_content=json.dumps(LEAD))
-        self.assertEqual(rows[0]["args_redacted"]["model"], "gpt-4o-mini")
-        self.assertEqual(rows[0]["args_redacted"]["provider"], "openai")
+        _, rows, _ = run(deepseek_content=json.dumps(LEAD))
+        self.assertEqual(rows[0]["args_redacted"]["model"], w.DEEPSEEK_MODEL)
+        self.assertEqual(rows[0]["args_redacted"]["provider"], "deepseek")
         self.assertIsInstance(rows[0]["latency_ms"], int)
         self.assertGreaterEqual(rows[0]["latency_ms"], 0)
 
 
 class TokenTelemetry(unittest.TestCase):
-    """tokens_in/tokens_out have existed since migration 20260802000003 and
-    nothing has ever written them. No migration is required."""
+    """_call_deepseek returns a string, so no usage exists: null, never a guess."""
 
-    def test_openai_token_usage_is_recorded(self):
-        _, rows, _ = run(openai_content=json.dumps(LEAD))
-        self.assertEqual(rows[0]["tokens_in"], 1234)
-        self.assertEqual(rows[0]["tokens_out"], 56)
-
-    def test_a_response_without_usage_does_not_break_extraction(self):
-        """A stub client or older SDK may carry no `usage`. Observability
-        must never be the thing that breaks the path it observes."""
-        result, rows, _ = run(openai_content=json.dumps(LEAD), usage=False)
+    def test_deepseek_records_no_token_usage(self):
+        result, rows, _ = run(deepseek_content=json.dumps(LEAD))
         self.assertEqual(result, LEAD)
         self.assertIsNone(rows[0]["tokens_in"])
         self.assertIsNone(rows[0]["tokens_out"])
-
-    def test_gemini_records_no_token_usage(self):
-        """generate_reply_gemini returns a bare string — no usage exists, and
-        inventing a number would be worse than a null."""
-        _, rows, _ = run(openai_exc=RuntimeError("down"),
-                         gemini_content=json.dumps(LEAD))
-        gem = [r for r in rows if r["args_redacted"]["provider"] == "gemini"][0]
-        self.assertIsNone(gem["tokens_in"])
-        self.assertIsNone(gem["tokens_out"])
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # 2 · the fallback chain, unchanged
 # ══════════════════════════════════════════════════════════════════════════
 
-class FallbackBehaviourUnchanged(unittest.TestCase):
+class DeepSeekOnly(unittest.TestCase):
+    """One provider, no fallback (owner, 2026-10-01)."""
 
-    def test_openai_failure_falls_back_to_gemini_and_both_are_recorded(self):
-        result, rows, out = run(openai_exc=RuntimeError("down"),
-                                gemini_content=json.dumps(LEAD))
+    def test_a_failure_returns_empty_with_one_row(self):
+        result, rows, out = run(deepseek_fails=True)
+        self.assertEqual(result, {})
+        self.assertEqual([r["args_redacted"]["provider"] for r in rows], ["deepseek"])
+        self.assertIn("extract_lead_info error (deepseek)", out)
+
+    def test_a_success_is_one_row(self):
+        _, rows, _ = run(deepseek_content=json.dumps(LEAD))
+        self.assertEqual([r["args_redacted"]["provider"] for r in rows], ["deepseek"])
+
+    def test_json_inside_reasoning_text_is_still_read(self):
+        result, _, _ = run(deepseek_content="Let me think.\n" + json.dumps(LEAD) + "\nDone.")
         self.assertEqual(result, LEAD)
-        self.assertEqual([r["args_redacted"]["provider"] for r in rows],
-                         ["openai", "gemini"])
-        self.assertEqual(rows[1]["args_redacted"]["outcome"],
-                         w.EXTRACTION_SUCCESS)
-        self.assertIn("Gemini fallback", out)
-
-    def test_gemini_failure_after_openai_failure_returns_empty(self):
-        result, rows, _ = run(openai_exc=RuntimeError("a"),
-                              gemini_exc=RuntimeError("b"))
-        self.assertEqual(result, {})
-        self.assertEqual([r["args_redacted"]["outcome"] for r in rows],
-                         [w.EXTRACTION_PROVIDER_FAILED,
-                          w.EXTRACTION_PROVIDER_FAILED])
-
-    def test_gemini_answering_without_json_records_empty(self):
-        result, rows, _ = run(openai_exc=RuntimeError("a"),
-                              gemini_content="no json here")
-        self.assertEqual(result, {})
-        self.assertEqual(rows[1]["args_redacted"]["outcome"],
-                         w.EXTRACTION_EMPTY)
-
-    def test_a_successful_openai_call_never_reaches_gemini(self):
-        _, rows, _ = run(openai_content=json.dumps(LEAD))
-        self.assertEqual([r["args_redacted"]["provider"] for r in rows],
-                         ["openai"])
-
-    def test_an_empty_openai_result_does_not_trigger_the_fallback(self):
-        """Existing control flow: `if match else {}` returns immediately."""
-        _, rows, _ = run(openai_content="{}", gemini_content=json.dumps(LEAD))
-        self.assertEqual([r["args_redacted"]["provider"] for r in rows],
-                         ["openai"])
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -262,27 +225,25 @@ class NoPiiIsStored(unittest.TestCase):
             self.assertNotIn(secret, blob, secret)
 
     def test_success_row_stores_no_values_prompt_or_transcript(self):
-        _, rows, _ = run(openai_content=json.dumps(LEAD))
+        _, rows, _ = run(deepseek_content=json.dumps(LEAD))
         self.assertClean(rows)
 
     def test_failure_row_stores_no_values_prompt_or_transcript(self):
-        _, rows, _ = run(openai_exc=RuntimeError("Ravi Kumar rejected"),
-                         gemini_exc=RuntimeError("Acme Traders"))
+        _, rows, _ = run(deepseek_fails=True)
         self.assertClean(rows)
 
     def test_parse_failure_stores_no_provider_response(self):
-        _, rows, _ = run(openai_content='{"name": "Ravi Kumar", broken}')
+        _, rows, _ = run(deepseek_content='{"name": "Ravi Kumar", broken}')
         self.assertClean(rows)
 
     def test_no_sender_marker_is_stored(self):
         """extract_lead_info is never given a phone; the event records none
         and correlates to lead_upsert by timestamp instead."""
-        _, rows, _ = run(openai_content=json.dumps(LEAD))
+        _, rows, _ = run(deepseek_content=json.dumps(LEAD))
         self.assertIsNone(rows[0]["source_ref"])
 
     def test_only_the_exception_type_is_stored_never_its_message(self):
-        _, rows, _ = run(openai_exc=RuntimeError("customer 919999000444"),
-                         gemini_content=None)
+        _, rows, _ = run(deepseek_fails=True)
         self.assertEqual(rows[0]["error"], "RuntimeError")
         self.assertNotIn("919999000444", str(rows))
 
@@ -294,22 +255,20 @@ class NoPiiIsStored(unittest.TestCase):
 class BestEffortAndUnregistered(unittest.TestCase):
 
     def test_an_audit_failure_does_not_break_extraction(self):
-        result, _, out = run(openai_content=json.dumps(LEAD),
+        result, _, out = run(deepseek_content=json.dumps(LEAD),
                              audit_raises=RuntimeError("store down"))
         self.assertEqual(result, LEAD)
         self.assertIn("LEAD_EXTRACTION_AUDIT_FAILED", out)
 
     def test_an_audit_failure_logs_the_type_only(self):
-        _, _, out = run(openai_content=json.dumps(LEAD),
+        _, _, out = run(deepseek_content=json.dumps(LEAD),
                         audit_raises=RuntimeError("Ravi Kumar"))
         self.assertIn("RuntimeError", out)
         self.assertNotIn("Ravi Kumar", out)
 
     def test_nothing_is_recorded_when_bic_is_unavailable(self):
         audits = []
-        with mock.patch.object(w, "get_openai",
-                               lambda: (_ for _ in ()).throw(RuntimeError("x"))), \
-             mock.patch.object(w, "generate_reply_gemini", lambda m: None), \
+        with mock.patch.object(w, "_call_deepseek", lambda m, max_tokens=None, temperature=0.75: ""), \
              mock.patch.object(w, "BIC_AVAILABLE", False), \
              mock.patch.object(w.bic_db, "insert",
                                lambda t, r, timeout=None: audits.append(r)), \
@@ -335,28 +294,15 @@ class BestEffortAndUnregistered(unittest.TestCase):
             self.assertIn(col, sql, col)
 
 
-class ProviderContractUnchanged(unittest.TestCase):
-    """The instrumentation must not have touched prompt, model or params."""
+class ProviderContract(unittest.TestCase):
+    """The prompt is unchanged; DeepSeek gets room to reason and answer."""
 
-    def test_the_call_parameters_are_unchanged(self):
-        seen = {}
-
-        class _Client:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kw):
-                        seen.update(kw)
-                        return _Resp("{}")
-        with mock.patch.object(w, "get_openai", lambda: _Client), \
-             mock.patch.object(w, "BIC_AVAILABLE", False), \
-             redirect_stdout(io.StringIO()):
-            w.extract_lead_info(HISTORY)
-        self.assertEqual(seen["model"], "gpt-4o-mini")
-        self.assertEqual(seen["max_tokens"], 380)
-        self.assertEqual(seen["temperature"], 0)
-        self.assertEqual(seen["messages"][0]["content"],
-                         w.EXTRACTION_SYSTEM_PROMPT)
+    def test_the_call_parameters(self):
+        run(deepseek_content="{}")
+        self.assertEqual(SEEN["max_tokens"], w.DEEPSEEK_JOB_MAX_TOKENS)
+        self.assertEqual(SEEN["messages"][0]["content"], w.EXTRACTION_SYSTEM_PROMPT)
+        self.assertGreaterEqual(w.DEEPSEEK_JOB_MAX_TOKENS, 2000)
+        self.assertEqual(SEEN["temperature"], 0)          # reading facts, not chatting
 
 
 if __name__ == "__main__":

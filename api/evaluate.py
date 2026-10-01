@@ -148,14 +148,16 @@ def already_evaluated(phone: str, last_ts: str) -> bool:
 
 
 def score_conversation(transcript: str) -> dict:
-    """One GPT-4o-mini call. Runs in the cron, never on the customer path."""
-    from openai import OpenAI
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+    """One DeepSeek call (owner, 2026-10-01: DeepSeek only; was GPT-4o-mini).
+    Runs in the cron, never on the customer path."""
+    from openai import OpenAI       # DeepSeek's API is OpenAI-compatible
+    client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+                    base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-flash").strip(),
         messages=[{"role": "system", "content": EVAL_SYSTEM},
                   {"role": "user", "content": transcript}],
-        max_tokens=400, temperature=0,
+        max_tokens=3000, temperature=0,
         response_format={"type": "json_object"},
     )
     return json.loads(resp.choices[0].message.content)

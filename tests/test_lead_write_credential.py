@@ -335,10 +335,11 @@ class UnrelatedPathsUntouched(unittest.TestCase):
     def test_extract_lead_info_provider_config_is_unchanged(self):
         import inspect
         src = inspect.getsource(w.extract_lead_info)
-        self.assertIn('model="gpt-4o-mini"', src)
-        self.assertIn("max_tokens=380", src)
+        # DeepSeek only since 2026-10-01 (was gpt-4o-mini, 380 tokens).
+        self.assertIn("_call_deepseek(", src)
+        self.assertIn("max_tokens=DEEPSEEK_JOB_MAX_TOKENS", src)
         self.assertIn("temperature=0", src)
-        self.assertIn("generate_reply_gemini", src)
+        self.assertNotIn("generate_reply_gemini", src)   # DeepSeek only, 2026-10-01
 
 
 if __name__ == "__main__":
