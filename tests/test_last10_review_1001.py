@@ -127,3 +127,17 @@ class SellingPoints(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoLoneThanks(unittest.TestCase):
+    def test_a_waiting_customer_is_told_when(self):
+        k = {"capacity_kva": 25, "location": "x", "delivery_same": True,
+             "application": "AGRICULTURE", "callback": "now"}
+        self.assertEqual(b.compose_followup_reply(b.parse_followup("25", (), known=k), k),
+                         "ಧನ್ಯವಾದಗಳು 🙏 ನಮ್ಮ engineer *ಈಗಲೇ* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
+
+    def test_installation_amount_is_the_engineers(self):
+        k = {"capacity_kva": 25}
+        reply = b.compose_followup_reply(b.parse_followup("Installation charge yestaguthe", (), known=k), k)
+        self.assertIn("ಅದರ ಮೊತ್ತವನ್ನು ನಮ್ಮ engineer ಕರೆಯಲ್ಲಿ ತಿಳಿಸುತ್ತಾರೆ", reply)
+        self.assertNotIn("₹", reply)

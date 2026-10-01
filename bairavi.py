@@ -2361,7 +2361,10 @@ def price_line(kva: int) -> str:
 # only when asked (each topic on its own line), and warranty + payment are
 # said once, briefly, when the call is offered.
 TERM_LINES = {
-    "transport": "Transport ದರದಲ್ಲೇ ಸೇರಿದೆ; installation ಪ್ರತ್ಯೇಕ.",
+    # "Installation charge yestaguthe?" (live ...4585): the amount is the
+    # engineer's to give (owner ruling 2026-10-01), so the line says who will.
+    "transport": ("Transport ದರದಲ್ಲೇ ಸೇರಿದೆ; installation ಪ್ರತ್ಯೇಕ — ಅದರ ಮೊತ್ತವನ್ನು "
+                  "ನಮ್ಮ engineer ಕರೆಯಲ್ಲಿ ತಿಳಿಸುತ್ತಾರೆ."),
     "warranty": "ನಮ್ಮ transformer ಗಳಿಗೆ *1 ವರ್ಷ warranty* ಇದೆ; ಅದರ ನಂತರವೂ service ಲಭ್ಯವಿದೆ.",
     "payment": "Payment: *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ.",
 }
@@ -3044,7 +3047,19 @@ def compose_short_reask(followup: dict, known: dict = None) -> str:
     return "🙏 ಇಷ್ಟು ಮಾತ್ರ ಬೇಕು:\n" + question_for(fields[0], known)
 
 
-def compose_followup_reply(followup: dict, known: dict = None,
+def compose_followup_reply(followup: dict, known: dict = None, *args, **kwargs) -> str:
+    """The reply — and never a bare "ಧನ್ಯವಾದಗಳು." to someone waiting for a
+    call. A lone thanks after "25" (live ...1709, 2026-10-01) read as the
+    conversation being dropped; when a call time is on record it now says
+    when the engineer will call."""
+    reply = _compose_followup_reply(followup, known, *args, **kwargs)
+    slot = merged_state(known, followup).get("callback")
+    if reply.strip() == "ಧನ್ಯವಾದಗಳು." and slot in CALLBACK_LABEL_KN:
+        reply = f"ಧನ್ಯವಾದಗಳು 🙏 ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[slot]}* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ."
+    return reply
+
+
+def _compose_followup_reply(followup: dict, known: dict = None,
                            goal_def: dict = None,
                            last_fingerprint: str = None) -> str:
     """The reply to a message inside an existing transformer conversation.

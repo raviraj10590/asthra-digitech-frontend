@@ -222,7 +222,7 @@ class TheOwnerIsToldWhenWeCouldNotAnswer(unittest.TestCase):
         and simultaneously reported to the owner as unanswered."""
         import inspect
         self.assertIn("unanswered_question",
-                      inspect.getsource(b.compose_followup_reply))
+                      inspect.getsource(b._compose_followup_reply))
         self.assertIn("unanswered_question",
                       inspect.getsource(b.compose_followup_alert))
 

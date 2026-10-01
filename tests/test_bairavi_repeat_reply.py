@@ -178,7 +178,7 @@ class TheGuardLivesInOnePlace(unittest.TestCase):
     def test_the_check_is_inside_the_composer(self):
         """So no caller can send a repeat by forgetting to ask."""
         import inspect
-        src = inspect.getsource(b.compose_followup_reply)
+        src = inspect.getsource(b._compose_followup_reply)
         self.assertIn("last_fingerprint", src)
         self.assertIn("compose_short_reask", src)
 
