@@ -101,3 +101,4 @@ class BairaviPhotos(unittest.TestCase):
         import inspect
         src = inspect.getsource(w.handler.do_POST)
         self.assertIn("bairavi_lead=_bairavi_photo", src)
+        self.assertIn('_bairavi_photo = bairavi.in_transformer_flow(fetch_context(sender)["history"])', src)
