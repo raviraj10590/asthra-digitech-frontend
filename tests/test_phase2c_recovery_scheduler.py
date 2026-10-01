@@ -57,7 +57,10 @@ class Endpoint(unittest.TestCase):
         self._p = [mock.patch.dict(os.environ, {"CRON_SECRET": TOKEN}),
                    mock.patch.object(redrive, "run",
                                      lambda *a, **k: (self.runs.append((a, k)) or
-                                                      {redrive.REDRIVEN: 1}))]
+                                                      {redrive.REDRIVEN: 1})),
+                   mock.patch.object(recovery, "publish_health",
+                                     lambda counts: (self.health.append(counts) or "ok"))]
+        self.health = []
         for p in self._p:
             p.start()
 
@@ -72,7 +75,8 @@ class Endpoint(unittest.TestCase):
     def test_A_correct_bearer_runs_the_worker(self):
         code, body, _log, _h = call(headers=self.ok_headers())
         self.assertEqual(code, 200)
-        self.assertEqual(body, {"ok": True, "results": {"REDRIVEN": 1}})
+        self.assertEqual(body, {"ok": True, "results": {"REDRIVEN": 1}, "health_snapshot": "ok"})
+        self.assertEqual(self.health, [{"REDRIVEN": 1}])
 
     # B
     def test_B_missing_authorization_is_401(self):
@@ -162,7 +166,7 @@ class Endpoint(unittest.TestCase):
     def test_the_response_carries_no_customer_data(self):
         with mock.patch.object(redrive, "run", lambda: {"REDRIVEN": 1, "SKIPPED": 3}):
             body = call(headers=self.ok_headers())[1]
-        self.assertEqual(set(body), {"ok", "results"})
+        self.assertEqual(set(body), {"ok", "results", "health_snapshot"})
         self.assertTrue(all(isinstance(v, int) for v in body["results"].values()))
 
     # Fail closed until configured
@@ -342,3 +346,34 @@ class WorkflowDefinition(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HealthSnapshotHook(unittest.TestCase):
+    """The Brain Health snapshot rides the authenticated sweep, never alone."""
+
+    def setUp(self):
+        self._p = [mock.patch.dict(os.environ, {"CRON_SECRET": TOKEN}),
+                   mock.patch.object(redrive, "run", lambda: {})]
+        for p in self._p:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._p):
+            p.stop()
+
+    def test_a_snapshot_failure_never_fails_the_sweep(self):
+        import health_snapshot
+        def boom(counts):
+            raise RuntimeError("crm 919999000888 down")
+        with mock.patch.object(health_snapshot, "run", boom):
+            code, body, log, _h = call(headers={"Authorization": f"Bearer {TOKEN}"})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["health_snapshot"], "failed")
+        self.assertNotIn("919999000888", log + json.dumps(body))
+
+    def test_unauthenticated_requests_never_publish(self):
+        published = []
+        with mock.patch.object(recovery, "publish_health", lambda c: published.append(c) or "ok"):
+            call(headers={})
+            call(headers={"User-Agent": "vercel-cron"})
+        self.assertEqual(published, [])

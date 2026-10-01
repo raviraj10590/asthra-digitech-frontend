@@ -61,6 +61,18 @@ def run_sweep() -> dict:
     return redrive.run()
 
 
+def publish_health(counts) -> str:
+    """After the sweep, push the Brain's aggregate health to the CRM's Brain
+    Health page (brain_health.py). Best-effort: 'ok' / 'failed', never raises,
+    and never changes the sweep's own status code."""
+    try:
+        import health_snapshot
+        return health_snapshot.run(counts)
+    except Exception as e:
+        print(f"RECOVERY_ENDPOINT health=failed type={type(e).__name__}")
+        return "failed"
+
+
 class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
@@ -75,8 +87,9 @@ class handler(BaseHTTPRequestHandler):
             print(f"RECOVERY_ENDPOINT result=error type={type(e).__name__}")
             return self._json(500, {"ok": False, "error": "recovery_failed"})
         results = {str(k): int(v) for k, v in (counts or {}).items()}
-        print("RECOVERY_ENDPOINT result=ok " + json.dumps(results, sort_keys=True))
-        return self._json(200, {"ok": True, "results": results})
+        health = publish_health(results)
+        print("RECOVERY_ENDPOINT result=ok health=" + health + " " + json.dumps(results, sort_keys=True))
+        return self._json(200, {"ok": True, "results": results, "health_snapshot": health})
 
     def _method_not_allowed(self):
         self._json(405, {"ok": False, "error": "method_not_allowed"}, allow="POST")
