@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import webhook as w                                            # noqa: E402
+import fake_send  # noqa: E402
 
 PHONE = "910000000000"
 
@@ -65,7 +66,8 @@ class Conversation:
     """
 
     def __init__(self, phone=PHONE, paused=False, degraded=False,
-                 save_outcome=None, bic=False, ai_reply="ASTHRA_AI_REPLY"):
+                 save_outcome=None, bic=False, ai_reply="ASTHRA_AI_REPLY",
+                 send_result=None):
         self.phone = phone
         self.paused = paused
         self.degraded = degraded
@@ -74,14 +76,26 @@ class Conversation:
         self.save_outcome = save_outcome
         self.bic = bic
         self.ai_reply = ai_reply
+        # What send_text returns (Phase 2A): None => an ACCEPTED Meta
+        # response. A fake_send.Rejected, or an exception instance to raise,
+        # models a reply that did not go out.
+        self.send_result = send_result
         self.history = []
         self.turns = []
 
-    def send(self, text, paused=None, degraded=None, save_outcome=None):
+    def send(self, text, paused=None, degraded=None, save_outcome=None,
+             send_result=None):
         """One inbound customer message. Returns a Turn."""
         rec = {"sent": [], "menu": [], "owner": [], "leads": [],
                "first_seen": [], "saved": [], "branches": [], "stdout": ""}
         outcome = (self.save_outcome if save_outcome is None else save_outcome)
+        result = send_result if send_result is not None else self.send_result
+
+        def fake_send_text(to, text, **_k):
+            rec["sent"].append(text)
+            if isinstance(result, BaseException):
+                raise result
+            return result if result is not None else fake_send.Accepted()
 
         def fake_save_messages(items):
             # Record the attempt either way; only APPEND to history when the
@@ -106,8 +120,7 @@ class Conversation:
         with mock.patch.object(w, "fetch_memory", lambda s: {}), \
              mock.patch.object(w, "record_first_seen",
                                lambda *a, **k: rec["first_seen"].append(a)), \
-             mock.patch.object(w, "send_text",
-                               lambda to, t, **k: rec["sent"].append(t)), \
+             mock.patch.object(w, "send_text", fake_send_text), \
              mock.patch.object(w, "send_welcome_menu",
                                lambda to: rec["menu"].append(to)), \
              mock.patch.object(w, "send_followup_buttons", lambda *a, **k: None), \

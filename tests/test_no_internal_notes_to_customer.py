@@ -196,7 +196,9 @@ class OnlySendTextMayMirror(unittest.TestCase):
         # The mirror also carries the id Meta assigned to this very message;
         # `to, message` still leads, so what reaches the CRM is still the
         # customer's own reply and nothing else.
-        self.assertIn("log_reply_to_crm(to, message, _wamid_of(_result))",
+        # Phase 2A: the id comes from the delivery verdict, and the row's
+        # status is that verdict rather than a constant "sent".
+        self.assertIn('log_reply_to_crm(to, message, _delivery["wamid"],',
                       inspect.getsource(w.send_text))
 
     def test_the_generic_mirror_has_exactly_TWO_callers(self):
@@ -238,7 +240,7 @@ class OnlySendTextMayMirror(unittest.TestCase):
         sent = []
         with mock.patch.object(w, "_wa_post", lambda p: {"ok": True}), \
              mock.patch.object(w, "log_reply_to_crm",
-                               lambda phone, body, wamid=None:
+                               lambda phone, body, wamid=None, **k:
                                    sent.append(body)), \
              mock.patch.object(w, "save_message", lambda *a, **k: None), \
              redirect_stdout(io.StringIO()):
@@ -252,7 +254,10 @@ class OnlySendTextMayMirror(unittest.TestCase):
         import inspect
         src = inspect.getsource(w._mirror_outbound_to_crm)
         self.assertIn('"direction": "outbound"', src)
-        self.assertIn('"status": "sent"', src)
+        # Phase 2A: "sent" is still the default; send_text alone overrides it
+        # with the delivery verdict ("failed" / "pending").
+        self.assertIn('status: str = "sent"', src)
+        self.assertIn('"status": status', src)
 
     def test_the_contract_is_written_down(self):
         """The prohibition moved to the shared write path so every send path

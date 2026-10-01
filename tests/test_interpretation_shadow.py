@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import bairavi as b  # noqa: E402
 import interpretation as I  # noqa: E402
 import webhook as w  # noqa: E402
+import fake_send  # noqa: E402
 
 NOW_ISO = datetime.datetime.now(datetime.timezone.utc).isoformat()
 # A random per-run value — NOT the production secret, never a fixed string.
@@ -63,7 +64,7 @@ def run_conversation(messages, *, shadow=False, provider=None, clock_left=None):
         with mock.patch.dict(os.environ, env), \
              mock.patch.object(w, "fetch_memory", lambda s: {}), \
              mock.patch.object(w, "record_first_seen", lambda *a, **k: None), \
-             mock.patch.object(w, "send_text", lambda to, t, **k: run.sent.append(t)), \
+             mock.patch.object(w, "send_text", fake_send.recorded(run.sent)), \
              mock.patch.object(w, "send_welcome_menu", lambda to: run.sent.append("<MENU>")), \
              mock.patch.object(w, "upsert_lead", lambda p, d: run.leads.append(copy.deepcopy(d))), \
              mock.patch.object(w, "notify_owner", lambda m, **k: run.owner.append(m)), \
@@ -510,7 +511,8 @@ class ShadowRunsLast(unittest.TestCase):
             with mock.patch.dict(os.environ, {"SHADOW_INTERPRETATION": "on", "SHADOW_TURN_KEY": TEST_TURN_KEY}), \
                  mock.patch.object(w, "fetch_memory", lambda s: {}), \
                  mock.patch.object(w, "record_first_seen", lambda *a, **k: None), \
-                 mock.patch.object(w, "send_text", lambda to, t, **k: events.append("send")), \
+                 mock.patch.object(w, "send_text",
+                                   lambda to, t, **k: (events.append("send"), fake_send.accepted())[1]), \
                  mock.patch.object(w, "upsert_lead", lambda p, d: events.append("lead")), \
                  mock.patch.object(w, "notify_owner", lambda m, **k: events.append("owner")), \
                  mock.patch.object(w, "save_messages",

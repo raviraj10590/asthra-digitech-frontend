@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import bairavi as b                                            # noqa: E402
 import webhook as w                                            # noqa: E402
+import fake_send  # noqa: E402
 from _price_policy import assert_only_owner_prices              # noqa: E402
 
 CAP_Q = "ನಿಮಗೆ ಅಗತ್ಯವಿರುವ ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಸಾಮರ್ಥ್ಯ ಯಾವುದು?"
@@ -441,8 +442,7 @@ class Segregation(unittest.TestCase):
         with mock.patch.object(w, "fetch_memory", lambda s: {}), \
              mock.patch.object(w, "record_first_seen",
                                lambda *a, **k: calls["first_seen"].append(a)), \
-             mock.patch.object(w, "send_text",
-                               lambda to, t, **k: calls["sent"].append(t)), \
+             mock.patch.object(w, "send_text", fake_send.recorded(calls["sent"])), \
              mock.patch.object(w, "send_welcome_menu",
                                lambda to: calls["menu"].append(to)), \
              mock.patch.object(w, "upsert_lead",
@@ -610,8 +610,7 @@ class ConversationContinuity(unittest.TestCase):
             with mock.patch.object(w, "fetch_memory", lambda s: {}), \
                  mock.patch.object(w, "record_first_seen",
                                    lambda *a, **k: first_seen.append(a)), \
-                 mock.patch.object(w, "send_text",
-                                   lambda to, t, **k: sent.append(t)), \
+                 mock.patch.object(w, "send_text", fake_send.recorded(sent)), \
                  mock.patch.object(w, "send_welcome_menu",
                                    lambda to: menu.append(to)), \
                  mock.patch.object(w, "upsert_lead",

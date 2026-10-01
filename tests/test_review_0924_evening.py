@@ -83,7 +83,7 @@ class WebhookStaysSilent(unittest.TestCase):
     def test_the_branch_returns_before_sending(self):
         src = open(os.path.join(os.path.dirname(__file__), "..", "api", "webhook.py")).read()
         i = src.index("if bairavi.is_silent_ack(followup, _awaiting):")
-        j = src.index("send_text(sender, _reply)")
+        j = src.index("send_text_checked(sender, _reply)")
         self.assertLess(i, j)
         self.assertIn("return", src[i:i + 400])
 

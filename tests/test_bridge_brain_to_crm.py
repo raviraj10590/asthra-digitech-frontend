@@ -294,7 +294,7 @@ class SendTextExtractsTheIdItAlreadyHas(unittest.TestCase):
         with mock.patch.object(w, "_wa_post", lambda p: response), \
              mock.patch.object(w, "get_role", lambda to: ("CLIENT", None)), \
              mock.patch.object(w, "log_reply_to_crm",
-                               lambda p, b, wamid=None: got.update(wamid=wamid)), \
+                               lambda p, b, wamid=None, **k: got.update(wamid=wamid)), \
              redirect_stdout(io.StringIO()):
             w.send_text(PHONE, "hi")
         return got.get("wamid")

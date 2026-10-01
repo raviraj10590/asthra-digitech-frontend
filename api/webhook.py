@@ -1075,28 +1075,78 @@ def save_messages(items: list) -> str:
 
     Returns the outcome so callers can act on it. It still NEVER raises:
     failing to record a turn must not stop us answering the customer.
+
+    ONE RETRY, BOUNDED (Phase 2A). A network error or a 5xx/429 is retried
+    exactly once with a shorter timeout; a 4xx is our request being wrong and
+    is not retried. A retry after a timeout can in rare cases store a row
+    twice — a duplicate history line is a far smaller harm than a lost
+    FLOW_MARKER. The final failure is still returned and printed.
+
+    The turn's incoming customer message is saved FIRST by do_POST
+    (_save_incoming_first); its later copy in a branch's bulk save is dropped
+    here so the row is not written twice.
     """
+    items = _drop_incoming_already_saved(items)
     if not items:
         return SAVE_OK
-    try:
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
-            headers=_supa_headers(),
-            json=[{"phone": p, "role": r, "content": c} for p, r, c in items],
-            timeout=5,
-        )
-        if not r.ok:
+    outcome = SAVE_NETWORK_FAILURE
+    for attempt, timeout in enumerate(_SAVE_TIMEOUTS):
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+                headers=_supa_headers(),
+                json=[{"phone": p, "role": r, "content": c} for p, r, c in items],
+                timeout=timeout,
+            )
+            if r.ok:
+                if attempt:
+                    print(f"SAVE_MESSAGES_RETRY_OK rows={len(items)} "
+                          f"phone=...{items[0][0][-4:]}")
+                return SAVE_OK
             # ROWS AND STATUS ONLY. r.text echoes the rejected payload, which
             # is the customer's own message text.
-            print(f"SAVE_MESSAGES_FAILED status={r.status_code} "
+            print(f"SAVE_MESSAGES_FAILED status={r.status_code} attempt={attempt + 1} "
                   f"rows={len(items)} phone=...{items[0][0][-4:]}")
-            return SAVE_PERSISTENCE_FAILURE
-        return SAVE_OK
-    except Exception as e:
-        # TYPE ONLY — a requests exception can carry the full URL and body.
-        print(f"SAVE_MESSAGES_NETWORK_FAILED type={type(e).__name__} "
-              f"rows={len(items)} phone=...{items[0][0][-4:]}")
-        return SAVE_NETWORK_FAILURE
+            outcome = SAVE_PERSISTENCE_FAILURE
+            if r.status_code < 500 and r.status_code != 429:
+                return outcome
+        except Exception as e:
+            # TYPE ONLY — a requests exception can carry the full URL and body.
+            print(f"SAVE_MESSAGES_NETWORK_FAILED type={type(e).__name__} "
+                  f"attempt={attempt + 1} rows={len(items)} phone=...{items[0][0][-4:]}")
+            outcome = SAVE_NETWORK_FAILURE
+    return outcome
+
+
+# First attempt, then the single retry.
+_SAVE_TIMEOUTS = (5, 3)
+
+
+def _drop_incoming_already_saved(items: list) -> list:
+    """Remove the ONE user row do_POST already persisted for this turn."""
+    done = _TURN_EXTRAS.get("incoming_saved")
+    if not done:
+        return items
+    for i, (p, role, c) in enumerate(items):
+        if role == "user" and (p, c) == done:
+            _TURN_EXTRAS.pop("incoming_saved", None)
+            return items[:i] + items[i + 1:]
+    return items
+
+
+def _save_incoming_first(sender: str, user_text: str) -> str:
+    """Persist the customer's message BEFORE any reply is attempted, so a
+    failed or slow reply can never lose what the customer said.
+
+    Runs after fetch_context and the duplicate check, not before: both read
+    history as it stood BEFORE this message (is_duplicate_webhook compares
+    against the previous user row; is_new_contact counts prior rows), so
+    writing first would make every message look like its own retry.
+    """
+    outcome = save_messages([(sender, "user", user_text)])
+    if outcome == SAVE_OK:
+        _TURN_EXTRAS["incoming_saved"] = (sender, user_text)
+    return outcome
 
 # The `tool` value for the durable lead-write record. NOT a registered tool
 # and deliberately not registered: nothing invokes it, and adding a
@@ -2386,14 +2436,15 @@ def _crm_headers():
 
 def _mirror_outbound_to_crm(phone: str, *, message_type: str, body: str,
                             wa_message_id: str = None, media_url: str = None,
-                            original_type: str = None, file_name: str = None):
+                            original_type: str = None, file_name: str = None,
+                            status: str = "sent"):
     """THE single write path for mirroring a CUSTOMER-FACING outbound WhatsApp
     message into the Asthra CRM's whatsapp_messages.
 
     Every caller reaches this through log_reply_to_crm (text) or
     _mirror_sent_message (everything else), so the properties below are
     established once instead of per send path. It writes direction="outbound",
-    status="sent" — a claim that the customer received this message. Anything
+    status="sent" (or the verdict send_text passes) — a claim that the customer received this message. Anything
     passed here that was NOT sent to the customer is a false record at best,
     and reaches the customer at worst.
 
@@ -2435,7 +2486,9 @@ def _mirror_outbound_to_crm(phone: str, *, message_type: str, body: str,
             "direction": "outbound",
             "message_type": message_type,
             "body": body,
-            "status": "sent",
+            # "sent" unless send_text knows otherwise (Phase 2A: a rejected
+            # reply is "failed", an unconfirmed one "pending").
+            "status": status,
             "metadata": metadata,
         }
         if media_url:
@@ -2489,7 +2542,8 @@ def _mirror_outbound_to_crm(phone: str, *, message_type: str, body: str,
         print(f"log_reply_to_crm error: {e}")
 
 
-def log_reply_to_crm(phone: str, body: str, wa_message_id: str = None):
+def log_reply_to_crm(phone: str, body: str, wa_message_id: str = None,
+                     status: str = "sent"):
     """Mirror an outbound bot TEXT reply into the CRM.
 
     Kept as its own name because it is the only mirror with a history: three
@@ -2499,7 +2553,7 @@ def log_reply_to_crm(phone: str, body: str, wa_message_id: str = None):
     now lives on _mirror_outbound_to_crm where every send path can see it.
     """
     _mirror_outbound_to_crm(phone, message_type="text", body=body,
-                            wa_message_id=wa_message_id)
+                            wa_message_id=wa_message_id, status=status)
 
 
 def _wamid_of(result):
@@ -2517,6 +2571,65 @@ def _wamid_of(result):
     except Exception:
         pass
     return None
+
+
+# ── Delivery truth (Phase 2A) ────────────────────────────────────────────────
+# What WhatsApp said about one send. Three verdicts, because the remedies differ:
+#   ACCEPTED  2xx carrying a message id — Meta took it.
+#   REJECTED  4xx — Meta definitively refused it; it did not go out.
+#   UNKNOWN   timeout, connection error, 5xx, or a 2xx with no id — it may or
+#             may not have gone out. NEVER retried blindly: a duplicate reply
+#             to a customer is worse than a late manual one.
+DELIVERY_ACCEPTED = "ACCEPTED"
+DELIVERY_REJECTED = "REJECTED"
+DELIVERY_UNKNOWN = "UNKNOWN"
+
+# CRM whatsapp_messages.status for each verdict (values from the CRM's own check).
+_CRM_STATUS = {DELIVERY_ACCEPTED: "sent", DELIVERY_REJECTED: "failed",
+               DELIVERY_UNKNOWN: "pending"}
+
+
+def classify_delivery(result=None, exc=None) -> dict:
+    """{verdict, status, wamid, failure_class} for one send.
+
+    failure_class uses bic_webhook_events' existing vocabulary, so a failed
+    delivery fits the current CHECK constraint with no schema change.
+    """
+    if exc is not None:
+        # Timeout first: ConnectTimeout is both a Timeout and a ConnectionError.
+        fc = ("TIMEOUT" if isinstance(exc, requests.Timeout)
+              else "CONNECTION" if isinstance(exc, requests.ConnectionError)
+              else "UNKNOWN")
+        return {"verdict": DELIVERY_UNKNOWN, "status": None, "wamid": None,
+                "failure_class": fc}
+    status = getattr(result, "status_code", None)
+    if not isinstance(status, int):
+        status = None
+    if getattr(result, "ok", False) is True:
+        wamid = _wamid_of(result)
+        if wamid:
+            return {"verdict": DELIVERY_ACCEPTED, "status": status,
+                    "wamid": wamid, "failure_class": None}
+        return {"verdict": DELIVERY_UNKNOWN, "status": status, "wamid": None,
+                "failure_class": "UNKNOWN"}
+    if isinstance(status, int) and 400 <= status < 500:
+        fc = ("PERMISSION" if status in (401, 403)
+              else "UNKNOWN" if status == 429 else "VALUE")
+        return {"verdict": DELIVERY_REJECTED, "status": status, "wamid": None,
+                "failure_class": fc}
+    return {"verdict": DELIVERY_UNKNOWN, "status": status, "wamid": None,
+            "failure_class": "UNKNOWN"}
+
+
+def _record_delivery(to: str, delivery: dict) -> None:
+    """Remember the verdict of a send to THIS turn's sender, for
+    _finalize_delivery. Sends to anyone else (owner alerts) are not the
+    turn's reply and are not recorded. Last send wins, so a reply that a
+    caller retried successfully counts as delivered."""
+    if to and to == _TURN_EXTRAS.get("turn_sender"):
+        _TURN_EXTRAS["delivery"] = delivery
+    print(f"DELIVERY verdict={delivery['verdict']} status={delivery['status']} "
+          f"phone=...{str(to)[-4:]}")
 
 
 def _mirror_sent_message(to: str, result, *, message_type: str, body: str,
@@ -2708,24 +2821,71 @@ def send_text(to: str, message: str):
     unaffected. It exists because _wa_post does not raise on a non-2xx —
     a Meta rejection was printed and then discarded, so "we called send"
     was indistinguishable from "the customer received it".
+
+    PHASE 2A: the verdict (classify_delivery) is recorded for the turn and
+    decides the CRM row's status. A transport error still RAISES, exactly as
+    before — callers that retry on it (the Asthra decide path) are unchanged.
     """
-    _result = _wa_post({
+    payload = {
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
         "text": {"body": message, "preview_url": False},
-    })
+    }
+    _result = _send_error = None
+    try:
+        _result = _wa_post(payload)
+    except Exception as e:
+        _send_error = e
+    _delivery = classify_delivery(_result, exc=_send_error)
+    _record_delivery(to, _delivery)
     # Owner/staff replies are internal, not customer conversation — skip the CRM
     # mirror for them (role-based, not just the bootstrap list, so DB-added
     # staff numbers are excluded too).
-    if get_role(to)[0] == "CLIENT":
+    try:
+        _is_client = get_role(to)[0] == "CLIENT"
+    except Exception:
+        if _send_error is None:
+            raise
+        _is_client = False      # never mask the send's own exception
+    if _is_client:
         # The id Meta just assigned, or None. UNLIKE the non-text paths this
         # mirrors either way: a text reply has no fallback send behind it, so
         # an id-less row is the only record that the bot said something. The
         # non-text paths do have a fallback (this very function), which is why
         # _mirror_sent_message refuses a send with no wamid.
-        log_reply_to_crm(to, message, _wamid_of(_result))
+        #
+        # The status is the VERDICT, no longer a constant "sent": a rejected
+        # reply is "failed" and an unconfirmed one "pending" — both values the
+        # CRM's own whatsapp_messages.status check already allows.
+        log_reply_to_crm(to, message, _delivery["wamid"],
+                         status=_CRM_STATUS[_delivery["verdict"]])
+    if _send_error is not None:
+        raise _send_error
     return _result
+
+
+def send_text_checked(to: str, message: str) -> dict:
+    """send_text, returning the delivery verdict instead of raising on a
+    transport error. For callers that must act on the outcome (Bairavi).
+
+    Only requests' own exceptions become UNKNOWN. Anything else is a bug in
+    our code, not a channel outcome, and still propagates. Nothing here
+    retries: an UNKNOWN send may well have reached the customer.
+    """
+    try:
+        return classify_delivery(send_text(to, message))
+    except requests.RequestException as e:
+        return classify_delivery(exc=e)
+
+
+def undelivered_note(delivery: dict, phone: str) -> str:
+    """The owner-alert line for a customer reply that did not go out."""
+    if delivery["verdict"] == DELIVERY_REJECTED:
+        return (f"🚫 *Reply NOT delivered* — WhatsApp rejected it "
+                f"(HTTP {delivery['status']}). Reply manually: wa.me/{phone}")
+    return ("❓ *Reply delivery UNKNOWN* (no confirmation from WhatsApp). "
+            f"Check the chat before replying again: wa.me/{phone}")
 
 def notify_owner(message: str):
     """Instant WhatsApp alert to every active OWNER/STAFF number (bootstrap
@@ -6119,7 +6279,12 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                                          followup, known)
             if _model:
                 _reply = _model
-            send_text(sender, _reply)
+            # THE RESULT IS CHECKED (Phase 2A). The marker below claims the
+            # customer was asked something; for a reply that did not go out
+            # that claim is false, and the next message would be read
+            # against a question they never saw.
+            _delivery = send_text_checked(sender, _reply)
+            _delivered = _delivery["verdict"] == DELIVERY_ACCEPTED
             # The marker records WHAT this reply is still waiting for, so the
             # hourly sweep can ask again without any new storage.
             # WRITTEN BEFORE the alerts below so a notify failure cannot
@@ -6128,14 +6293,18 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             _quote_now = (
                 followup.get("commercial_intent") == bairavi.QUOTATION_REQUEST
                 and not bairavi.quote_already_signalled(ctx["history"]))
-            _saved = save_messages([
-                (sender, "user", user_text),
-                (sender, "assistant",
-                 bairavi.flow_marker(
-                     bairavi.awaiting_after(followup, known),
-                     quote_signalled=_quote_now
-                     or bairavi.quote_already_signalled(ctx["history"]),
-                     reply=_reply))])
+            if _delivered:
+                _saved = save_messages([
+                    (sender, "user", user_text),
+                    (sender, "assistant",
+                     bairavi.flow_marker(
+                         bairavi.awaiting_after(followup, known),
+                         quote_signalled=_quote_now
+                         or bairavi.quote_already_signalled(ctx["history"]),
+                         reply=_reply))])
+            else:
+                # The customer's words only; no-op when do_POST saved them.
+                _saved = save_messages([(sender, "user", user_text)])
             warn_if_transcript_lost(sender, _saved, "Bairavi follow-up reply")
             # EVERY follow-up is forwarded, not only the ones that parse.
             #
@@ -6152,6 +6321,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # extra notification costs a glance.
             alert = bairavi.compose_followup_alert(sender, followup,
                                                    user_text, known)
+            if not _delivered:
+                alert = undelivered_note(_delivery, sender) + "\n\n" + alert
             if _TURN_EXTRAS.get("owner_note"):
                 alert += "\n" + _TURN_EXTRAS["owner_note"]
             upsert_lead(sender, {"source": "bairavi-transformer",
@@ -6176,12 +6347,15 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             return
 
         parsed = bairavi.parse(user_text)
-        send_text(sender, bairavi.compose_reply(parsed))
+        # Checked, as for the follow-up: no FLOW_MARKER for an opening reply
+        # the customer never received (Phase 2A).
+        _delivery = send_text_checked(sender, bairavi.compose_reply(parsed))
+        _delivered = _delivery["verdict"] == DELIVERY_ACCEPTED
         # Verbatim first (AC-07): the parsed view never replaces what they
         # actually wrote, and a parse failure must not lose the enquiry.
-        _saved = save_messages([(sender, "user", user_text),
-                                (sender, "assistant",
-                                 bairavi.flow_marker(bairavi.opening_awaiting(parsed)))])
+        _saved = save_messages([(sender, "user", user_text)] + (
+            [(sender, "assistant",
+              bairavi.flow_marker(bairavi.opening_awaiting(parsed)))] if _delivered else []))
         warn_if_transcript_lost(sender, _saved, "Bairavi opening reply")
         # source marks these as Bairavi so they are separable later. `leads`
         # feeds no Brain metric — new_enquiries comes from first_seen_at
@@ -6194,7 +6368,10 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             "source": "bairavi-transformer",
             "notes": bairavi.compose_owner_alert(sender, parsed),
         })
-        notify_owner(bairavi.compose_owner_alert(sender, parsed))
+        _alert = bairavi.compose_owner_alert(sender, parsed)
+        if not _delivered:
+            _alert = undelivered_note(_delivery, sender) + "\n\n" + _alert
+        notify_owner(_alert)
         return
 
     # ── Degraded context: we could not read the history ──────────
@@ -6799,6 +6976,14 @@ def _finalize_delivery(lifecycle: dict, failure_class: str = None) -> None:
     lifecycle["terminal"] = True
     if not BIC_AVAILABLE:
         return
+    # DELIVERY TRUTH (Phase 2A). "No exception" is not "the customer got a
+    # reply": _wa_post returns a 4xx without raising. COMPLETED now means the
+    # turn's last reply to the sender was ACCEPTED, or the turn deliberately
+    # sent none (silent ack, duplicate). A REJECTED or UNKNOWN reply is FAILED
+    # with the verdict's class — never retried from here.
+    _delivery = _TURN_EXTRAS.get("delivery")
+    if not failure_class and _delivery and _delivery["verdict"] != DELIVERY_ACCEPTED:
+        failure_class = _delivery["failure_class"] or "UNKNOWN"
     if failure_class:
         bic_events.mark(lifecycle["wamid"], bic_events.FAILED, failure_class)
     else:
@@ -7427,6 +7612,8 @@ class handler(BaseHTTPRequestHandler):
 
             # Blue ticks + typing… within ~1s, before the slow work starts
             _TURN_EXTRAS.clear()
+            # Whose reply decides this delivery's terminal state (Phase 2A).
+            _TURN_EXTRAS["turn_sender"] = sender
             if msg.get("id") and msg_type in ("text", "audio", "interactive", "image", "video",
                                               "document", "location"):
                 send_typing(msg["id"])
@@ -7570,6 +7757,12 @@ class handler(BaseHTTPRequestHandler):
             # Distinct from the replay diagnostic above: that table prunes at
             # 30 days and nothing reads it; this one is retained evidence.
             _decision_open(sender, role)
+
+            # ── Customer message persisted BEFORE any reply (Phase 2A) ────
+            # Owner/staff turns keep their existing save; their history feeds
+            # recall and memory, which this phase does not touch.
+            if role not in INTERNAL_ROLES:
+                _save_incoming_first(sender, user_text)
             turn["stage"] = "DISPATCH"
             turn["dispatch_began"] = True
             # True once the accumulator is open: the existing `finally` below
