@@ -134,7 +134,7 @@ def rpc(function: str, params: dict, timeout: Optional[float] = None):
 
 
 def update(table: str, params: dict, patch: dict,
-           timeout: Optional[float] = None) -> None:
+           timeout: Optional[float] = None, returning: bool = False):
     """PATCH rows matching `params`. Raises DbError on failure.
 
     ⚠️ NARROW BY DESIGN. Added for ONE case: the semantic registry's
@@ -153,6 +153,11 @@ def update(table: str, params: dict, patch: dict,
 
     Defence 2 is the one that matters: an import rule protects against
     accident, a trigger protects against intent.
+
+    returning=True returns the rows the PATCH actually changed. That is what
+    makes a conditional PATCH a compare-and-swap: filter on the state you saw,
+    and an empty list means someone else changed the row first (Phase 2B
+    recovery claims, bic_webhook_events only).
     """
     if not config.is_configured():
         raise DbError("BIC not configured: SUPABASE_SERVICE_ROLE_KEY is missing")
@@ -160,7 +165,7 @@ def update(table: str, params: dict, patch: dict,
     try:
         r = requests.patch(
             f"{config.SUPABASE_URL}/rest/v1/{table}",
-            headers=_headers("return=minimal"),
+            headers=_headers("return=representation" if returning else "return=minimal"),
             params=params,
             json=patch,
             timeout=timeout or config.DB_TIMEOUT_SECONDS,
@@ -169,3 +174,11 @@ def update(table: str, params: dict, patch: dict,
         raise DbError(f"{table} update failed: {e}") from e
     if not r.ok:
         raise DbError(f"{table} update {r.status_code}: {r.text[:200]}")
+    if returning:
+        try:
+            rows = r.json()
+        except ValueError as e:
+            raise DbError(f"{table} update returned no rows payload") from e
+        if not isinstance(rows, list):
+            raise DbError(f"{table} update returned an unexpected payload")
+        return rows

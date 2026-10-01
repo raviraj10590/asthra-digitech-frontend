@@ -29,6 +29,12 @@ Rows here transition. That is the opposite of bic_claims and
 bic_decision_records, which are append-only and trigger-protected because they
 record what we believed. Nothing in this module is ever read by the Brain, and
 nothing here informs a decision.
+
+THE ONE READER: RECOVERY (Phase 2B)
+-----------------------------------
+api/redrive.py finds FAILED and stale PROCESSING rows and takes them back
+with reclaim(), a compare-and-swap. It is an operator mechanism, not the
+Brain: it re-enters the SAME decision path a live delivery takes.
 """
 
 from datetime import datetime, timezone
@@ -135,3 +141,48 @@ def lookup(wamid: str) -> Optional[dict]:
     except DbError:
         return None
     return rows[0] if rows else None
+
+
+# Columns the recovery worker needs; never the whole row.
+RECOVERY_COLUMNS = "wamid,state,failure_class,created_at,updated_at,brain_message_id"
+
+
+def candidates(states, created_after: str, updated_before: str,
+               limit: int = 5) -> list:
+    """Rows in `states`, created after / last touched before the given ISO
+    times, oldest first. Raises DbError — the caller must not guess."""
+    return select(TABLE, {
+        "state": f"in.({','.join(states)})",
+        "created_at": f"gte.{created_after}",
+        "updated_at": f"lt.{updated_before}",
+        "select": RECOVERY_COLUMNS,
+        "order": "created_at.asc",
+        "limit": str(int(limit)),
+    }, timeout=5)
+
+
+def reclaim(wamid: str, seen_state: str, seen_updated_at: str) -> bool:
+    """Take a FAILED or stale PROCESSING delivery back to PROCESSING, ONLY if
+    it is still exactly the row the caller saw. True = this worker owns it.
+
+    The filter on state AND updated_at is the lock: two workers that read the
+    same row race on one UPDATE, Postgres applies it once, and the loser's
+    filter no longer matches, so it gets zero rows back. A database failure
+    returns False — recovery fails CLOSED, unlike the live claim().
+
+    completed_at and failure_class are cleared because the table's CHECK
+    constraints allow them only on terminal states.
+    """
+    if not wamid or seen_state not in (PROCESSING, FAILED) or not config.is_configured():
+        return False
+    try:
+        rows = update(TABLE, {"wamid": f"eq.{wamid}",
+                              "state": f"eq.{seen_state}",
+                              "updated_at": f"eq.{seen_updated_at}"},
+                      {"state": PROCESSING, "updated_at": _now().isoformat(),
+                       "completed_at": None, "failure_class": None},
+                      timeout=5, returning=True)
+    except Exception as e:
+        print(f"RECOVERY_RECLAIM_FAILED reason={type(e).__name__}")
+        return False
+    return len(rows) == 1
