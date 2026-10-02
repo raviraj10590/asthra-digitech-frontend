@@ -126,8 +126,11 @@ class ModelRepliesAreInKannada(unittest.TestCase):
     """2026-09-30 night: "ಅಲ್ಲಿ ಒಂದು ಹಳ್ಳಿ" got a whole English paragraph."""
 
     def test_english_prose_is_refused(self):
-        for t in ("We are a manufacturer of oil-immersed 3-phase distribution transformers, "
-                  "based at Kadaba in Dakshina Kannada.",
+        # The language rule alone. The sentences are deliberately NOT company
+        # introductions: since 2026-10-03 an unasked-for introduction is
+        # refused on its own ground (tests/test_last20_review_1003.py).
+        for t in ("Our engineer will confirm the delivery for your village and call "
+                  "you to discuss the details.",
                   "Thank you for reaching out, Rohit. Cost is something only our engineer "
                   "can address with you directly."):
             self.assertEqual(b.reply_violates_evidence(t, "ಅಲ್ಲಿ ಒಂದು ಹಳ್ಳಿ"), "not in Kannada", t)
@@ -135,8 +138,8 @@ class ModelRepliesAreInKannada(unittest.TestCase):
             self.assertIsNone(b.reply_violates_evidence(t, "No thanx"), t)
 
     def test_kannada_with_technical_english_is_allowed(self):
-        for t in ("ನಾವು ಕಡಬದಲ್ಲಿ oil-immersed 3-phase distribution transformer ತಯಾರಕರು; "
-                  "ನಿಮ್ಮ 25 kVA ವಿಚಾರಣೆ ನಮ್ಮ engineer ಗೆ ತಲುಪಿಸಿದ್ದೇವೆ.",
+        for t in ("ನಿಮ್ಮ 25 kVA oil-immersed transformer ವಿಚಾರಣೆಯನ್ನು ನಮ್ಮ engineer ಗೆ "
+                  "ತಲುಪಿಸಿದ್ದೇವೆ; ಅವರು ಶೀಘ್ರದಲ್ಲೇ ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.",
                   "ಸರಿ, ನಮ್ಮ engineer ಕರೆ ಮಾಡುತ್ತಾರೆ. MESCOM approval ಇದೆ.",
                   "OK 🙏"):
             self.assertIsNone(b.reply_violates_evidence(t, "ಅಲ್ಲಿ ಒಂದು ಹಳ್ಳಿ"), t)

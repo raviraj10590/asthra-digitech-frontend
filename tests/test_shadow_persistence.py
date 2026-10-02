@@ -178,9 +178,10 @@ class Versions(unittest.TestCase):
             self.assertNotEqual(I.contract_version(), v)
 
     def test_validator_version_is_an_explicit_constant(self):
-        self.assertEqual(I.VALIDATOR_VERSION, "v1")
+        # v2 (2026-10-03): call_missed passed through as a Brain-owned signal.
+        self.assertEqual(I.VALIDATOR_VERSION, "v2")
         src = open(os.path.join(ROOT, "interpretation.py")).read()
-        self.assertIn('VALIDATOR_VERSION = "v1"', src)
+        self.assertIn('VALIDATOR_VERSION = "v2"', src)
 
     def test_prompt_version_is_the_template_not_the_context(self):
         self.assertRegex(I.prompt_version(), r"^[0-9a-f]{12}$")

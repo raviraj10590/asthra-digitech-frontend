@@ -741,6 +741,9 @@ _APPLICATIONS = (
     ("ev station", "EV_CHARGING"),
     ("agricultur", "AGRICULTURE"), ("agri", "AGRICULTURE"),
     ("ಕೃಷಿ", "AGRICULTURE"), ("pump", "AGRICULTURE"),
+    # ಕೃಷಿ as typed without the vowel sign ಋ (live ...3350, 2026-10-01: "ಕ್ರುಷಿ"
+    # twice, unread both times, answered by a company introduction).
+    ("ಕ್ರುಷಿ", "AGRICULTURE"), ("ಕ್ರಷಿ", "AGRICULTURE"),
     # THE SAME WORDS AS CUSTOMERS TYPE THEM, 2026-09-23. Two real answers to
     # "what is it for?" were not read at all:
     #   "ಬೋರ್ ವೆಲ್ ಉದ್ದೇಶ" (borewell purpose) — stored as the DELIVERY address
@@ -975,7 +978,11 @@ _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
                 "ರೇಟ್", "ರೇಟು", "ಪ್ರೈಸ್",
                 # "ಹಣ" alone (live ...4599, 2026-10-01) got "the engineer will
                 # tell you about money" instead of the price.
-                "ಹಣ", "ದುಡ್ಡು", "duddu", "hana")
+                "ಹಣ", "ದುಡ್ಡು", "duddu", "hana",
+                # "Cast" (cost) and "Amuont" (amount), live ...3900, 2026-10-01:
+                # both went to the model, which re-introduced the company.
+                # Whole-word matches, so "broadcast" is unaffected.
+                "cast", "amuont", "amout", "amont")
 # Already the bot's own words for this: the follow-up button is titled
 # "📋 ಕೋಟೇಶನ್" and its id is "quotation".
 _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
@@ -1302,6 +1309,12 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
     # A call time is on record: confirming it is the answer, not a paraphrase.
     if followup.get("asks_call") and (known or {}).get("callback"):
         return False
+    # A missed-call complaint is answered with an apology and a person.
+    if followup.get("call_missed"):
+        return False
+    # A price objection has an owner-approved answer (value, then sales calls).
+    if followup.get("asked_discount"):
+        return False
     # The owner's ruling is the answer; a model paraphrase could add a number.
     if followup.get("customer_question") == QUESTION_DELIVERY_TIME:
         return False
@@ -1395,6 +1408,14 @@ _PRICE_REFUSAL_RE = re.compile(
     re.I)
 
 
+_UNKEPT_PROMISE_RE = re.compile(
+    r"\bsystem\b|ವ್ಯವಸ್ಥೆ|rate list|price list|ದರಪಟ್ಟಿ|ದರ ಪಟ್ಟಿ|ಬೆಲೆಪಟ್ಟಿ|ಬೆಲೆ ಪಟ್ಟಿ",
+    re.I)
+_WELCOME_RE = re.compile(r"ಸ್ವಾಗತ|\bwelcome\b", re.I)
+_SELF_INTRO_RE = re.compile(
+    r"ತಯಾರಕರು|ತಯಾರಿಸುತ್ತೇವೆ|ತಯಾರಿಕಾ ಘಟಕ|\bmanufactur", re.I)
+
+
 def reply_violates_evidence(text: str, customer_text: str = None):
     """Why this generated reply may not be sent, or None if it may.
 
@@ -1439,6 +1460,24 @@ def reply_violates_evidence(text: str, customer_text: str = None):
                      or _writes_latin_kannada(customer_text))
     if wrote_kannada and latin_letters >= 40 and kannada_chars < latin_letters:
         return "not in Kannada"
+    # A PROMISE NOTHING KEEPS. "The detailed rate list will be shared with
+    # you by our system" / "ದರಪಟ್ಟಿಯನ್ನು ನಮ್ಮ ವ್ಯವಸ್ಥೆ ಕಳುಹಿಸುತ್ತದೆ" (live
+    # ...5879 and ...8996, 2026-10-01). No system sends a rate list; the
+    # price is in the composed reply already.
+    if _UNKEPT_PROMISE_RE.search(raw):
+        return "promises a document nobody sends"
+    # A SECOND INTRODUCTION. Mid-conversation, a one-word answer ("Cast",
+    # "ಕ್ರುಷಿ", "Bellikhandi") was met with "welcome to Bairavi… we are
+    # manufacturers of…" (live, 2026-10-01). The opening reply already said
+    # who we are; only a customer who asks gets it again.
+    # Judged only against what the customer actually wrote: without it, an
+    # introduction is an ordinary answer (the live path always passes it).
+    if customer_text is not None and customer_question(customer_text) not in (
+            QUESTION_WHO, QUESTION_RANGE):
+        if _WELCOME_RE.search(raw):
+            return "welcomes the customer again"
+        if _SELF_INTRO_RE.search(raw):
+            return "re-introduces the company"
     # A capacity we do not offer, stated as if we do.
     for figure in re.findall(r"(\d{2,4})\s*k\s*v\s*a", low):
         if int(figure) not in CATALOGUE_KVA and int(figure) not in PLANNED_KVA:
@@ -1550,7 +1589,10 @@ _DISCOUNT_WORDS = ("discount", "negotiable", "negotiate", "best price",
                    # THE PRICE IS TOO HIGH — the same ask, said as an objection.
                    # "Too cost" (live ...2829) got the same price again, then
                    # the model said it could not discuss figures.
-                   "costly", "expensive", "dubari", "ದುಬಾರಿ", "too cost")
+                   "costly", "expensive", "dubari", "ದುಬಾರಿ", "too cost",
+                   # Said straight after a quote, these ARE about the price
+                   # (live ...5879, 2026-10-01: "It's very High").
+                   "very high", "too high", "very costly", "ತುಂಬಾ ಜಾಸ್ತಿ")
 # "less" alone is also "less than a month": these count only beside a price word.
 _LOWER_WORDS = ("less", "reduce", "kadime", "kammi", "ಕಡಿಮೆ", "ಕಮ್ಮಿ",
                 "too", "jasti", "ಜಾಸ್ತಿ", "heavy", "high")
@@ -1908,6 +1950,12 @@ def _is_place_like(raw: str) -> bool:
     """
     low = raw.lower()
 
+    # ONE LETTER IS NOT A PLACE. "A" (the form's option letter) was recorded
+    # as the delivery place on 2026-10-01 (live ...3900). No village name is a
+    # single letter; Kannada vowel signs are not letters, so "ಊರು" still
+    # counts two.
+    if len(re.findall(r"[^\W\d_]", raw)) < 2:
+        return False
     # A question is not an answer — "Gujarat price?" asks something else.
     if "?" in raw:
         return False
@@ -2052,7 +2100,10 @@ _AFFIRMATIONS = ("ok", "okay", "ok sir", "k", "kk", "okk", "okey", "oky", "okie"
                  # "Idi" (it is) confirming "is this the place?" — live
                  # ...5711, 2026-09-29, was stored as the address "Idi".
                  "idi", "ide", "ಇದಿ", "ಇದೆ", "houdu idi", "haudu idi", "ಹೌದು ಇದೆ",
-                 "adhe", "ade", "ಅದೇ")
+                 "adhe", "ade", "ಅದೇ",
+                 # "Sare" — ಸರಿ typed as it is said (live ...3188, 2026-10-02,
+                 # recorded as the delivery place "Sare").
+                 "sare")
 
 
 # THANKS, WITH A WORD OR TWO AROUND IT. "ಧನ್ಯವಾದಗಳು ಸಿಸ್ಟಮ್" (live ...3554)
@@ -2280,6 +2331,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "asked_price": _mentions(low, _PRICE_ASK),
             "asked_discount": asked_discount(text),
             "asks_call": asks_about_call(text),
+            "call_missed": call_missed(text),
             "declined": is_decline(text),
             "escom_area": None,
             "commercial_intent": commercial_intent(text),
@@ -2516,6 +2568,25 @@ _ASK_CALL_WORDS = ("call", "cl", "kal", "phone", "ph", "ಕಾಲ್", "ಕರ�
 def asks_about_call(text: str) -> bool:
     low = (text or "").lower()
     return len(low.split()) >= 2 and _mentions(low, _ASK_CALL_WORDS)
+
+
+# THE PROMISED CALL DID NOT COME (live ...3188, 2026-10-02). Two hours after
+# "our engineer will call you now", the customer sent "ಕರೆ ಮಾಡಿಲ್ಲ" (you have
+# not called) and was answered "ಹೌದು" — YES — "the engineer will call now",
+# the same promise again. A complaint needs an apology and a person, not a
+# repeat; the owner alert flags it at the top.
+_CALL_MISSED = ("ಕರೆ ಮಾಡಿಲ್ಲ", "ಕರೆ ಬಂದಿಲ್ಲ", "ಕಾಲ್ ಮಾಡಿಲ್ಲ", "ಕಾಲ್ ಬಂದಿಲ್ಲ",
+                "ಫೋನ್ ಮಾಡಿಲ್ಲ", "ಫೋನ್ ಬಂದಿಲ್ಲ", "ಕರೆ ಮಾಡಲಿಲ್ಲ", "ಕಾಲ್ ಮಾಡಲಿಲ್ಲ",
+                "call madilla", "call madlilla", "call madalilla", "call bandilla",
+                "call barlilla", "call banilla", "phone madilla", "phone bandilla",
+                "not called", "didn't call", "didnt call", "did not call",
+                "no call", "nobody called", "no one called", "still waiting for call",
+                "not received any call")
+
+
+def call_missed(text: str) -> bool:
+    low = (text or "").lower()
+    return _mentions(low, _CALL_MISSED)
 
 
 def callback_request(text: str, awaiting=()):
@@ -3130,7 +3201,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
             lines.append(f"📍 ಈ ಸ್ಥಳ *{followup['escom_area'].upper()}* ವ್ಯಾಪ್ತಿಗೆ ಬರುತ್ತದೆ. "
                          + approval_answer_kn((followup["escom_area"],)))
     elif not (followup.get("asked_price") or followup.get("callback")
-              or followup.get("asked_terms")
+              or followup.get("asked_terms") or followup.get("call_missed")
               or (followup.get("asks_call") and (known or {}).get("callback"))):
         # A price question or a call choice is answered directly below; a
         # "message received" line above it is filler.
@@ -3158,7 +3229,12 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         # Only the term they asked about — one line each.
         lines.append("\n" + "\n".join(TERM_LINES[t] for t in followup["asked_terms"]))
     _chosen = (known or {}).get("callback")
-    if followup.get("asks_call") and _chosen and not followup.get("callback"):
+    if followup.get("call_missed"):
+        _who = display_name(merged_state(known, followup).get("name"))
+        lines.append(("ಕ್ಷಮಿಸಿ " + _who + " ಅವರೇ 🙏" if _who else "ಕ್ಷಮಿಸಿ 🙏")
+                     + " ಕರೆ ತಡವಾಗಿದೆ. ನಿಮ್ಮ ವಿಚಾರವನ್ನು ನಮ್ಮ ತಂಡಕ್ಕೆ ಮತ್ತೊಮ್ಮೆ "
+                     "ತುರ್ತಾಗಿ ತಿಳಿಸಿದ್ದೇವೆ — ಆದಷ್ಟು ಬೇಗ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
+    elif followup.get("asks_call") and _chosen and not followup.get("callback"):
         _who = display_name(merged_state(known, followup).get("name"))
         lines.append(("ಹೌದು " + _who + " ಅವರೇ" if _who else "ಹೌದು")
                      + f", ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[_chosen]}* ನಿಮಗೆ "
@@ -3280,10 +3356,14 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
         return v if v not in (None, "") else "TBD"
     _cb = followup.get("callback")
     return (
-        (f"🔥📞 *CALL {CALLBACK_LABEL_EN[_cb].upper()}* — customer asked for a call\n" if _cb else "")
+        # FIRST LINE: a broken promise outranks every other signal.
+        ("📵🔥 *CALL MISSED* — customer says the promised call never came. "
+         "Call now.\n" if followup.get("call_missed") else "")
+        + (f"🔥📞 *CALL {CALLBACK_LABEL_EN[_cb].upper()}* — customer asked for a call\n" if _cb else "")
         + ("⏰📞 *WAITING FOR YOUR CALL* — customer asked again when you will call "
            f"(chose: {CALLBACK_LABEL_EN[(known or {})['callback']]})\n"
-           if followup.get("asks_call") and (known or {}).get("callback") else "")
+           if followup.get("asks_call") and (known or {}).get("callback")
+           and not followup.get("call_missed") else "")
         + ("❌ *NOT INTERESTED* — customer declined; a call may still save it\n"
            if followup.get("declined") else "")
         + ("💰🔥 *PRICE NEGOTIATION* — customer asked for a lower price. "
