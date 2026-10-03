@@ -2520,6 +2520,49 @@ AWAITING_CALLBACK = "callback"
 CALLBACK_NOW, CALLBACK_EVENING, CALLBACK_TOMORROW = "now", "evening", "tomorrow"
 CALLBACK_LABEL_KN = {CALLBACK_NOW: "ಈಗಲೇ", CALLBACK_EVENING: "ಇಂದು ಸಂಜೆ", CALLBACK_TOMORROW: "ನಾಳೆ"}
 CALLBACK_LABEL_EN = {CALLBACK_NOW: "NOW", CALLBACK_EVENING: "this evening", CALLBACK_TOMORROW: "tomorrow"}
+
+# CALL HOURS (owner, 2026-10-03: "morning 9 to night 9 varege"). Two leads
+# who chose "call now" at 8-9 pm were promised a call *ಈಗಲೇ* (right now) and
+# nobody called. Outside the hours, "now" is promised as the next morning
+# instead — the truth, said up front.
+#
+# This module has no clock (it imports only re and hashlib), so the CALLER
+# passes the current India hour as followup["call_hour"]. Absent, the hour is
+# unknown and the promise is exactly what it was before.
+CALL_HOURS = (9, 21)
+_AFTER_9_TODAY_KN = "ಇಂದು ಬೆಳಿಗ್ಗೆ 9 ಗಂಟೆಯ ನಂತರ"
+_AFTER_9_TOMORROW_KN = "ನಾಳೆ ಬೆಳಿಗ್ಗೆ 9 ಗಂಟೆಯ ನಂತರ"
+
+
+def callback_when_kn(slot, hour=None) -> str:
+    """What we actually promise for this slot at this IST hour."""
+    label = CALLBACK_LABEL_KN.get(slot, "")
+    if hour is None:
+        return label
+    start, end = CALL_HOURS
+    if slot == CALLBACK_NOW:
+        if hour < start:
+            return _AFTER_9_TODAY_KN
+        if hour >= end:
+            return _AFTER_9_TOMORROW_KN
+    if slot == CALLBACK_EVENING and hour >= end:
+        return "ನಾಳೆ ಸಂಜೆ"
+    return label
+
+
+def callback_when_en(slot, hour=None) -> str:
+    """The same promise for the owner alert."""
+    label = CALLBACK_LABEL_EN.get(slot, "")
+    if hour is None:
+        return label
+    start, end = CALL_HOURS
+    if slot == CALLBACK_NOW and hour < start:
+        return "TODAY AFTER 9 AM (asked before 9)"
+    if slot == CALLBACK_NOW and hour >= end:
+        return "TOMORROW AFTER 9 AM (asked after 9 pm)"
+    if slot == CALLBACK_EVENING and hour >= end:
+        return "tomorrow evening (asked after 9 pm)"
+    return label
 CALLBACK_QUESTION = ("ನಿಮಗೆ ಯಾವಾಗ ಕರೆ ಮಾಡುವುದು ಅನುಕೂಲ?\n"
                      "1️⃣ ಈಗಲೇ\n2️⃣ ಇಂದು ಸಂಜೆ\n3️⃣ ನಾಳೆ")
 CALL_HINT = "📞 ನೇರವಾಗಿ ಮಾತನಾಡಲು *CALL* ಎಂದು reply ಮಾಡಿ."
@@ -3129,7 +3172,8 @@ def compose_followup_reply(followup: dict, known: dict = None, *args, **kwargs) 
     reply = _compose_followup_reply(followup, known, *args, **kwargs)
     slot = merged_state(known, followup).get("callback")
     if reply.strip() == "ಧನ್ಯವಾದಗಳು." and slot in CALLBACK_LABEL_KN:
-        reply = f"ಧನ್ಯವಾದಗಳು 🙏 ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[slot]}* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ."
+        reply = (f"ಧನ್ಯವಾದಗಳು 🙏 ನಮ್ಮ engineer "
+                 f"*{callback_when_kn(slot, followup.get('call_hour'))}* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
     return reply
 
 
@@ -3240,8 +3284,8 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     elif followup.get("asks_call") and _chosen and not followup.get("callback"):
         _who = display_name(merged_state(known, followup).get("name"))
         lines.append(("ಹೌದು " + _who + " ಅವರೇ" if _who else "ಹೌದು")
-                     + f", ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[_chosen]}* ನಿಮಗೆ "
-                     "ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏")
+                     + f", ನಮ್ಮ engineer *{callback_when_kn(_chosen, followup.get('call_hour'))}* "
+                     "ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏")
     if followup.get("asked_discount"):
         # Never a discount and never the same price again: a person calls.
         # The value answer first (owner's selling points), then a person.
@@ -3290,7 +3334,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     if _callback:
         _who = display_name(merged_state(known, followup).get("name"))
         lines.append(("ಸರಿ " + _who + " ಅವರೇ." if _who else "ಸರಿ.")
-                     + f" ನಮ್ಮ engineer *{CALLBACK_LABEL_KN[_callback]}* ನಿಮಗೆ "
+                     + f" ನಮ್ಮ engineer *{callback_when_kn(_callback, followup.get('call_hour'))}* ನಿಮಗೆ "
                      "ಕರೆ ಮಾಡಿ, ಡೆಲಿವರಿ ಸಮಯ ಮತ್ತು order ವಿವರಗಳನ್ನು ತಿಳಿಸುತ್ತಾರೆ.\n"
                      "ಧನ್ಯವಾದಗಳು 🙏")
     if missing:
@@ -3362,7 +3406,8 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
         # FIRST LINE: a broken promise outranks every other signal.
         ("📵🔥 *CALL MISSED* — customer says the promised call never came. "
          "Call now.\n" if followup.get("call_missed") else "")
-        + (f"🔥📞 *CALL {CALLBACK_LABEL_EN[_cb].upper()}* — customer asked for a call\n" if _cb else "")
+        + (f"🔥📞 *CALL {callback_when_en(_cb, followup.get('call_hour')).upper()}* "
+           "— customer asked for a call\n" if _cb else "")
         + ("⏰📞 *WAITING FOR YOUR CALL* — customer asked again when you will call "
            f"(chose: {CALLBACK_LABEL_EN[(known or {})['callback']]})\n"
            if followup.get("asks_call") and (known or {}).get("callback")

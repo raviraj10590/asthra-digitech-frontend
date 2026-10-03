@@ -37,3 +37,20 @@ import os
 
 os.environ.setdefault("OWNER_PHONE", "910000000001,910000000002")
 os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
+
+
+# THE CALL-HOURS CLOCK (2026-10-03). The live pipeline promises "call now"
+# only between 9 am and 9 pm IST and reads the hour through
+# webhook._ist_hour(). Fixed at midday for every test, so a suite run at
+# night cannot turn every "ಈಗಲೇ" assertion red. Tests of the rule itself
+# (tests/test_call_hours.py) set their own hour.
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _midday_in_india(monkeypatch):
+    import sys as _sys
+    mod = _sys.modules.get("webhook")
+    if mod is not None and hasattr(mod, "_ist_hour"):
+        monkeypatch.setattr(mod, "_ist_hour", lambda: 12)
+    yield

@@ -356,6 +356,11 @@ def _crm_business_id(source: str):
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+
+def _ist_hour() -> int:
+    """The current hour in India. One function, so tests can fix the clock."""
+    return datetime.now(IST).hour
+
 def get_openai():
     # Lazy import — the openai package costs ~0.5-1.5s at import time, which was
     # paid on EVERY cold start even for messages that never call the AI.
@@ -6239,6 +6244,9 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             known = bairavi.established_from_history(ctx["history"])
             followup = bairavi.parse_followup(
                 user_text, bairavi_awaiting(ctx["history"]), known=known)
+            # CALL HOURS: bairavi.py has no clock, so the India hour is passed in
+            # and "call me now" at night is promised for the next morning.
+            followup["call_hour"] = _ist_hour()
             # UNTIMED on purpose. The 12 h bound protects READING a bare word
             # as an answer; for deciding to stay silent the safe direction is
             # the opposite — if the last reply asked anything, however long
