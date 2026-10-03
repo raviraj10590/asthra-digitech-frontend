@@ -83,6 +83,28 @@ class TheFormBecomesTheHandoff(unittest.TestCase):
         self.assertTrue(ml.form_text(lead("L1")).startswith("[Meta form]"))
 
 
+class TheLiveFormsFieldNames(unittest.TestCase):
+    """The first production dry run (2026-10-03) logged these names; every
+    lead was skipped because the phone arrives as "phone"."""
+    LIVE = ["full_name", "phone", "ನಿಮಗೆ_ಅಗತ್ಯವಿರುವ_ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್_ಸಾಮರ್ಥ್ಯ_ಯಾವುದು?",
+            "ನಿಮಗೆ_ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್_ಯಾವಾಗ_ಅಗತ್ಯವಿದೆ?", "ನಿಮ್ಮ_ಪ್ರಾಜೆಕ್ಟ್_ಯಾವ_ಸ್ಥಳದಲ್ಲಿದೆ?"]
+
+    def live_lead(self):
+        values = ["Jackson", "+919480004560", "A._25_kVA", "A.ತಕ್ಷಣ_ಅಗತ್ಯವಿದೆ", "Puttur"]
+        return {"id": "LIVE1", "created_time": meta_time(45),
+                "field_data": [{"name": n, "values": [v]} for n, v in zip(self.LIVE, values)]}
+
+    def test_the_phone_field_is_read(self):
+        self.assertEqual(ml.normalize_phone(ml.phone_of(self.live_lead())), "919480004560")
+        self.assertEqual(ml.decide(self.live_lead(), NOW, wrote_before=False, handled=False,
+                                   internal=False), ml.CONTACT)
+
+    def test_the_whole_form_reads(self):
+        p = bairavi.parse(ml.form_text(self.live_lead()))
+        self.assertEqual((p["name"], p["capacity_kva"], p["urgency"], p["location"]),
+                         ("Jackson", 25, "IMMEDIATE", "Puttur"))
+
+
 class Template(unittest.TestCase):
     def test_params_and_fallbacks(self):
         self.assertEqual(ml.template_params({"name": "Prakash Monappa", "capacity_kva": 63}),

@@ -169,7 +169,7 @@ def run(now=None) -> dict:
         if len(contacted) >= ml.MAX_PER_RUN:
             counts["deferred"] = counts.get("deferred", 0) + 1
             continue
-        phone = ml.normalize_phone(ml.field(lead, "phone_number"))
+        phone = ml.normalize_phone(ml.phone_of(lead))
         try:
             internal = bool(phone) and w.get_role(phone)[0] != "CLIENT"
             first = ml.decide(lead, now, wrote_before=False, handled=False, internal=internal)

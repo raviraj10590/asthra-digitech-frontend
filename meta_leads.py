@@ -71,7 +71,11 @@ SKIP_INTERNAL = "SKIP_INTERNAL"
 _FORM_INTRO = ("[Meta form] Hello! I filled out your form and would like to "
                "know more about your business.")
 _STANDARD_LABELS = {"full_name": "Full name", "phone_number": "Phone number",
-                    "city": "City", "email": "Email"}
+                    "phone": "Phone number", "city": "City", "email": "Email"}
+# Meta names the phone answer "phone_number" in its standard question, but the
+# live Bairavi form (dry run, 2026-10-03) sends it as "phone": all 11 leads of
+# the first dry run were skipped as having no phone.
+PHONE_FIELDS = ("phone_number", "phone")
 
 
 def normalize_phone(raw) -> str:
@@ -115,6 +119,14 @@ def form_text(lead: dict) -> str:
     return _FORM_INTRO + "\n\n" + "\n".join(lines)
 
 
+def phone_of(lead: dict) -> str:
+    for name in PHONE_FIELDS:
+        value = field(lead, name)
+        if value:
+            return value
+    return ""
+
+
 def template_params(parsed: dict) -> tuple:
     """({{1}}, {{2}}) for the template, never empty."""
     name = bairavi.display_name(parsed.get("name")) or NAME_FALLBACK
@@ -146,7 +158,7 @@ def decide(lead: dict, now: datetime, *, wrote_before: bool, handled: bool,
         return SKIP_TOO_OLD
     if now - created < timedelta(minutes=WAIT_MINUTES):
         return SKIP_TOO_NEW
-    if not normalize_phone(field(lead, "phone_number")):
+    if not normalize_phone(phone_of(lead)):
         return SKIP_NO_PHONE
     if internal:
         return SKIP_INTERNAL
