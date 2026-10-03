@@ -112,13 +112,25 @@ def template_status() -> tuple:
 
 
 def wrote_before(phone: str) -> bool:
-    r = requests.get(f"{w.CRM_SUPABASE_URL}/rest/v1/whatsapp_messages",
-                     headers=w._crm_headers(),
-                     params={"phone": f"eq.{phone}", "direction": "eq.inbound",
-                             "user_id": f"eq.{w.CRM_OWNER_USER_ID}",
-                             "select": "id", "limit": "1"}, timeout=5)
-    r.raise_for_status()
-    return bool(r.json())
+    """Has this lead already written to us — from THIS number, or from any
+    number, carrying this number in the form handoff?
+
+    THE SECOND CHECK (live, 2026-10-03). A lead typed 9194…0033 on the form
+    but messages from 9195…0033; the handoff they sent on 2 Oct carried
+    "Phone number: +91944…0033" in its body. Matching the sender's number
+    alone missed it, and the template went to the second number.
+    """
+    base = {"direction": "eq.inbound", "user_id": f"eq.{w.CRM_OWNER_USER_ID}",
+            "select": "id", "limit": "1"}
+    for extra in ({"phone": f"eq.{phone}"},
+                  {"body": f"ilike.*{phone[-10:]}*",
+                   "created_at": f"gte.{ml.since_iso(days=7)}"}):
+        r = requests.get(f"{w.CRM_SUPABASE_URL}/rest/v1/whatsapp_messages",
+                         headers=w._crm_headers(), params=dict(base, **extra), timeout=5)
+        r.raise_for_status()
+        if r.json():
+            return True
+    return False
 
 
 def handled(phone: str, lead_id: str) -> bool:

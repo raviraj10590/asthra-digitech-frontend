@@ -155,6 +155,7 @@ class World(unittest.TestCase):
     def setUp(self):
         self.leads = [lead("L1")]
         self.crm_inbound = set()          # phones that wrote to us
+        self.crm_bodies = []              # inbound message texts
         self.transcript = []              # (phone, role, content)
         self.sent = []
         self.mirrored = []
@@ -194,7 +195,10 @@ class World(unittest.TestCase):
                         {"id": "AD3"}]})
                 raise AssertionError(f"unexpected Graph call {url}")
             if url == f"{CRM}/rest/v1/whatsapp_messages":
-                return Resp(200, [{"id": 1}] if params["phone"][3:] in self.crm_inbound else [])
+                if "phone" in params:
+                    return Resp(200, [{"id": 1}] if params["phone"][3:] in self.crm_inbound else [])
+                needle = params["body"][len("ilike.*"):-1]
+                return Resp(200, [{"id": 1}] if any(needle in b for b in self.crm_bodies) else [])
             if url == f"{BRAIN}/rest/v1/whatsapp_messages":
                 prefix = params["content"][len("like."):-1]
                 hit = [c for p, r, c in self.transcript
@@ -301,6 +305,15 @@ class SendMode(World):
         self.assertEqual(self.sent, [])
         self.assertEqual(res.get(ml.SKIP_ALREADY_WROTE), 1)
         self.assertEqual(self.crm_synced, [])
+
+    def test_a_handoff_from_another_number_counts_as_already_wrote(self):
+        """Live 2026-10-03: form number 9194…0033, WhatsApp number 9195…0033;
+        the handoff body carried the form number."""
+        self.crm_bodies.append("Hello! I filled out your form ... Full name: Prakash Monappa "
+                               "Phone number: +919448650033 ...")
+        res = self.run_job()
+        self.assertEqual(self.sent, [])
+        self.assertEqual(res.get(ml.SKIP_ALREADY_WROTE), 1)
 
     def test_owner_and_staff_are_never_messaged(self):
         self.leads = [lead("L9", phone="+919999000001")]

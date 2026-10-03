@@ -169,6 +169,11 @@ def decide(lead: dict, now: datetime, *, wrote_before: bool, handled: bool,
     return CONTACT
 
 
+def since_iso(days: int, now: datetime = None) -> str:
+    return ((now or datetime.now(timezone.utc)) - timedelta(days=days)).astimezone(
+        timezone.utc).isoformat()
+
+
 def marker(lead_id: str, result: str) -> str:
     return f"{MARK}{lead_id}::{result}"
 
