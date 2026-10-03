@@ -5654,6 +5654,18 @@ def _owner_view_data(view: str, now: datetime) -> dict:
         d["clients_by_key"] = {(c.get("phone") or "")[-10:]: c.get("name") for c in _crm_rows(
             "clients", {**me, "select": "name,phone", "phone": "not.is.null", "limit": "1000"}) if c.get("name")}
         d["staff"] = staff_and_owner_numbers()
+        # The bot's newest reply per customer, to catch replies stamped a moment
+        # BEFORE the message they answer (see owner_crm.REPLY_TOLERANCE).
+        phones = sorted({c["phone"] for c in d["convos"] if c.get("phone")})
+        d["last_reply"] = {}
+        if phones:
+            for m in _crm_rows("whatsapp_messages", {
+                    **me, "direction": "eq.outbound", "phone": f"in.({','.join(phones)})",
+                    "created_at": f"gte.{(now - owner_crm.WAIT_MAX - timedelta(days=1)).isoformat()}",
+                    "select": "phone,created_at", "order": "created_at.desc", "limit": "1000"}):
+                k = (m.get("phone") or "")[-10:]
+                if k not in d["last_reply"]:
+                    d["last_reply"][k] = owner_crm._ts(m.get("created_at"))
     if view == "today":
         d["new_leads"] = _crm_rows("clients", {**me, "created_at": f"gte.{(now - timedelta(hours=24)).isoformat()}",
                                                "select": "name,phone", "order": "created_at.desc", "limit": "50"})
@@ -5687,13 +5699,13 @@ def tool_owner_view(sender: str, view: str = "today", **_) -> str:
     if view == "followups":
         return owner_crm.followups_text(d["followups"], d["clients_by_id"], today)
     if view == "chats":
-        return owner_crm.chats_text(d["convos"], d["clients_by_key"], now, d["staff"])
+        return owner_crm.chats_text(d["convos"], d["clients_by_key"], now, d["staff"], d["last_reply"])
     if view == "pipeline":
         return owner_crm.pipeline_text(d["stages"])
     if view == "week":
         return owner_crm.week_text(d["stats"])
     return owner_crm.today_text(d["followups"], d["clients_by_id"], d["convos"], d["clients_by_key"],
-                                d["new_leads"], now, d["staff"])
+                                d["new_leads"], now, d["staff"], d["last_reply"])
 
 
 def tool_money_due(sender: str, **_) -> str:

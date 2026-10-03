@@ -39,6 +39,18 @@ class Commands(unittest.TestCase):
                                  ("crm_calls_to_make", None)])
 
 
+class Timestamps(unittest.TestCase):
+    def test_postgres_shapes_python39_cannot_read(self):
+        """Found by the real-data preview 2026-10-04: '+00' and 5-digit fractions."""
+        for raw in ("2026-09-29T12:33:12.51124+00", "2026-09-29 12:33:12.51124+00",
+                    "2026-09-29T12:33:12+00:00", "2026-09-29T12:33:12.5Z"):
+            self.assertEqual(owner_crm._ts(raw).astimezone(timezone.utc).hour, 12, raw)
+        convos = [{"phone": "919000000001", "last_body": "rate?", "last_direction": "inbound",
+                   "last_created_at": (NOW - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S.51124+00"),
+                   "contact_name": ""}]
+        self.assertEqual(len(owner_crm.waiting_chats(convos, NOW)), 1)
+
+
 class Followups(unittest.TestCase):
     ROWS = [{"id": 1, "client_id": "a", "note": "call back about 63 kVA", "due_date": "2026-10-03", "is_done": False},
             {"id": 2, "client_id": "b", "note": "send quotation", "due_date": TODAY, "is_done": False},
@@ -75,6 +87,25 @@ class Chats(unittest.TestCase):
         text = owner_crm.chats_text(convos, {"9000000001": "Ravi"}, NOW, [OWNER])
         self.assertIn("Ravi", text)
         self.assertIn("wa.me/919000000001", text)
+
+
+class ReplyStampedEarly(unittest.TestCase):
+    def test_bot_reply_saved_a_second_before_counts_as_answered(self):
+        c = {"phone": "919000000001", "last_body": "Hello! I filled in your form", "last_direction": "inbound",
+             "last_created_at": ago(60), "contact_name": ""}
+        replied_just_before = NOW - timedelta(minutes=60, seconds=2)
+        replied_long_before = NOW - timedelta(days=2)
+        self.assertEqual(owner_crm.waiting_chats([c], NOW, last_reply={"9000000001": replied_just_before}), [])
+        self.assertEqual(len(owner_crm.waiting_chats([c], NOW, last_reply={"9000000001": replied_long_before})), 1)
+
+
+class BotChecksApart(unittest.TestCase):
+    def test_bot_checks_counted_separately(self):
+        rows = Followups.ROWS + [{"id": 9, "client_id": "a", "note": "🤖 Bot check: no reply",
+                                  "due_date": TODAY, "is_done": False}]
+        t = owner_crm.followups_text(rows, Followups.CLIENTS, TODAY)
+        self.assertIn("— 2 (1 overdue) · plus 1 🤖 bot check", t)
+        self.assertNotIn("no reply", t)
 
 
 class Money(unittest.TestCase):

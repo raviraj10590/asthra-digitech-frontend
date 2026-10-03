@@ -19,11 +19,16 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import bairavi
+import brain_health
 
 IST = timezone(timedelta(hours=5, minutes=30))
 LIST_MAX = 8                     # one readable WhatsApp message
 WAIT_MIN = timedelta(minutes=10)
 WAIT_MAX = timedelta(days=7)
+# The CRM often stores the bot's reply 0-2 s BEFORE the message it answers,
+# so "the customer wrote last" must allow a reply stamped a little earlier.
+REPLY_TOLERANCE = timedelta(seconds=5)
+BOT_CHECK = "🤖"
 
 VIEWS = {
     "#today": "today", "#followups": "followups", "#followup": "followups", "#fu": "followups",
@@ -43,15 +48,11 @@ def command(low: str):
 
 
 def _ts(value):
-    if not value:
-        return None
-    v = str(value).replace(" ", "T")
-    if v.endswith("Z"):
-        v = v[:-1] + "+00:00"
-    if len(v) == 10:                                   # a date
-        return datetime.fromisoformat(v).replace(tzinfo=IST)
-    t = datetime.fromisoformat(v)
-    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+    """A CRM timestamp ('2026-09-29 12:33:12.51124+00', 5-digit fractions and
+    '+00' included — Python 3.9 cannot read those) or a plain date."""
+    if value and len(str(value)) == 10:
+        return datetime.fromisoformat(str(value)).replace(tzinfo=IST)
+    return brain_health._ts(value)
 
 
 def _when(value) -> str:
@@ -90,10 +91,13 @@ def due_followups(rows: list, today: str) -> list:
                   key=lambda r: r.get("due_date") or "")
 
 
-def waiting_chats(convos: list, now: datetime, staff_phones=()) -> list:
+def waiting_chats(convos: list, now: datetime, staff_phones=(), last_reply=None) -> list:
     """Conversations whose last message is the customer's, owed a reply,
-    10 minutes to 7 days old — newest first."""
+    10 minutes to 7 days old — newest first. `last_reply`: phone (last 10
+    digits) -> newest outbound time; a reply within REPLY_TOLERANCE before the
+    customer's message counts as answered."""
     staff = {p[-10:] for p in staff_phones if p}
+    last_reply = last_reply or {}
     out = []
     for c in convos:
         if c.get("last_direction") != "inbound" or (c.get("phone") or "")[-10:] in staff:
@@ -103,6 +107,9 @@ def waiting_chats(convos: list, now: datetime, staff_phones=()) -> list:
         if not body or f.get("is_ack") or f.get("declined") or bairavi.is_decline(body):
             continue
         t = _ts(c.get("last_created_at"))
+        replied = last_reply.get((c.get("phone") or "")[-10:])
+        if replied and t and replied >= t - REPLY_TOLERANCE:
+            continue
         if t and WAIT_MIN <= now - t <= WAIT_MAX:
             out.append(c)
     return sorted(out, key=lambda c: c.get("last_created_at") or "", reverse=True)
@@ -116,11 +123,14 @@ def _name(c: dict, clients_by_key: dict) -> str:
 # ── messages ────────────────────────────────────────────────────────────────
 
 def followups_text(rows: list, clients_by_id: dict, today: str) -> str:
-    due = due_followups(rows, today)
-    if not due:
+    every = due_followups(rows, today)
+    due = [r for r in every if not (r.get("note") or "").startswith(BOT_CHECK)]
+    checks = len(every) - len(due)
+    if not every:
         return "✅ *Follow-ups:* nothing due today or overdue."
     over = sum(1 for r in due if r.get("due_date") < today)
-    lines = [f"📋 *Follow-ups due* — {len(due)}" + (f" ({over} overdue)" if over else "")]
+    lines = [f"📋 *Follow-ups due* — {len(due)}" + (f" ({over} overdue)" if over else "")
+             + (f" · plus {checks} 🤖 bot check{'s' if checks != 1 else ''} in the CRM" if checks else "")]
     for r in due[:LIST_MAX]:
         c = clients_by_id.get(r.get("client_id")) or {}
         late = " ⚠️" if r.get("due_date") < today else ""
@@ -131,8 +141,8 @@ def followups_text(rows: list, clients_by_id: dict, today: str) -> str:
     return "\n".join(lines)
 
 
-def chats_text(convos: list, clients_by_key: dict, now: datetime, staff_phones=()) -> str:
-    waiting = waiting_chats(convos, now, staff_phones)
+def chats_text(convos: list, clients_by_key: dict, now: datetime, staff_phones=(), last_reply=None) -> str:
+    waiting = waiting_chats(convos, now, staff_phones, last_reply)
     if not waiting:
         return "✅ *Chats:* nobody is waiting for a reply."
     lines = [f"💬 *Waiting for a reply* — {len(waiting)}"]
@@ -182,13 +192,16 @@ def week_text(stats: dict) -> str:
     ])
 
 
-def today_text(followup_rows, clients_by_id, convos, clients_by_key, new_leads, now, staff_phones=()) -> str:
+def today_text(followup_rows, clients_by_id, convos, clients_by_key, new_leads, now, staff_phones=(),
+               last_reply=None) -> str:
     today = now.astimezone(IST).date().isoformat()
-    due = due_followups(followup_rows, today)
-    waiting = waiting_chats(convos, now, staff_phones)
+    every = due_followups(followup_rows, today)
+    due = [r for r in every if not (r.get("note") or "").startswith(BOT_CHECK)]
+    checks = len(every) - len(due)
+    waiting = waiting_chats(convos, now, staff_phones, last_reply)
     t = now.astimezone(IST)
     lines = [f"☀️ *Today — {t.day} {t.strftime('%b')}*", ""]
-    lines.append(f"📋 Follow-ups due: *{len(due)}*")
+    lines.append(f"📋 Follow-ups due: *{len(due)}*" + (f" (+{checks} 🤖 bot checks)" if checks else ""))
     for r in due[:3]:
         c = clients_by_id.get(r.get("client_id")) or {}
         lines.append(f"   • {c.get('name') or '—'} — {_line(r.get('note'), 40)}")
