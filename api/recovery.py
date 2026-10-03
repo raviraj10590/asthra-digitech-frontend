@@ -72,6 +72,17 @@ def meta_leads(now=None) -> dict:
         return {"error": "meta_leads_failed"}
 
 
+def call_reminders(now=None) -> dict:
+    """Remind the owner about promised calls that are overdue
+    (api/call_reminders_sync.py). Owner-facing only; never raises."""
+    try:
+        import call_reminders_sync
+        return call_reminders_sync.run(now)
+    except Exception as e:
+        print(f"RECOVERY_ENDPOINT call_reminders=failed type={type(e).__name__}")
+        return {"error": "call_reminders_failed"}
+
+
 def publish_health(counts) -> str:
     """After the sweep, push the Brain's aggregate health to the CRM's Brain
     Health page (brain_health.py). Best-effort: 'ok' / 'failed', never raises,
@@ -99,10 +110,11 @@ class handler(BaseHTTPRequestHandler):
             return self._json(500, {"ok": False, "error": "recovery_failed"})
         results = {str(k): int(v) for k, v in (counts or {}).items()}
         leads = meta_leads()
+        reminders = call_reminders()
         health = publish_health(results)
         print("RECOVERY_ENDPOINT result=ok health=" + health + " " + json.dumps(results, sort_keys=True))
         return self._json(200, {"ok": True, "results": results, "health_snapshot": health,
-                                "meta_leads": leads})
+                                "meta_leads": leads, "call_reminders": reminders})
 
     def _method_not_allowed(self):
         self._json(405, {"ok": False, "error": "method_not_allowed"}, allow="POST")

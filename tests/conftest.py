@@ -54,3 +54,13 @@ def _midday_in_india(monkeypatch):
     if mod is not None and hasattr(mod, "_ist_hour"):
         monkeypatch.setattr(mod, "_ist_hour", lambda: 12)
     yield
+
+
+# CALL REMINDERS OFF BY DEFAULT IN TESTS (2026-10-03). The authenticated
+# sweep runs them; in production they read Brain and the CRM. Any test that
+# drives the endpoint without stubbing them must not reach a network, so the
+# suite defaults to off and tests/test_call_reminders.py turns them on.
+@pytest.fixture(autouse=True)
+def _call_reminders_off(monkeypatch):
+    monkeypatch.setenv("CALL_REMINDERS", "off")
+    yield

@@ -472,6 +472,7 @@ class TheEndpoint(unittest.TestCase):
              mock.patch.object(redrive, "run", lambda: {}), \
              mock.patch.object(sync, "run", boom), \
              mock.patch.object(recovery, "publish_health", lambda c: "ok"), \
+             mock.patch.object(recovery, "call_reminders", lambda now=None: {"mode": "off"}), \
              redirect_stdout(io.StringIO()) as out:
             h.do_POST()
         body = json.loads(h.wfile.getvalue())

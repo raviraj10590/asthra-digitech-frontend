@@ -60,7 +60,8 @@ class Endpoint(unittest.TestCase):
                                                       {redrive.REDRIVEN: 1})),
                    mock.patch.object(recovery, "publish_health",
                                      lambda counts: (self.health.append(counts) or "ok")),
-                   mock.patch.object(recovery, "meta_leads", lambda now=None: {"mode": "off"})]
+                   mock.patch.object(recovery, "meta_leads", lambda now=None: {"mode": "off"}),
+                   mock.patch.object(recovery, "call_reminders", lambda now=None: {"mode": "off"})]
         self.health = []
         for p in self._p:
             p.start()
@@ -77,7 +78,7 @@ class Endpoint(unittest.TestCase):
         code, body, _log, _h = call(headers=self.ok_headers())
         self.assertEqual(code, 200)
         self.assertEqual(body, {"ok": True, "results": {"REDRIVEN": 1}, "health_snapshot": "ok",
-                                "meta_leads": {"mode": "off"}})
+                                "meta_leads": {"mode": "off"}, "call_reminders": {"mode": "off"}})
         self.assertEqual(self.health, [{"REDRIVEN": 1}])
 
     # B
@@ -168,7 +169,8 @@ class Endpoint(unittest.TestCase):
     def test_the_response_carries_no_customer_data(self):
         with mock.patch.object(redrive, "run", lambda: {"REDRIVEN": 1, "SKIPPED": 3}):
             body = call(headers=self.ok_headers())[1]
-        self.assertEqual(set(body), {"ok", "results", "health_snapshot", "meta_leads"})
+        self.assertEqual(set(body), {"ok", "results", "health_snapshot", "meta_leads",
+                                     "call_reminders"})
         self.assertTrue(all(isinstance(v, int) for v in body["results"].values()))
 
     # Fail closed until configured
