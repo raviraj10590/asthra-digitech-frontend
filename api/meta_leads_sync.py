@@ -42,9 +42,9 @@ class MetaError(RuntimeError):
     """Carries Meta's error code only."""
 
 
-def _graph(path: str, params: dict):
+def _graph(path: str, params: dict, token: str = None):
     r = requests.get(f"{GRAPH}/{path}", params=params,
-                     headers={"Authorization": f"Bearer {_token()}"}, timeout=10)
+                     headers={"Authorization": f"Bearer {token or _token()}"}, timeout=10)
     if not r.ok:
         try:
             code = (r.json().get("error") or {}).get("code")
@@ -84,6 +84,31 @@ def fetch_leads(now) -> list:
             seen.add(lead["id"])
             leads.append(lead)
     return leads
+
+
+def template_status() -> tuple:
+    """(status, waba_last4) of the template in the WhatsApp account that owns
+    the BOT'S OWN phone number — the only account it can be sent from.
+
+    WHY THIS EXISTS (2026-10-03). The template was created through the CRM,
+    whose create function uses its configured account; the bot's number
+    belongs to a different one, where the template did not exist at all. A
+    send would have failed for every lead and marked each one as handled.
+    So "approved" is checked from the sender's side, every run, before any
+    lead is claimed. Status words are Meta's (APPROVED, PENDING, REJECTED…);
+    MISSING means it is not in that account at all.
+    """
+    phone = _graph(w.PHONE_NUMBER_ID, {"fields": "health_status"}, token=w.WHATSAPP_TOKEN)
+    waba = next((e.get("id") for e in (phone.get("health_status") or {}).get("entities") or []
+                 if e.get("entity_type") == "WABA"), None)
+    if not waba:
+        return "NO_ACCOUNT", ""
+    rows = _graph(f"{waba}/message_templates",
+                  {"name": ml.TEMPLATE_NAME, "fields": "name,status,language"},
+                  token=w.WHATSAPP_TOKEN).get("data") or []
+    match = [r for r in rows if r.get("name") == ml.TEMPLATE_NAME
+             and r.get("language") == ml.TEMPLATE_LANGUAGE]
+    return (match[0].get("status") or "UNKNOWN") if match else "MISSING", str(waba)[-4:]
 
 
 def wrote_before(phone: str) -> bool:
@@ -174,6 +199,19 @@ def run(now=None) -> dict:
         print(f"META_LEADS fetch_failed type={type(e).__name__}")
         return dict(counts, error="meta_fetch_failed")
     counts["fetched"] = len(leads)
+    # THE SENDER'S VIEW OF THE TEMPLATE. Reported in every mode; in "send" a
+    # template that is not APPROVED stops the run before any lead is claimed.
+    try:
+        status, waba = template_status()
+    except Exception as e:
+        print(f"META_LEADS template_check_failed {e if isinstance(e, MetaError) else type(e).__name__}")
+        status, waba = "CHECK_FAILED", ""
+    counts["template"] = status
+    counts["waba"] = waba
+    if m == "send" and status != "APPROVED":
+        print(f"META_LEADS send_blocked template={status}")
+        counts["blocked"] = "template_not_approved"
+        m = "dry_run"
     if leads and m == "dry_run":
         names = sorted({str(f.get("name")) for f in leads[0].get("field_data") or []})
         print("META_LEADS field_names " + json.dumps(names, ensure_ascii=False))

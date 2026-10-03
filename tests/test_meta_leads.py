@@ -162,6 +162,7 @@ class World(unittest.TestCase):
         self.owner = []
         self.graph_error = None
         self.graph_calls = 0
+        self.template = "APPROVED"
         self.send_result = fake_send.Accepted()
         self.save_ok = True
 
@@ -172,6 +173,16 @@ class World(unittest.TestCase):
                 if self.graph_error:
                     return Resp(400, {"error": {"code": self.graph_error,
                                                 "message": f"bad token {TOKEN}"}})
+                if url.endswith("/PHONE1"):
+                    return Resp(200, {"health_status": {"entities": [
+                        {"entity_type": "PHONE_NUMBER", "id": "PHONE1"},
+                        {"entity_type": "WABA", "id": "WABA5171"}]}})
+                if url.endswith("WABA5171/message_templates"):
+                    self.assertEqual(params["name"], ml.TEMPLATE_NAME)
+                    if self.template is None:
+                        return Resp(200, {"data": []})
+                    return Resp(200, {"data": [{"name": ml.TEMPLATE_NAME, "language": "kn",
+                                                "status": self.template}]})
                 self.graph_calls += 1
                 if url.endswith("/ads"):
                     # Field expansion: each ad with its leads nested; the same
@@ -212,6 +223,8 @@ class World(unittest.TestCase):
         self._p = [
             mock.patch.dict(os.environ, {"META_LEADS_MODE": self.MODE,
                                          "FACEBOOK_ACCESS_TOKEN": TOKEN}),
+            mock.patch.object(w, "WHATSAPP_TOKEN", TOKEN),
+            mock.patch.object(w, "PHONE_NUMBER_ID", "PHONE1"),
             mock.patch.object(requests, "get", get),
             mock.patch.object(w, "CRM_SUPABASE_URL", CRM),
             mock.patch.object(w, "CRM_SUPABASE_SERVICE_KEY", "crm-key"),
@@ -335,8 +348,42 @@ class SendMode(World):
             self.assertNotIn(leak, blob)
 
 
+class TheTemplateMustBeApprovedWhereTheBotSends(World):
+    """2026-10-03: the template was created in the CRM's configured account;
+    the bot's number belongs to another, where it did not exist at all."""
+
+    def test_missing_in_the_bots_account_blocks_every_send(self):
+        self.template = None
+        res = self.run_job()
+        self.assertEqual((res["template"], res["blocked"]), ("MISSING", "template_not_approved"))
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.transcript, [], "nothing claimed — the lead stays contactable")
+        self.assertEqual(self.crm_synced, [])
+
+    def test_pending_or_rejected_block_too(self):
+        for status in ("PENDING", "REJECTED", "PAUSED"):
+            with self.subTest(status=status):
+                self.template = status
+                self.sent.clear()
+                res = self.run_job()
+                self.assertEqual(self.sent, [])
+                self.assertEqual(res["template"], status)
+
+    def test_approved_sends_and_reports_the_account(self):
+        res = self.run_job()
+        self.assertEqual((res["template"], res["waba"]), ("APPROVED", "5171"))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_a_blocked_lead_is_contacted_once_approval_arrives(self):
+        self.template = "PENDING"
+        self.run_job()
+        self.template = "APPROVED"
+        self.run_job()
+        self.assertEqual(len(self.sent), 1)
+
+
 class OneRequest(World):
-    def test_the_fetch_is_a_single_graph_request(self):
+    def test_the_lead_fetch_is_a_single_graph_request(self):
         """Production run 2: Meta error 17 after one request per ad."""
         self.leads = [lead(f"L{i}", phone=f"+9194486500{i:02d}") for i in range(5)]
         res = self.run_job()
@@ -348,7 +395,7 @@ class OneRequest(World):
         real = requests.get
 
         def spy(url, params=None, **k):
-            if url.startswith(sync.GRAPH):
+            if url.startswith(sync.GRAPH) and url.endswith("/ads"):
                 captured.update(params or {})
             return real(url, params=params, **k)
         with mock.patch.object(requests, "get", spy):
