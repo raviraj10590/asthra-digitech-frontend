@@ -20,7 +20,7 @@ WHO OWNS WHAT
   Brain-owned (always computed deterministically from the text + context,
   whatever an interpreter says):
     delivery_same, delivery_mentioned, discom_approval_ask, callback_offered,
-    asked_discount, asks_call, call_missed, declined, escom_area (sales alerts and a
+    asked_discount, asks_call, call_missed, asks_info, declined, escom_area (sales alerts and a
     location pin's supply area: never an interpreter's guess)
 
 Pure module: imports only json, re and bairavi. Never produces customer-facing text.
@@ -218,6 +218,7 @@ def validate(interp, text: str, awaiting=(), known: dict = None) -> dict:
            "asked_discount": brain["asked_discount"],
            "asks_call": brain["asks_call"],
            "call_missed": brain["call_missed"],
+           "asks_info": brain["asks_info"],
            "declined": brain["declined"],
            "escom_area": brain["escom_area"],
            "customer_question": None}
@@ -369,8 +370,9 @@ import hashlib
 
 # ── versions — so results from different code are never mixed ────────────
 RECORD_VERSION = 2          # the row layout (1 was the Step 2 log line)
-VALIDATOR_VERSION = "v2"    # bump on ANY change to validate()'s rules
+VALIDATOR_VERSION = "v3"    # bump on ANY change to validate()'s rules
                             # v2 (2026-10-03): call_missed passed through, Brain-owned
+                            # v3 (2026-10-03): asks_info passed through, Brain-owned
 
 # Status of one shadow turn — a fixed vocabulary.
 S_OK = "ok"

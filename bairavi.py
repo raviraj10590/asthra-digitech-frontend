@@ -744,6 +744,8 @@ _APPLICATIONS = (
     # ಕೃಷಿ as typed without the vowel sign ಋ (live ...3350, 2026-10-01: "ಕ್ರುಷಿ"
     # twice, unread both times, answered by a company introduction).
     ("ಕ್ರುಷಿ", "AGRICULTURE"), ("ಕ್ರಷಿ", "AGRICULTURE"),
+    # "Farming" (live ...4765, 2026-10-03, answering the purpose question).
+    ("farming", "AGRICULTURE"), ("farmer", "AGRICULTURE"), ("ಫಾರ್ಮಿಂಗ್", "AGRICULTURE"),
     # THE SAME WORDS AS CUSTOMERS TYPE THEM, 2026-09-23. Two real answers to
     # "what is it for?" were not read at all:
     #   "ಬೋರ್ ವೆಲ್ ಉದ್ದೇಶ" (borewell purpose) — stored as the DELIVERY address
@@ -982,7 +984,9 @@ _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
                 # "Cast" (cost) and "Amuont" (amount), live ...3900, 2026-10-01:
                 # both went to the model, which re-introduced the company.
                 # Whole-word matches, so "broadcast" is unaffected.
-                "cast", "amuont", "amout", "amont")
+                "cast", "amuont", "amout", "amont",
+                # "Dar heli" (ದರ ಹೇಳಿ in Latin letters, live ...3294, 2026-10-03)
+                "dar", "dara")
 # Already the bot's own words for this: the follow-up button is titled
 # "📋 ಕೋಟೇಶನ್" and its id is "quotation".
 _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
@@ -1145,7 +1149,11 @@ QUESTION_UNANSWERED = "unanswered"
 _WHEN_WORDS = ("yavaga", "yaavaga", "yavag", "ಯಾವಾಗ", "when", "how many days",
                "how long", "estu dina", "eshtu dina", "ಎಷ್ಟು ದಿನ", "ಎಷ್ಟು ದಿನದಲ್ಲಿ")
 _DELIVER_WORDS = ("deliver", "ಡೆಲಿವರಿ", "kodtira", "kodthira", "kodteera", "ಕೊಡ್ತೀರ",
-                  "ಕೊಡುತ್ತೀರಾ", "supply", "ready", "ರೆಡಿ", "send", "kalisti", "ಕಳಿಸ್ತೀರ")
+                  "ಕೊಡುತ್ತೀರಾ", "supply", "ready", "ರೆಡಿ", "send", "kalisti", "ಕಳಿಸ್ತೀರ",
+                  # As typed (replay 2026-10-03: "Yavaga barate" ...3753, "Estu Dinake
+                  # kalstira" ...2053 — both went to the model).
+                  "barate", "baratte", "barutte", "barute", "ಬರುತ್ತೆ", "ಬರುತ್ತದೆ",
+                  "kalstira", "kalsthira", "kalistira", "kalustira", "ಕಳಿಸ್ತೀರಾ")
 _DELIVERY_TIME_KN = ("ಡೆಲಿವರಿ ಸಮಯವನ್ನು ನಿಮ್ಮ order ವಿವರ ನೋಡಿ ನಮ್ಮ ತಂಡ ಕರೆಯಲ್ಲಿ "
                      "ಖಚಿತಪಡಿಸುತ್ತಾರೆ.")
 
@@ -1307,10 +1315,14 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
     if followup.get("declined"):
         return False
     # A call time is on record: confirming it is the answer, not a paraphrase.
-    if followup.get("asks_call") and (known or {}).get("callback"):
+    if followup.get("asks_call"):
+        # Chosen: the time is restated. Not chosen: the times are offered.
         return False
     # A missed-call complaint is answered with an apology and a person.
     if followup.get("call_missed"):
+        return False
+    # "You told us nothing": the owner's facts, in one card.
+    if followup.get("asks_info"):
         return False
     # A price objection has an owner-approved answer (value, then sales calls).
     if followup.get("asked_discount"):
@@ -1653,7 +1665,7 @@ def commercial_intent(text: str):
 # a wrong one costs a delivery.
 # "kk"/"okk"/"ಓಕೆ": how "ok" is actually typed. On 2026-09-24 "kk" was
 # recorded as a delivery address.
-_ACKNOWLEDGEMENTS = ("ok", "okay", "k", "kk", "okk", "okey", "oky", "okie", "oki", "ok ok", "ಓಕೆ", "sari", "aytu", "ayitu", "hmm", "thanks", "thank you", "ok sir",
+_ACKNOWLEDGEMENTS = ("ok", "okay", "k", "kk", "okk", "okey", "oky", "okie", "oki", "ok ok", "ಓಕೆ", "oj", "sari", "aytu", "ayitu", "hmm", "thanks", "thank you", "ok sir",
                      "sure", "fine", "ಸರಿ", "ಆಯ್ತು", "ಧನ್ಯವಾದ", "ಥ್ಯಾಂಕ್ಸ್",
                      "no", "illa", "ಇಲ್ಲ", "haan", "ha", "yes", "yep")
 
@@ -2283,7 +2295,10 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # A QUESTION IS NOT AN ADDRESS: "Installation charge yestaguthe" (how
     # much is installation?, live ...4585) was stored as the delivery place.
     asking = (customer_question(text) is not None or bool(asked_terms(text))
-              or _mentions(low, _PRICE_ASK) or bool(_QUESTION_WORD_RE.search(low)))
+              or _mentions(low, _PRICE_ASK) or bool(_QUESTION_WORD_RE.search(low))
+              # "ಅರ್ಥ ಆಗಲಿಲ್ಲ" answering "deliver where?" was stored as the place
+              # (replay 2026-10-03); so was a request for document details.
+              or asks_for_info(text) or _mentions(low, _INFO_NOT))
     if (dl is None and AWAITING_DELIVERY in (awaiting or ())
             and not asking and not plain_reply):
         dl = _bare_delivery_answer(text)
@@ -2335,6 +2350,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "asked_discount": asked_discount(text),
             "asks_call": asks_about_call(text),
             "call_missed": call_missed(text),
+            "asks_info": asks_for_info(text),
             "declined": is_decline(text),
             "escom_area": None,
             "commercial_intent": commercial_intent(text),
@@ -2402,6 +2418,38 @@ _SALES_TERMS = (
     "🏭 ನೇರ ತಯಾರಕರಿಂದ (Kadaba) — ಮಧ್ಯವರ್ತಿ ಇಲ್ಲ\n"
     "✔️ MESCOM approved\n"
     "⏱️ ಡೆಲಿವರಿ ಸಮಯ — ನಮ್ಮ ತಂಡ call ನಲ್ಲಿ ಖಚಿತಪಡಿಸುತ್ತಾರೆ")
+
+
+# "YOU TOLD US NOTHING" (replay 2026-10-03: "ನೀವು ನಮಗೆ ಯಾವ ಮಾಹಿತಿನು ಸಹ
+# ಕೊಡಲಿಲ್ಲ.. ಯಾಕೆ ?", "ಅರ್ಥ ಆಗಲಿಲ್ಲ" — both went to the model). The honest
+# answer is everything the owner has stated, in one card: the price for their
+# rating, the value, and the terms. Nothing here is new — each line is an
+# owner-stated fact already used elsewhere in this module.
+_INFO_ASK = ("ಮಾಹಿತಿ", "mahiti", "maahiti", "information", "info", "details", "detail",
+             "ವಿವರ", "full details", "ಅರ್ಥ ಆಗಲಿಲ್ಲ", "ಅರ್ಥ ಆಗಿಲ್ಲ", "artha agilla",
+             "artha aagilla", "artha agalilla", "didn't understand", "did not understand",
+             "not understood", "explain")
+# A request for document details is a different question (the owner has not
+# stated a document list); it must not be answered with the price card.
+_INFO_NOT = ("ದಾಖಲೆ", "document", "ಡಾಕ್ಯುಮೆಂಟ್", "photo", "ಫೋಟೋ")
+
+
+def asks_for_info(text: str) -> bool:
+    low = (text or "").lower()
+    return _mentions(low, _INFO_ASK) and not _mentions(low, _INFO_NOT)
+
+
+def info_card_kn(state: dict) -> str:
+    kva = (state or {}).get("capacity_kva")
+    lines = ["📋 *ನಮ್ಮ ವಿವರ — ಒಂದೇ ಕಡೆ:*"]
+    if kva in PRICE_LIST:
+        lines.append(price_line(kva))
+        lines.append(value_line_kn(kva))
+    else:
+        lines.append("ನಾವು " + " / ".join(f"{k} kVA" for k in CATALOGUE_KVA)
+                     + " oil-immersed transformer ತಯಾರಿಸುತ್ತೇವೆ (Kadaba).")
+    lines.append(_SALES_TERMS)
+    return "\n".join(lines)
 
 
 def price_line(kva: int) -> str:
@@ -2570,7 +2618,9 @@ CALL_HINT = "📞 ನೇರವಾಗಿ ಮಾತನಾಡಲು *CALL* ಎಂ�
 CALLBACK_REMINDER = "ಕರೆ ಮಾಡಲು ಅನುಕೂಲವಾದ ಸಮಯ: 1️⃣ ಈಗಲೇ · 2️⃣ ಇಂದು ಸಂಜೆ · 3️⃣ ನಾಳೆ"
 
 _CALL_WORDS = ("call", "call me", "phone", "phone me", "ಕಾಲ್", "ಕಾಲ್ ಮಾಡಿ", "ಫೋನ್",
-               "ಫೋನ್ ಮಾಡಿ", "ಕರೆ", "ಕರೆ ಮಾಡಿ", "call madi", "call maadi", "phone madi")
+               "ಫೋನ್ ಮಾಡಿ", "ಕರೆ", "ಕರೆ ಮಾಡಿ", "call madi", "call maadi", "phone madi",
+               # "Coll me" (live ...3294, 2026-10-03)
+               "coll", "coll me", "coll madi")
 _CALLBACK_CHOICE = {
     "1": CALLBACK_NOW, "now": CALLBACK_NOW, "ಈಗ": CALLBACK_NOW, "ಈಗಲೇ": CALLBACK_NOW,
     "ega": CALLBACK_NOW, "egale": CALLBACK_NOW, "immediately": CALLBACK_NOW,
@@ -2608,12 +2658,40 @@ _KANNADA_DIGITS = str.maketrans("೦೧೨೩೪೫೬೭೮೯", "0123456789")
 # "now", then asked "Ivag cl madtiya" and got "the engineer will explain".
 # Mentions a call inside a longer message; the bare "call" / "ಕಾಲ್ ಮಾಡಿ"
 # asks stay with callback_request.
-_ASK_CALL_WORDS = ("call", "cl", "kal", "phone", "ph", "ಕಾಲ್", "ಕರೆ", "ಫೋನ್")
+_ASK_CALL_WORDS = ("call", "cl", "kal", "coll", "phone", "ph", "ಕಾಲ್", "ಕರೆ", "ಫೋನ್")
 
 
 def asks_about_call(text: str) -> bool:
     low = (text or "").lower()
-    return len(low.split()) >= 2 and _mentions(low, _ASK_CALL_WORDS)
+    return ((len(low.split()) >= 2 and _mentions(low, _ASK_CALL_WORDS))
+            or asks_call_time(text))
+
+
+# WHEN, ABOUT THE CALL (replay of 14 days, 2026-10-03: the largest group of
+# messages still answered by the model). After choosing a call time, customers
+# ask "Yavag", "ಯಾವಾಗ", "Time", "Yastu ಗಂಟೆಗೆ" (at what hour), "Coll yavag
+# madtare nimma enginiyar" — and got a vague paragraph instead of "the
+# engineer will call *this evening*". A bare "when" in this flow is about the
+# call: the only thing we have promised to do next is call them. A "when"
+# that names delivery stays a delivery-time question (customer_question).
+_WHEN_BARE = ("yavag", "yavaga", "yaavaga", "yavga", "ಯಾವಾಗ", "when", "when?", "time",
+              "ಸಮಯ", "timing", "eppudu")
+_CALL_TIME_WORDS = ("ಗಂಟೆಗೆ", "ಗಂಟೆ", "gantege", "gante", "engineer", "enginiyar", "enginear",
+                    "ಇಂಜಿನಿಯರ್", "madtare", "madtira", "madthira", "maadtira", "ಮಾಡ್ತೀರಾ",
+                    "ಮಾಡುತ್ತೀರಾ", "call", "coll", "kal", "cl", "ಕಾಲ್", "ಕರೆ", "phone", "ಫೋನ್")
+
+
+def asks_call_time(text: str) -> bool:
+    low = re.sub(r"[?!.,🙏]+", " ", (text or "").lower()).strip()
+    if not low or any(w in low for w in _DELIVER_WORDS):
+        return False
+    if low in _WHEN_BARE:
+        return True
+    words = low.split()
+    whenish = any(w in low for w in _WHEN_WORDS) or any(w in ("yastu", "estu", "eshtu", "ಎಷ್ಟು")
+                                                         for w in words)
+    return whenish and any((w.isascii() and w in words) or (not w.isascii() and w in low)
+                           for w in _CALL_TIME_WORDS)
 
 
 # THE PROMISED CALL DID NOT COME (live ...3188, 2026-10-02). Two hours after
@@ -3249,7 +3327,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
                          + approval_answer_kn((followup["escom_area"],)))
     elif not (followup.get("asked_price") or followup.get("callback")
               or followup.get("asked_terms") or followup.get("call_missed")
-              or (followup.get("asks_call") and (known or {}).get("callback"))):
+              or followup.get("asks_call") or followup.get("asks_info")):
         # A price question or a call choice is answered directly below; a
         # "message received" line above it is filler.
         lines.append("ಧನ್ಯವಾದಗಳು.")
@@ -3266,7 +3344,8 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     # and a customer asking one thing should not be answered twice.
     _question = followup.get("customer_question")
     if _question == QUESTION_UNANSWERED:
-        if unanswered_question(followup):
+        # The information card below IS the answer to "you told us nothing?".
+        if unanswered_question(followup) and not followup.get("asks_info"):
             lines.append("\n" + answer_question_kn(_question, known))
     elif _question is not None:
         lines.append("\n" + answer_question_kn(_question, known))
@@ -3337,7 +3416,14 @@ def _compose_followup_reply(followup: dict, known: dict = None,
                      + f" ನಮ್ಮ engineer *{callback_when_kn(_callback, followup.get('call_hour'))}* ನಿಮಗೆ "
                      "ಕರೆ ಮಾಡಿ, ಡೆಲಿವರಿ ಸಮಯ ಮತ್ತು order ವಿವರಗಳನ್ನು ತಿಳಿಸುತ್ತಾರೆ.\n"
                      "ಧನ್ಯವಾದಗಳು 🙏")
-    if missing:
+    if followup.get("asks_info"):
+        lines.append(info_card_kn(merged_state(known, followup)))
+    if offers_call_time(followup, known):
+        # "WHEN?" BEFORE ANY CALL TIME WAS CHOSEN (replay 2026-10-03). The one
+        # thing we do next is call — so say so and let them pick when. It is
+        # the only question in this message; the marker awaits the choice.
+        lines.append("ನಮ್ಮ engineer ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏\n" + CALLBACK_QUESTION)
+    elif missing:
         # ONE QUESTION PER MESSAGE (owner, 2026-09-25). The next one is asked
         # when this one is answered; the marker still records every field
         # outstanding, so an answer to either is read.
@@ -3569,6 +3655,12 @@ def is_silent_ack(followup: dict, awaiting=()) -> bool:
     return not read_something
 
 
+def offers_call_time(followup: dict, known: dict = None) -> bool:
+    """A "when will you call?" with no call time chosen yet."""
+    return bool(followup.get("asks_call") and not followup.get("callback")
+                and not merged_state(known, followup).get("callback"))
+
+
 def awaiting_after(followup: dict, known: dict = None) -> tuple:
     """What the reply just composed is waiting for — for the transcript marker.
 
@@ -3577,6 +3669,8 @@ def awaiting_after(followup: dict, known: dict = None) -> tuple:
     Kept separate so outstanding() keeps meaning "qualification still open".
     """
     out = outstanding(followup, known)
+    if offers_call_time(followup, known):
+        return (AWAITING_CALLBACK,)
     if not out and not merged_state(known, followup).get("callback"):
         return (AWAITING_CALLBACK,)
     # ONLY THE QUESTION THAT WAS ASKED. One question per message (owner,
