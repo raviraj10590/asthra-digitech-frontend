@@ -94,6 +94,7 @@ SUPABASE_KEY    = (os.environ.get("SUPABASE_ANON_KEY")
 import bairavi
 import call_log
 import customer_brief
+import owner_crm
 import geo_escom
 import interpretation  # Step 2: shadow mode only — see shadow_interpret()
 
@@ -4821,6 +4822,11 @@ OWNER_COMMANDS_HELP = (
     "#paid 91XXXXXXXXXX [YYYY-MM-DD] confirm — record FIRST payment received "
     "(permanent, owner only)\n"
     "#status — quick business snapshot\n"
+    "#today — follow-ups due, chats waiting, new leads (one message)\n"
+    "#followups — follow-ups due today and overdue\n"
+    "#chats — customers waiting for a reply\n"
+    "#pipeline — leads in each stage · #week — the last 7 days\n"
+    "#due — unpaid invoices (owner only)\n"
     "#calls — Bairavi leads still to call; mark one with e.g. 5711 called interested\n"
     "#voicetest — voice-reply status (off: no free text-to-speech)\n"
     "5711 or #who <name> — everything the CRM knows about one customer\n"
@@ -5612,6 +5618,98 @@ def tool_calls_to_make(sender: str, **_) -> str:
     return "\n".join(lines)
 
 
+def _crm_rows(table: str, params: dict) -> list:
+    r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/{table}", headers=_crm_headers(), params=params, timeout=5)
+    r.raise_for_status()
+    return r.json()
+
+
+def _crm_count(table: str, params: dict) -> int:
+    """Row count without downloading rows (PostgREST exact count)."""
+    r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/{table}",
+                     headers={**_crm_headers(), "Prefer": "count=exact", "Range": "0-0"},
+                     params={**params, "select": "id"}, timeout=5)
+    r.raise_for_status()
+    total = (r.headers.get("Content-Range") or "*/0").split("/")[-1]
+    return int(total) if total.isdigit() else 0
+
+
+def _owner_view_data(view: str, now: datetime) -> dict:
+    """The CRM reads one owner view needs — read-only, owner's rows only."""
+    me = {"user_id": f"eq.{CRM_OWNER_USER_ID}"}
+    d = {}
+    if view in ("today", "followups"):
+        d["followups"] = _crm_rows("follow_ups", {**me, "is_done": "eq.false",
+                                                  "select": "id,client_id,note,due_date,is_done",
+                                                  "order": "due_date.asc", "limit": "200"})
+        ids = sorted({f["client_id"] for f in d["followups"] if f.get("client_id")})
+        d["clients_by_id"] = {c["id"]: c for c in (_crm_rows("clients", {
+            "id": f"in.({','.join(ids)})", "select": "id,name,phone"}) if ids else [])}
+    if view in ("today", "chats"):
+        d["convos"] = _crm_rows("whatsapp_conversations", {
+            **me, "last_direction": "eq.inbound",
+            "last_created_at": f"gte.{(now - owner_crm.WAIT_MAX).isoformat()}",
+            "select": "phone,contact_name,last_body,last_direction,last_created_at",
+            "order": "last_created_at.desc", "limit": "200"})
+        d["clients_by_key"] = {(c.get("phone") or "")[-10:]: c.get("name") for c in _crm_rows(
+            "clients", {**me, "select": "name,phone", "phone": "not.is.null", "limit": "1000"}) if c.get("name")}
+        d["staff"] = staff_and_owner_numbers()
+    if view == "today":
+        d["new_leads"] = _crm_rows("clients", {**me, "created_at": f"gte.{(now - timedelta(hours=24)).isoformat()}",
+                                               "select": "name,phone", "order": "created_at.desc", "limit": "50"})
+    if view == "pipeline":
+        d["stages"] = [c.get("pipeline_stage") for c in _crm_rows("clients", {**me, "select": "pipeline_stage",
+                                                                               "limit": "1000"})]
+    if view == "week":
+        since = (now - timedelta(days=7)).isoformat()
+        d["stats"] = {
+            "new_leads": _crm_count("clients", {**me, "created_at": f"gte.{since}"}),
+            "bairavi_leads": _crm_count("clients", {**me, "created_at": f"gte.{since}",
+                                                    "source": "eq.bairavi-transformer"}),
+            "inbound": _crm_count("whatsapp_messages", {**me, "direction": "eq.inbound", "created_at": f"gte.{since}"}),
+            "called": _crm_count("clients", {**me, "last_contacted_at": f"gte.{since}"}),
+            "open_followups": _crm_count("follow_ups", {**me, "is_done": "eq.false"}),
+        }
+    return d
+
+
+def tool_owner_view(sender: str, view: str = "today", **_) -> str:
+    """#today #followups #chats #pipeline #week — read-only CRM views."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        return "⚠️ CRM is not connected."
+    now = datetime.now(timezone.utc)
+    try:
+        d = _owner_view_data(view, now)
+    except Exception as e:
+        print(f"OWNER_VIEW_FAILED view={view} type={type(e).__name__}")
+        return "⚠️ Could not reach the CRM."      # never an empty list: that reads as "nothing to do"
+    today = now.astimezone(IST).date().isoformat()
+    if view == "followups":
+        return owner_crm.followups_text(d["followups"], d["clients_by_id"], today)
+    if view == "chats":
+        return owner_crm.chats_text(d["convos"], d["clients_by_key"], now, d["staff"])
+    if view == "pipeline":
+        return owner_crm.pipeline_text(d["stages"])
+    if view == "week":
+        return owner_crm.week_text(d["stats"])
+    return owner_crm.today_text(d["followups"], d["clients_by_id"], d["convos"], d["clients_by_key"],
+                                d["new_leads"], now, d["staff"])
+
+
+def tool_money_due(sender: str, **_) -> str:
+    """#due — unpaid invoices. OWNER only (registry min_role)."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        return "⚠️ CRM is not connected."
+    try:
+        rows = _crm_rows("invoices", {"user_id": f"eq.{CRM_OWNER_USER_ID}", "balance_due": "gt.0",
+                                      "select": "client_name,invoice_number,balance_due,due_date",
+                                      "order": "due_date.asc", "limit": "100"})
+    except Exception as e:
+        print(f"MONEY_DUE_FAILED type={type(e).__name__}")
+        return "⚠️ Could not reach the CRM."
+    return owner_crm.due_text(rows, datetime.now(timezone.utc).astimezone(IST).date().isoformat())
+
+
 def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: dict) -> str:
     """Single entry point for OWNER/STAFF messages: pending confirmation →
     deterministic # command → keyword-routed read-only lookup → AI chat."""
@@ -5657,6 +5755,11 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
                         digits=digits, stage=stage, words=words)
     if low in ("#calls", "#call", "#tocall"):
         return run_tool(sender, "crm_calls_to_make", _fallback=tool_calls_to_make)
+    view = owner_crm.command(low)
+    if view == "due":
+        return run_tool(sender, "crm_money_due", _fallback=tool_money_due)
+    if view:
+        return run_tool(sender, "crm_owner_view", _fallback=tool_owner_view, view=view)
     # ONE CUSTOMER, FROM THE CRM ("5711", "5711 enu helidru?", "#who Sudarshan").
     # After call outcomes, so "5711 called interested" still marks the call.
     # A digits-first message that matches no lead falls through to the normal
@@ -7305,6 +7408,14 @@ if BIC_AVAILABLE:
     @bic_tools.register("crm_calls_to_make")
     def _tool_h_crm_calls_to_make(principal, **_):
         return tool_calls_to_make(principal.sender_id)
+
+    @bic_tools.register("crm_owner_view")
+    def _tool_h_crm_owner_view(principal, view="today", **_):
+        return tool_owner_view(principal.sender_id, view=view)
+
+    @bic_tools.register("crm_money_due")
+    def _tool_h_crm_money_due(principal, **_):
+        return tool_money_due(principal.sender_id)
 
     @bic_tools.register("crm_customer_brief")
     def _tool_h_crm_customer_brief(principal, kind, value, **_):

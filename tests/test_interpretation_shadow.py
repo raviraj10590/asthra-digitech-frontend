@@ -115,8 +115,14 @@ def adversarial(messages, max_tokens=None):
 class ShadowHasNoAuthority(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.off = run_conversation(THREAD, shadow=False)
-        cls.on = run_conversation(THREAD, shadow=True, provider=adversarial)
+        # The midday clock from conftest is a per-test fixture and is not yet
+        # active in setUpClass, so these runs read the REAL hour. At night the
+        # reference replies then said "after 9 am" while test_7 (inside the
+        # fixture) said "now", and the comparison failed for a reason that has
+        # nothing to do with the interpreter. Same fixed hour here (2026-10-04).
+        with mock.patch.object(w, "_ist_hour", lambda: 12):
+            cls.off = run_conversation(THREAD, shadow=False)
+            cls.on = run_conversation(THREAD, shadow=True, provider=adversarial)
 
     def test_1_replies_are_byte_identical(self):
         self.assertEqual(self.on.sent, self.off.sent)

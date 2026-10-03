@@ -96,7 +96,10 @@ class ExistingToolsUnaffected(unittest.TestCase):
         # -> 24 with `voice_test` (#voicetest: a sample voice note to the
         # requester, so the owner hears the Kannada voice before enabling it).
         # -> 25 with `crm_customer_brief` (the owner asks about one lead).
-        self.assertEqual(len(tools._HANDLERS), 25)
+        # -> 27 with the owner CRM views (2026-10-04): `crm_owner_view`
+        # (#today #followups #chats #pipeline #week, read-only) and
+        # `crm_money_due` (#due, OWNER, read-only).
+        self.assertEqual(len(tools._HANDLERS), 27)
 
     def test_legacy_act_tool_validates_without_2G_fields(self):
         """A Phase-1 row carries no freshness/degradation and must stay valid."""
