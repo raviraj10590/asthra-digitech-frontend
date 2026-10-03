@@ -139,5 +139,7 @@ class NoLoneThanks(unittest.TestCase):
     def test_installation_amount_is_the_engineers(self):
         k = {"capacity_kva": 25}
         reply = b.compose_followup_reply(b.parse_followup("Installation charge yestaguthe", (), known=k), k)
-        self.assertIn("ಅದರ ಮೊತ್ತವನ್ನು ನಮ್ಮ engineer ಕರೆಯಲ್ಲಿ ತಿಳಿಸುತ್ತಾರೆ", reply)
+        # Owner, 2026-10-03: "installation charges ge engineer jote matadi
+        # antane helu" — the engineer still gives the amount.
+        self.assertIn("Installation charges ಬಗ್ಗೆ ನಮ್ಮ engineer ಜೊತೆ ಮಾತನಾಡಿ", reply)
         self.assertNotIn("₹", reply)

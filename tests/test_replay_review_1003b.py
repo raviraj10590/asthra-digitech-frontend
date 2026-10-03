@@ -106,9 +106,10 @@ class YouToldUsNothing(unittest.TestCase):
                 self.assertIsNone(f["delivery_location"])
 
     def test_a_document_question_is_not_answered_with_prices(self):
-        """No document list has been stated by the owner."""
-        f, _ = turn("ಬೇಕಾದ ದಾಖಲೆಗಳು ವಿವರವನ್ನು ನೀಡಿ", self.KNOWN)
+        """No document list has been stated; the owner said: ask the engineer."""
+        f, reply = turn("ಬೇಕಾದ ದಾಖಲೆಗಳು ವಿವರವನ್ನು ನೀಡಿ", self.KNOWN)
         self.assertFalse(f["asks_info"])
+        self.assertNotIn("₹", reply)
 
     def test_without_a_known_rating_the_range_is_given_not_a_price(self):
         card = b.info_card_kn({})
@@ -124,7 +125,7 @@ class YouToldUsNothing(unittest.TestCase):
 
 class TheShadowContract(unittest.TestCase):
     def test_new_signals_are_brain_owned_and_versioned(self):
-        self.assertEqual(I.VALIDATOR_VERSION, "v3")
+        # The exact version is pinned once, in test_shadow_persistence.
         # Whatever an interpreter proposes, these come from the deterministic reader.
         self.assertTrue(I.state_view(I.validate(I.empty(), "ಅರ್ಥ ಆಗಲಿಲ್ಲ"))["asks_info"])
         self.assertTrue(I.state_view(I.validate(I.empty(), "ಕರೆ ಮಾಡಿಲ್ಲ"))["call_missed"])

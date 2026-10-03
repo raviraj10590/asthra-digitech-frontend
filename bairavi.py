@@ -1324,6 +1324,9 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
     # "You told us nothing": the owner's facts, in one card.
     if followup.get("asks_info"):
         return False
+    # Poles / DP structure / photos / documents: the owner's answers (2026-10-03).
+    if followup.get("asks_scope") or followup.get("asks_photo") or followup.get("asks_documents"):
+        return False
     # A price objection has an owner-approved answer (value, then sales calls).
     if followup.get("asked_discount"):
         return False
@@ -1523,10 +1526,18 @@ def model_brief_kn(known: dict = None) -> str:
         "ನಮ್ಮ ವಿಶೇಷತೆ (ಮಾಲೀಕರ ಮಾತು): premium transformer, Star rating "
         "(25 kVA 4 Star; 63/100/250 kVA 5 Star), best-grade aluminium winding, "
         "ಕಡಿಮೆ ನಷ್ಟ (lower losses). ನಾವು ಹೊಸ ಕಂಪನಿ — ವರ್ಷಗಳ ಅನುಭವ ಎಂದು ಹೇಳಬೇಡಿ.\n"
+        "ಮಾಲೀಕರ ಮಾತು (2026-10-03): Installation ನಾವು ಮಾಡುವುದಿಲ್ಲ — local "
+        "electrical contractor ಮೂಲಕ, ಹೆಚ್ಚುವರಿ ವೆಚ್ಚ; ಅದರ ದರಕ್ಕೆ engineer ಜೊತೆ "
+        "ಮಾತನಾಡಲು ಹೇಳಿ. ದರ TC (transformer) ಮಾತ್ರ — ಕಂಬ, DP structure, "
+        "installation ಸೇರಿಲ್ಲ; ಅವುಗಳ ದರ location ನೋಡಿ estimate ನಂತರ. TC photo "
+        "ಕೇಳಿದರೆ: engineer ಜೊತೆ ಮಾತನಾಡಿ, ಅವರು ಕಳಿಸುತ್ತಾರೆ. ದಾಖಲೆಗಳು: engineer "
+        "ಬಳಿ ವಿಚಾರಿಸಲು ಹೇಳಿ.\n"
         "\n"
         "ನಿಯಮಗಳು — ಇವು ಕಡ್ಡಾಯ:\n"
-        "1. ಬೆಲೆಯ ಅಂಕಿ ನೀವು ಬರೆಯಬೇಡಿ — ದರಪಟ್ಟಿಯನ್ನು ನಮ್ಮ ವ್ಯವಸ್ಥೆ ಕಳುಹಿಸುತ್ತದೆ. "
-        "'ದರ ಹೇಳಲು ಸಾಧ್ಯವಿಲ್ಲ' ಎಂದು ಎಂದಿಗೂ ಹೇಳಬೇಡಿ.\n"
+        "1. ಬೆಲೆಯ ಅಂಕಿ ನೀವು ಬರೆಯಬೇಡಿ. ದರಪಟ್ಟಿ ಕಳುಹಿಸುತ್ತೇವೆ / 'ವ್ಯವಸ್ಥೆ "
+        "ಕಳುಹಿಸುತ್ತದೆ' ಎಂಬ ಭರವಸೆ ಕೊಡಬೇಡಿ — ದರದ ಪ್ರಶ್ನೆಗೆ ನಮ್ಮ ಸಂದೇಶ "
+        "ಪ್ರತ್ಯೇಕವಾಗಿ ಉತ್ತರಿಸುತ್ತದೆ. 'ದರ ಹೇಳಲು ಸಾಧ್ಯವಿಲ್ಲ' ಎಂದು ಎಂದಿಗೂ "
+        "ಹೇಳಬೇಡಿ.\n"
         "2. ಡೆಲಿವರಿ ಎಷ್ಟು ದಿನ/ವಾರ/ತಿಂಗಳು ಎಂದು ಹೇಳಬೇಡಿ.\n"
         "3. ISO / BIS / BEE / certificate / warranty / guarantee ಬಗ್ಗೆ "
         "ಏನೂ ಹೇಳಬೇಡಿ.\n"
@@ -2298,7 +2309,10 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
               or _mentions(low, _PRICE_ASK) or bool(_QUESTION_WORD_RE.search(low))
               # "ಅರ್ಥ ಆಗಲಿಲ್ಲ" answering "deliver where?" was stored as the place
               # (replay 2026-10-03); so was a request for document details.
-              or asks_for_info(text) or _mentions(low, _INFO_NOT))
+              or asks_for_info(text) or _mentions(low, _INFO_NOT)
+              # "Kamba yalla bantha" / "DP structure" answering "deliver
+              # where?" were stored as the place (2026-10-03).
+              or asks_scope(text))
     if (dl is None and AWAITING_DELIVERY in (awaiting or ())
             and not asking and not plain_reply):
         dl = _bare_delivery_answer(text)
@@ -2351,6 +2365,9 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "asks_call": asks_about_call(text),
             "call_missed": call_missed(text),
             "asks_info": asks_for_info(text),
+            "asks_scope": asks_scope(text),
+            "asks_photo": asks_photo(text),
+            "asks_documents": asks_documents(text),
             "declined": is_decline(text),
             "escom_area": None,
             "commercial_intent": commercial_intent(text),
@@ -2412,7 +2429,9 @@ def inr(amount: int) -> str:
 
 
 _SALES_TERMS = (
-    "🚚 Transport ಸೇರಿದೆ (installation ಪ್ರತ್ಯೇಕ)\n"
+    "🚚 Transport ಸೇರಿದೆ\n"
+    "🔩 ದರ TC (transformer) ಮಾತ್ರ — ಕಂಬ, DP structure, installation ಪ್ರತ್ಯೇಕ "
+    "(site estimate ನಂತರ)\n"
     "🛡️ *1 ವರ್ಷ warranty* — ನಂತರವೂ service ಲಭ್ಯ\n"
     "💳 *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ\n"
     "🏭 ನೇರ ತಯಾರಕರಿಂದ (Kadaba) — ಮಧ್ಯವರ್ತಿ ಇಲ್ಲ\n"
@@ -2452,6 +2471,65 @@ def info_card_kn(state: dict) -> str:
     return "\n".join(lines)
 
 
+# SCOPE OF SUPPLY, INSTALLATION, PHOTOS, DOCUMENTS — owner, 2026-10-03,
+# verbatim (Kanglish): "installation naavu madalla Tc manufacturer navu. local
+# electrical contractor moolaka madsi kodteve idu mescom limit bittu bere
+# yavrige. mescom limit li electrical contractor estimate madbekagutte adu
+# additional cost irutte idara bagge hecchina mahitige namma engineer jote
+# maanadi. Tc photo send maadi andre engineer jote matanadi avaru kalistare
+# anta heli. kamba e cost li baralla idu only TC matra TC andre transfrmer anta
+# arta installation charges ge engineer jote matadi antane helu. doccuments gu
+# engineer na vicharisoke helu. poles dp structure installation price barodu
+# location bandu estimation madidaga matra so exact price vary aagutte"
+#
+# So: we make the TC and do not install it; installation is through a local
+# electrical contractor at extra cost; the price is for the TC alone — poles,
+# DP structure and installation are priced only after a site estimate. Photos
+# and documents: the engineer. No amount for any of these is stated, and none
+# is ever written.
+PRICE_SCOPE_KN = ("ಈ ದರ TC (transformer) ಮಾತ್ರ — ಕಂಬ, DP structure, "
+                  "installation ಪ್ರತ್ಯೇಕ.")
+SCOPE_KN = ("ಈ ದರ ಕೇವಲ TC (transformer) ಮಾತ್ರ — ಕಂಬ (poles), DP structure, "
+            "installation ಇದರಲ್ಲಿ ಸೇರಿಲ್ಲ. ಅವುಗಳ ದರ location ನೋಡಿ estimate "
+            "ಮಾಡಿದ ನಂತರವೇ ಗೊತ್ತಾಗುತ್ತದೆ, ಆದ್ದರಿಂದ ಬದಲಾಗುತ್ತದೆ. ಹೆಚ್ಚಿನ ಮಾಹಿತಿಗೆ "
+            "ನಮ್ಮ engineer ಜೊತೆ ಮಾತನಾಡಿ.")
+PHOTO_KN = ("📸 TC photo ಬೇಕಿದ್ದರೆ ನಮ್ಮ engineer ಜೊತೆ ಮಾತನಾಡಿ — ಅವರು "
+            "ಕಳಿಸುತ್ತಾರೆ 🙏")
+DOCUMENTS_KN = ("📄 ಬೇಕಾದ ದಾಖಲೆಗಳ ಬಗ್ಗೆ ದಯವಿಟ್ಟು ನಮ್ಮ engineer ಬಳಿ ವಿಚಾರಿಸಿ — "
+                "ಅವರು ಸರಿಯಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
+
+# What customers actually typed (replay 2026-10-03): "Kamba yalla bantha",
+# "Full tc setup barutha only tc na", "ನಾವು ಟಿಸಿ ಬತ್ತಲೆ ಮಾತ್ರ ಕೇಳುತ್ತೇವೆ".
+_SCOPE_ASK = ("ಕಂಬ", "ಕಂಭ", "ಕಹಬ", "kamba", "kamb", "kambha", "pole", "poles", "ಪೋಲ್",
+              "dp", "dp structure", "structure", "ಸ್ಟ್ರಕ್ಚರ್", "ಡಿಪಿ",
+              "setup", "set up", "ಸೆಟಪ್", "only tc", "tc matra", "tc mathra",
+              "ಟಿಸಿ ಮಾತ್ರ", "tc ಮಾತ್ರ", "only transformer", "ಬತ್ತಲೆ")
+# "T c photo send madi" (live ...5212). A request, so it needs a photo word.
+_PHOTO_ASK = ("photo", "photos", "ಫೋಟೋ", "ಫೋಟೊ", "pic", "pics", "picture", "pictures",
+              "image", "images", "foto")
+# "ಬೇಕಾದ ದಾಖಲೆಗಳು ವಿವರವನ್ನು ನೀಡಿ" (live ...3450).
+_DOCUMENTS_ASK = ("ದಾಖಲೆ", "ದಾಖಲಾತಿ", "document", "documents", "ಡಾಕ್ಯುಮೆಂಟ್",
+                  "papers", "paper", "ಪೇಪರ್", "dakhale", "dakhle", "dakle")
+
+
+def _customer_words(text: str) -> str:
+    """Lower-cased text, or '' for our own bracketed transcript notes."""
+    t = (text or "").strip()
+    return "" if t.startswith("[") else t.lower()
+
+
+def asks_scope(text: str) -> bool:
+    return _mentions(_customer_words(text), _SCOPE_ASK)
+
+
+def asks_photo(text: str) -> bool:
+    return _mentions(_customer_words(text), _PHOTO_ASK)
+
+
+def asks_documents(text: str) -> bool:
+    return _mentions(_customer_words(text), _DOCUMENTS_ASK)
+
+
 def price_line(kva: int) -> str:
     amount, star = PRICE_LIST[kva]
     return f"*{kva} kVA {star} Star* — *₹{inr(amount)} + GST*"
@@ -2464,10 +2542,13 @@ def price_line(kva: int) -> str:
 # only when asked (each topic on its own line), and warranty + payment are
 # said once, briefly, when the call is offered.
 TERM_LINES = {
-    # "Installation charge yestaguthe?" (live ...4585): the amount is the
-    # engineer's to give (owner ruling 2026-10-01), so the line says who will.
-    "transport": ("Transport ದರದಲ್ಲೇ ಸೇರಿದೆ; installation ಪ್ರತ್ಯೇಕ — ಅದರ ಮೊತ್ತವನ್ನು "
-                  "ನಮ್ಮ engineer ಕರೆಯಲ್ಲಿ ತಿಳಿಸುತ್ತಾರೆ."),
+    # "Installation charge yestaguthe?" (live ...4585). Owner, 2026-10-03:
+    # we do not install; a local electrical contractor does, at extra cost;
+    # "installation charges ge engineer jote matadi antane helu".
+    "transport": ("Transport ದರದಲ್ಲೇ ಸೇರಿದೆ. Installation ನಾವು ಮಾಡುವುದಿಲ್ಲ — ನಾವು "
+                  "TC (transformer) ತಯಾರಕರು; installation local electrical "
+                  "contractor ಮೂಲಕ ಆಗುತ್ತದೆ, ಅದು ಹೆಚ್ಚುವರಿ ವೆಚ್ಚ (installation ಪ್ರತ್ಯೇಕ). "
+                  "Installation charges ಬಗ್ಗೆ ನಮ್ಮ engineer ಜೊತೆ ಮಾತನಾಡಿ."),
     "warranty": "ನಮ್ಮ transformer ಗಳಿಗೆ *1 ವರ್ಷ warranty* ಇದೆ; ಅದರ ನಂತರವೂ service ಲಭ್ಯವಿದೆ.",
     "payment": "Payment: *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ.",
 }
@@ -2538,10 +2619,10 @@ def price_short_kn(kva=None) -> str:
     list otherwise. Transport is named because it changes the comparison."""
     if kva in PRICE_LIST:
         return (f"{price_line(kva)}\n"
-                "Transport ದರದಲ್ಲೇ ಸೇರಿದೆ; installation ಪ್ರತ್ಯೇಕ.")
+                "Transport ದರದಲ್ಲೇ ಸೇರಿದೆ. " + PRICE_SCOPE_KN)
     return ("ನಮ್ಮ ದರಗಳು:\n"
             + "\n".join(f"• {price_line(k)}" for k in sorted(PRICE_LIST))
-            + "\nTransport ದರದಲ್ಲೇ ಸೇರಿದೆ; installation ಪ್ರತ್ಯೇಕ.")
+            + "\nTransport ದರದಲ್ಲೇ ಸೇರಿದೆ. " + PRICE_SCOPE_KN)
 
 
 def price_block_kn(kva=None) -> str:
@@ -3327,7 +3408,9 @@ def _compose_followup_reply(followup: dict, known: dict = None,
                          + approval_answer_kn((followup["escom_area"],)))
     elif not (followup.get("asked_price") or followup.get("callback")
               or followup.get("asked_terms") or followup.get("call_missed")
-              or followup.get("asks_call") or followup.get("asks_info")):
+              or followup.get("asks_call") or followup.get("asks_info")
+              or followup.get("asks_scope") or followup.get("asks_photo")
+              or followup.get("asks_documents")):
         # A price question or a call choice is answered directly below; a
         # "message received" line above it is filler.
         lines.append("ಧನ್ಯವಾದಗಳು.")
@@ -3418,6 +3501,12 @@ def _compose_followup_reply(followup: dict, known: dict = None,
                      "ಧನ್ಯವಾದಗಳು 🙏")
     if followup.get("asks_info"):
         lines.append(info_card_kn(merged_state(known, followup)))
+    if followup.get("asks_scope"):
+        lines.append(SCOPE_KN)
+    if followup.get("asks_photo"):
+        lines.append(PHOTO_KN)
+    if followup.get("asks_documents"):
+        lines.append(DOCUMENTS_KN)
     if offers_call_time(followup, known):
         # "WHEN?" BEFORE ANY CALL TIME WAS CHOSEN (replay 2026-10-03). The one
         # thing we do next is call — so say so and let them pick when. It is
@@ -3490,7 +3579,13 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
     _cb = followup.get("callback")
     return (
         # FIRST LINE: a broken promise outranks every other signal.
-        ("📵🔥 *CALL MISSED* — customer says the promised call never came. "
+        ("📸 *PHOTOS REQUESTED* — the bot said the engineer will send TC photos. "
+         "Please send them.\n" if followup.get("asks_photo") else "")
+        + ("📄 *DOCUMENTS* — customer asked which documents are needed; "
+           "the bot said to ask the engineer.\n" if followup.get("asks_documents") else "")
+        + ("🔩 *POLES / DP / SETUP* — customer asked about more than the TC; "
+           "needs a site estimate.\n" if followup.get("asks_scope") else "")
+        + ("📵🔥 *CALL MISSED* — customer says the promised call never came. "
          "Call now.\n" if followup.get("call_missed") else "")
         + (f"🔥📞 *CALL {callback_when_en(_cb, followup.get('call_hour')).upper()}* "
            "— customer asked for a call\n" if _cb else "")
