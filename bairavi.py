@@ -2116,7 +2116,10 @@ _THANKS_FILLER = {"sir", "sar", "madam", "mam", "system", "ಸಿಸ್ಟಮ್
 # "No thanks" / "not interested": a close, answered once, and flagged.
 _DECLINES = ("no thanks", "no thanx", "no thank you", "no thanku", "not interested",
              "not intrested", "no need", "not needed", "beda", "ಬೇಡ", "nange beda",
-             "ನಮಗೆ ಬೇಡ", "ಬೇಡ ಸರ್", "beda sir")
+             "ನಮಗೆ ಬೇಡ", "ಬೇಡ ಸರ್", "beda sir",
+             # The opt-out the Meta-lead template offers ("ಬೇಡವಾದರೆ STOP ಎಂದು
+             # ಉತ್ತರಿಸಿ"). Whole message only: "near bus stop" is still a place.
+             "stop", "ಸ್ಟಾಪ್", "unsubscribe")
 
 
 # "ಸರಿ ಇದೆ" (yes, that's right; live ...1709) was stored as the ADDRESS.

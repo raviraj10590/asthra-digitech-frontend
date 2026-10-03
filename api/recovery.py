@@ -61,6 +61,17 @@ def run_sweep() -> dict:
     return redrive.run()
 
 
+def meta_leads(now=None) -> dict:
+    """Reach Meta form leads who never messaged (api/meta_leads_sync.py).
+    Off unless META_LEADS_MODE says otherwise. Counts only; never raises."""
+    try:
+        import meta_leads_sync
+        return meta_leads_sync.run(now)
+    except Exception as e:
+        print(f"RECOVERY_ENDPOINT meta_leads=failed type={type(e).__name__}")
+        return {"error": "meta_leads_failed"}
+
+
 def publish_health(counts) -> str:
     """After the sweep, push the Brain's aggregate health to the CRM's Brain
     Health page (brain_health.py). Best-effort: 'ok' / 'failed', never raises,
@@ -87,9 +98,11 @@ class handler(BaseHTTPRequestHandler):
             print(f"RECOVERY_ENDPOINT result=error type={type(e).__name__}")
             return self._json(500, {"ok": False, "error": "recovery_failed"})
         results = {str(k): int(v) for k, v in (counts or {}).items()}
+        leads = meta_leads()
         health = publish_health(results)
         print("RECOVERY_ENDPOINT result=ok health=" + health + " " + json.dumps(results, sort_keys=True))
-        return self._json(200, {"ok": True, "results": results, "health_snapshot": health})
+        return self._json(200, {"ok": True, "results": results, "health_snapshot": health,
+                                "meta_leads": leads})
 
     def _method_not_allowed(self):
         self._json(405, {"ok": False, "error": "method_not_allowed"}, allow="POST")
