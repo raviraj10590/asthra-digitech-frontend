@@ -54,22 +54,35 @@ def _graph(path: str, params: dict):
     return r.json()
 
 
+# Leads per ad in the one request. A day's leads on one ad is far below this.
+LEADS_PER_AD = 25
+
+
 def fetch_leads(now) -> list:
-    """Leads created in the last MAX_AGE_HOURS on the account's active ads."""
+    """Leads created in the last MAX_AGE_HOURS on the account's active ads.
+
+    ONE REQUEST. The first version asked each ad for its leads separately; on
+    the first production run that was one request per active ad, and the
+    second run was refused with Meta error 17 (request limit reached). Field
+    expansion returns every active ad with its newest leads nested, and the
+    time window is applied here.
+    """
     account = os.environ.get("META_AD_ACCOUNT_ID", DEFAULT_AD_ACCOUNT).strip()
-    ads = _graph(f"act_{account}/ads", {"fields": "id",
-                                        "effective_status": json.dumps(["ACTIVE"]),
-                                        "limit": "100"}).get("data") or []
-    flt = json.dumps([{"field": "time_created", "operator": "GREATER_THAN",
-                       "value": ml.since(now)}])
+    ads = _graph(f"act_{account}/ads", {
+        "fields": f"id,leads.limit({LEADS_PER_AD}){{id,created_time,field_data}}",
+        "effective_status": json.dumps(["ACTIVE"]),
+        "limit": "100"}).get("data") or []
+    cutoff = ml.since(now)
     leads, seen = [], set()
     for ad in ads:
-        data = _graph(f"{ad['id']}/leads", {"fields": "id,created_time,field_data",
-                                            "filtering": flt, "limit": "100"}).get("data") or []
-        for lead in data:
-            if lead.get("id") and lead["id"] not in seen:
-                seen.add(lead["id"])
-                leads.append(lead)
+        for lead in (ad.get("leads") or {}).get("data") or []:
+            created = ml._ts(lead.get("created_time"))
+            if not lead.get("id") or lead["id"] in seen:
+                continue
+            if created is None or created.timestamp() <= cutoff:
+                continue
+            seen.add(lead["id"])
+            leads.append(lead)
     return leads
 
 

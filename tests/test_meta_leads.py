@@ -161,6 +161,7 @@ class World(unittest.TestCase):
         self.crm_synced = []
         self.owner = []
         self.graph_error = None
+        self.graph_calls = 0
         self.send_result = fake_send.Accepted()
         self.save_ok = True
 
@@ -171,11 +172,16 @@ class World(unittest.TestCase):
                 if self.graph_error:
                     return Resp(400, {"error": {"code": self.graph_error,
                                                 "message": f"bad token {TOKEN}"}})
+                self.graph_calls += 1
                 if url.endswith("/ads"):
-                    return Resp(200, {"data": [{"id": "AD1"}, {"id": "AD2"}]})
-                if url.endswith("AD1/leads"):
-                    return Resp(200, {"data": self.leads})
-                return Resp(200, {"data": self.leads[:1]})      # same lead under 2 ads
+                    # Field expansion: each ad with its leads nested; the same
+                    # lead under two ads, and one lead from before the window.
+                    old = lead("OLD", minutes_ago=30 * 60)
+                    return Resp(200, {"data": [
+                        {"id": "AD1", "leads": {"data": self.leads + [old]}},
+                        {"id": "AD2", "leads": {"data": self.leads[:1]}},
+                        {"id": "AD3"}]})
+                raise AssertionError(f"unexpected Graph call {url}")
             if url == f"{CRM}/rest/v1/whatsapp_messages":
                 return Resp(200, [{"id": 1}] if params["phone"][3:] in self.crm_inbound else [])
             if url == f"{BRAIN}/rest/v1/whatsapp_messages":
@@ -327,6 +333,28 @@ class SendMode(World):
         blob = self.log + json.dumps(res)
         for leak in ("Prakash", "919448650033", "nadi sinur"):
             self.assertNotIn(leak, blob)
+
+
+class OneRequest(World):
+    def test_the_fetch_is_a_single_graph_request(self):
+        """Production run 2: Meta error 17 after one request per ad."""
+        self.leads = [lead(f"L{i}", phone=f"+9194486500{i:02d}") for i in range(5)]
+        res = self.run_job()
+        self.assertEqual(self.graph_calls, 1)
+        self.assertEqual(res["fetched"], 5, "duplicates and the old lead are dropped")
+
+    def test_the_request_asks_for_nested_leads(self):
+        captured = {}
+        real = requests.get
+
+        def spy(url, params=None, **k):
+            if url.startswith(sync.GRAPH):
+                captured.update(params or {})
+            return real(url, params=params, **k)
+        with mock.patch.object(requests, "get", spy):
+            self.run_job()
+        self.assertIn("leads.limit(", captured["fields"])
+        self.assertIn("field_data", captured["fields"])
 
 
 class CrmMode(World):
