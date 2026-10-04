@@ -6245,6 +6245,33 @@ def maybe_alert_lead(sender: str, lead: dict, already_alerted: bool):
     # exactly like a fix. A note that cannot be delivered safely is not written.
 
 
+HUMAN_TAKEOVER_HOURS = 12
+
+
+def human_replies(sender: str) -> list:
+    """What the owner or staff wrote BY HAND to this customer in the last
+    HUMAN_TAKEOVER_HOURS — newest first — read from the CRM, where the
+    WhatsApp page records a hand-sent message as an outbound text with no
+    bot source. [] when there is none or the CRM cannot be read (the bot then
+    behaves exactly as before)."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY):
+        return []
+    last10 = re.sub(r"\D", "", sender or "")[-10:]
+    if len(last10) != 10:
+        return []
+    try:
+        r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/whatsapp_messages", headers=_crm_headers(), params={
+            "phone": f"like.*{last10}", "direction": "eq.outbound", "message_type": "eq.text",
+            "metadata->>source": "is.null",
+            "created_at": f"gte.{(datetime.now(timezone.utc) - timedelta(hours=HUMAN_TAKEOVER_HOURS)).isoformat()}",
+            "select": "body,created_at", "order": "created_at.desc", "limit": "5"}, timeout=4)
+        r.raise_for_status()
+        return [m.get("body") or "" for m in r.json()]
+    except Exception as e:
+        print(f"HUMAN_REPLIES_READ_FAILED type={type(e).__name__}")
+        return []
+
+
 def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                         message_id=None) -> None:
     """The customer pipeline, EXTRACTED VERBATIM from do_POST.
@@ -6380,6 +6407,25 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
                 print(f"BAIRAVI_ACK_NO_REPLY phone=...{sender[-4:]}")
                 shadow_interpret(sender, user_text, ctx["history"], followup, known, message_id)
                 return
+            # THE OWNER IS TALKING (2026-10-04). After a hand-written reply,
+            # the bot answers only what is needed and the owner did not
+            # already answer; otherwise it stays quiet and tells the owner.
+            _human = human_replies(sender)
+            if _human:
+                _act, _what = bairavi.takeover_decision(followup, user_text, _human, known)
+                _name = bairavi.display_name(known.get("name")) or "Customer"
+                if _act == "silent":
+                    _saved = save_messages([(sender, "user", user_text)])
+                    warn_if_transcript_lost(sender, _saved, "Bairavi owner conversation")
+                    print(f"BAIRAVI_OWNER_TALKING_QUIET reason='{_what}' phone=...{sender[-4:]}")
+                    notify_owner(f"💬 *{_name}* replied — the bot stayed quiet ({_what}; "
+                                 f"you are talking with them):\n“{user_text[:300]}”\nwa.me/{sender}")
+                    shadow_interpret(sender, user_text, ctx["history"], followup, known, message_id)
+                    return
+                # "answer": only that answer goes out, through the normal send
+                # path below (one place records the reply that was sent).
+                _TURN_EXTRAS["owner_note"] = ("🤖 You are talking with this customer — the bot "
+                                              "answered only their question.")
             # WHAT A QUOTATION REQUIRES, taken from the Brain's own goal
             # registry rather than restated in the Bairavi layer. Injected as
             # data so bairavi.py keeps no dependency on the bic package and
@@ -6401,10 +6447,13 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # answer are still answered from evidence above; this covers what
             # used to get a receipt. "" keeps the composed reply, so a
             # refusal or a provider failure is not a worse conversation.
-            _model = bairavi_model_reply(sender, user_text, ctx["history"],
-                                         followup, known)
-            if _model:
-                _reply = _model
+            if _human:
+                _reply = _what             # the owner is talking: that answer, nothing more
+            else:
+                _model = bairavi_model_reply(sender, user_text, ctx["history"],
+                                             followup, known)
+                if _model:
+                    _reply = _model
             # THE RESULT IS CHECKED (Phase 2A). The marker below claims the
             # customer was asked something; for a reply that did not go out
             # that claim is false, and the next message would be read

@@ -3734,6 +3734,51 @@ def delivery_line(followup: dict, known: dict = None) -> str:
     return "TBD — asked, not yet answered"
 
 
+# WHEN THE OWNER IS TALKING (owner, 2026-10-04: "naanu uttara kotta mele bot
+# nanna uttarana nodi customer uttarana nodi analyze maadi avashyakate idre
+# matra reply madbeku"). After the owner (or staff) has written to the
+# customer by hand, the bot steps back: it answers only a factual question it
+# has an owner-approved answer for, and only if the owner's own message did
+# not already answer it. Everything else is left to the owner, who is told.
+# Rules, not a model's judgement — when in doubt the bot stays quiet.
+_OWNER_ANSWERED = {
+    "price": re.compile(r"₹|\brs\.?\b|rate|price|ದರ|ಬೆಲೆ|\d{1,2},\d{2},\d{3}|\d{2},\d{3}|\d{5,}|lakh|ಲಕ್ಷ", re.I),
+    "warranty": re.compile(r"warrant|ವಾರಂಟಿ|guarant|ಗ್ಯಾರಂಟಿ", re.I),
+    "payment": re.compile(r"advance|payment|ಪೇಮೆಂಟ್|ಅಡ್ವಾನ್ಸ್|50\s*%", re.I),
+    "transport": re.compile(r"transport|install|ಸಾಗಣೆ|ಇನ್‌ಸ್ಟಾಲ|ಇನ್ಸ್ಟಾಲ", re.I),
+    "approval": re.compile(r"mescom|bescom|hescom|gescom|cesc|approv|discom|ಅನುಮೋದನೆ|ಮೆಸ್ಕಾಂ|ಬೆಸ್ಕಾಂ", re.I),
+    "about": re.compile(r"\bkva\b|bairavi|kadaba|ಕಡಬ|deliver|ಡೆಲಿವರಿ|range", re.I),
+}
+_ABOUT_QUESTIONS = (QUESTION_WHO, QUESTION_RANGE, QUESTION_DELIVERY_AREA)
+
+
+def takeover_decision(followup: dict, text: str, owner_texts, known: dict = None):
+    """("silent", reason) or ("answer", reply) for a customer message that
+    arrives while the owner is talking to them (see above)."""
+    if (followup.get("is_ack") or followup.get("is_greeting") or followup.get("declined")
+            or not (text or "").strip()):
+        return "silent", "acknowledgement"
+    if followup.get("asked_discount") or followup.get("call_missed") or followup.get("asks_call"):
+        return "silent", "for the owner"                 # negotiation and call timing are his
+    said = "\n".join(t for t in owner_texts or () if t)
+    asked = []                                           # (topic, answer)
+    if followup.get("discom_approval_ask") is not None:
+        asked.append(("approval", approval_answer_kn(followup["discom_approval_ask"])))
+    for term in followup.get("asked_terms") or ():
+        if term in TERM_LINES:
+            asked.append((term, TERM_LINES[term]))
+    if followup.get("asked_price") or followup.get("commercial_intent") in (PRICE_REQUEST, QUOTATION_REQUEST):
+        asked.append(("price", price_short_kn(merged_state(known, followup).get("capacity_kva"))))
+    if followup.get("customer_question") in _ABOUT_QUESTIONS:
+        asked.append(("about", answer_question_kn(followup["customer_question"], known)))
+    if not asked:
+        return "silent", "talking with the owner"
+    todo = [answer for topic, answer in asked if not _OWNER_ANSWERED[topic].search(said)]
+    if not todo:
+        return "silent", "the owner already answered it"
+    return "answer", "\n\n".join(todo)
+
+
 def compose_call_now_alert(phone: str, followup: dict, known: dict = None) -> str:
     """A SHORT, separate alert for the two moments a call cannot wait
     (owner, 2026-10-04: "1 2 3 madu" — #1): the customer chose "call now", or
