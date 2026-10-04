@@ -2420,8 +2420,13 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     callback = callback_request(text, awaiting)
     if callback and AWAITING_CALLBACK in (awaiting or ()) and len(low.split()) <= 2:
         qty = None  # "2" / "2️⃣" answering "when should we call?" is option two, not two units
+    # THE ANSWER TO "WHAT TIME SHALL WE CALL?" "11" is eleven o'clock, not 11
+    # units; "ಸಂಜೆ" is a time, not a new choice of "this evening".
+    call_time = parse_call_time(text) if AWAITING_CALL_TIME in (awaiting or ()) else None
+    if call_time:
+        qty, cap, callback = None, None, None
     return {"quantity": qty, "application": app, "capacity_kva": cap,
-            "callback": callback, "asked_terms": asked_terms(text),
+            "callback": callback, "asked_terms": asked_terms(text), "call_time": call_time,
             # The previous reply already carried the closing block; saying it
             # again is the "tell everything" the owner asked us to stop.
             "callback_offered": AWAITING_CALLBACK in (awaiting or ()),
@@ -2730,12 +2735,86 @@ CALLBACK_LABEL_EN = {CALLBACK_NOW: "NOW", CALLBACK_EVENING: "this evening", CALL
 # passes the current India hour as followup["call_hour"]. Absent, the hour is
 # unknown and the promise is exactly what it was before.
 CALL_HOURS = (9, 21)
-# A CLOCK TIME, NOT "AFTER 9" (owner, 2026-10-04: "1 2 3 madu" — #3). "After
-# 9" could mean noon; "by 10" is a promise a customer can hold us to, and it
-# is the one the system keeps: the 9:00 call briefing lists these customers
-# first (call_briefing._SLOT_RE), and call_reminders treats them as due at 10.
-_AFTER_9_TODAY_KN = "ಇಂದು ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ"
-_AFTER_9_TOMORROW_KN = "ನಾಳೆ ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ"
+# THE CUSTOMER CHOOSES THE TIME (owner, 2026-10-04: "naave ondu time fix
+# madodu sari alla" — B). "Now" asked outside call hours is answered with a
+# question — what time suits you? — and the customer's own answer becomes the
+# promise. Only if they never say does the bot fall back to "in the morning",
+# a part of the day rather than a clock time we invented.
+_AFTER_9_TODAY_KN = "ಇಂದು ಬೆಳಿಗ್ಗೆ"
+_AFTER_9_TOMORROW_KN = "ನಾಳೆ ಬೆಳಿಗ್ಗೆ"
+AWAITING_CALL_TIME = "call_time"
+CALL_TIME_QUESTION_KN = {
+    "ನಾಳೆ": "ಈಗ ತಡವಾಗಿದೆ 🙏 ನಾಳೆ ಯಾವ ಸಮಯಕ್ಕೆ call ಮಾಡಲಿ? (ಉದಾ: 10 ಗಂಟೆ / ಸಂಜೆ)",
+    "ಇಂದು": "ನಮ್ಮ engineer ಬೆಳಿಗ್ಗೆ 9 ರ ನಂತರ ಲಭ್ಯ 🙏 ಇಂದು ಯಾವ ಸಮಯಕ್ಕೆ call ಮಾಡಲಿ? "
+            "(ಉದಾ: 10 ಗಂಟೆ / ಸಂಜೆ)",
+}
+
+
+def outside_call_hours(hour) -> bool:
+    return hour is not None and not (CALL_HOURS[0] <= hour < CALL_HOURS[1])
+
+
+def call_day_kn(hour) -> str:
+    """Which day a time chosen at this IST hour means: after 9 pm it is
+    tomorrow; otherwise today."""
+    return "ನಾಳೆ" if hour is not None and hour >= CALL_HOURS[1] else "ಇಂದು"
+
+
+_PART_OF_DAY = (
+    ("morning", ("ಬೆಳಿಗ್ಗೆ", "ಬೆಳಗ್ಗೆ", "ಬೆಳಗ್ಗೆ", "beligge", "belige", "bellige", "belagge",
+                 "morning", "mrng", "morng")),
+    ("afternoon", ("ಮಧ್ಯಾಹ್ನ", "madhyahna", "madyahna", "madyana", "afternoon", "noon", "lunch")),
+    ("evening", ("ಸಂಜೆ", "sanje", "sanjhe", "evening", "evng", "eve")),
+    ("night", ("ರಾತ್ರಿ", "ratri", "rathri", "raatri", "night")),
+    ("any", ("ಯಾವಾಗಾದರೂ", "ಯಾವಾಗಲಾದರೂ", "ಯಾವಾಗ ಬೇಕಾದರೂ", "yavaglu", "yavagadru", "yavagadaru",
+             "any time", "anytime", "eppo", "whenever", "free time")),
+)
+_PART_DEFAULT_HOUR = {"morning": 10, "afternoon": 14, "evening": 18, "night": 20, "any": 10}
+_CLOCK_RE = re.compile(r"(?<![\d.])(\d{1,2})(?:[:.](\d{2}))?\s*"
+                       r"(a\.?m\.?|p\.?m\.?|ಗಂಟೆ|gante|ghante|gantege|ghantege|o'?clock|ge\b|ke\b|ಕ್ಕೆ|ಗೆ)?",
+                       re.I)
+
+
+def _part_kn(hour: int) -> str:
+    return "ಬೆಳಿಗ್ಗೆ" if hour < 12 else "ಮಧ್ಯಾಹ್ನ" if hour < 16 else "ಸಂಜೆ" if hour < 19 else "ರಾತ್ರಿ"
+
+
+def parse_call_time(text: str):
+    """The time a customer names for our call: {"hour", "label_kn",
+    "label_en"}, or None. Read only as the answer to "what time shall we
+    call?", and only from a short message, so a kVA or a quantity in a longer
+    sentence is never taken for a time. Always inside call hours (9-21)."""
+    raw = (text or "").strip()
+    low = raw.lower()
+    if not raw or len(low.split()) > 6 or "kva" in low or "kv" in low.split():
+        return None
+    part = next((p for p, words in _PART_OF_DAY if any(w in low for w in words)), None)
+    m = _CLOCK_RE.search(low)
+    hour = minute = None
+    if m:
+        h, mm, suffix = int(m.group(1)), m.group(2), (m.group(3) or "").replace(".", "")
+        if 1 <= h <= 23:
+            if suffix.startswith("p") or part in ("evening", "night") or (part == "afternoon" and h <= 6):
+                h = h + 12 if h < 12 else h
+            elif not suffix.startswith("a") and part is None and 1 <= h <= 8:
+                h += 12                       # "4" / "6 ಕ್ಕೆ": calls happen 9-21, so the afternoon
+            hour, minute = h, (int(mm) if mm else 0)
+    if hour is None and part is None:
+        return None
+    if hour is None:
+        hour, minute = _PART_DEFAULT_HOUR[part], 0
+        label_kn = "ಬೆಳಿಗ್ಗೆ" if part == "any" else dict(
+            morning="ಬೆಳಿಗ್ಗೆ", afternoon="ಮಧ್ಯಾಹ್ನ", evening="ಸಂಜೆ", night="ರಾತ್ರಿ")[part]
+        label_en = "MORNING" if part == "any" else part.upper()
+        return {"hour": hour, "label_kn": label_kn, "label_en": label_en}
+    hour = min(max(hour, CALL_HOURS[0]), CALL_HOURS[1] - 1)
+    if hour == CALL_HOURS[1] - 1:
+        minute = 0
+    h12 = hour - 12 if hour > 12 else hour
+    clock = f"{h12}:{minute:02d}" if minute else f"{h12}"
+    return {"hour": hour,
+            "label_kn": f"{_part_kn(hour)} {clock} ಗಂಟೆಗೆ",
+            "label_en": f"{clock} {'PM' if hour >= 12 else 'AM'}"}
 
 
 def callback_when_kn(slot, hour=None) -> str:
@@ -2761,9 +2840,9 @@ def callback_when_en(slot, hour=None) -> str:
         return label
     start, end = CALL_HOURS
     if slot == CALLBACK_NOW and hour < start:
-        return "TODAY BY 10 AM (asked before 9)"
+        return "TODAY MORNING (asked before 9; bot asked them for a time)"
     if slot == CALLBACK_NOW and hour >= end:
-        return "TOMORROW BY 10 AM (asked after 9 pm)"
+        return "TOMORROW MORNING (asked after 9 pm; bot asked them for a time)"
     if slot == CALLBACK_EVENING and hour >= end:
         return "tomorrow evening (asked after 9 pm)"
     return label
@@ -2964,7 +3043,7 @@ def compose_reply(parsed: dict) -> str:
 # answer "ನನ್ನ ಹೆಸರು ಗೊತ್ತಾ?" with something it already knew.
 _PERSISTENT_FIELDS = ("capacity_kva", "quantity", "application", "location",
                       "delivery_location", "delivery_same",
-                      "delivery_mentioned", "name", "callback", "urgency")
+                      "delivery_mentioned", "name", "callback", "urgency", "call_time")
 
 
 def merged_state(known: dict, turn: dict = None) -> dict:
@@ -3339,7 +3418,7 @@ def marker_awaiting(content: str) -> tuple:
         return ()
     raw = text.split("awaiting=", 1)[1].split()[0]
     valid = (AWAITING_DELIVERY, AWAITING_PURPOSE,
-             AWAITING_CAPACITY, AWAITING_QUANTITY, AWAITING_CALLBACK)
+             AWAITING_CAPACITY, AWAITING_QUANTITY, AWAITING_CALLBACK, AWAITING_CALL_TIME)
     return tuple(f for f in raw.split(",") if f in valid)
 
 
@@ -3520,8 +3599,9 @@ def _compose_followup_reply(followup: dict, known: dict = None,
                      "ತುರ್ತಾಗಿ ತಿಳಿಸಿದ್ದೇವೆ — ಆದಷ್ಟು ಬೇಗ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
     elif followup.get("asks_call") and _chosen and not followup.get("callback"):
         _who = display_name(merged_state(known, followup).get("name"))
+        _their_time = (known or {}).get("call_time")
         lines.append(("ಹೌದು " + _who + " ಅವರೇ" if _who else "ಹೌದು")
-                     + f", ನಮ್ಮ engineer *{callback_when_kn(_chosen, followup.get('call_hour'))}* "
+                     + f", ನಮ್ಮ engineer *{_their_time['label_kn'] if _their_time else callback_when_kn(_chosen, followup.get('call_hour'))}* "
                      "ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏")
     if followup.get("asked_discount"):
         # Never a discount and never the same price again: a person calls.
@@ -3568,12 +3648,25 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     missing = [question_for(f, known) for f in _asks]
 
     _callback = followup.get("callback")
-    if _callback:
+    _hour = followup.get("call_hour")
+    if _callback == CALLBACK_NOW and outside_call_hours(_hour) and not merged_state(
+            known, followup).get("call_time"):
+        # Outside call hours: ask THEM for the time instead of inventing one.
+        _who = display_name(merged_state(known, followup).get("name"))
+        lines.append(("ಸರಿ " + _who + " ಅವರೇ. " if _who else "ಸರಿ. ")
+                     + CALL_TIME_QUESTION_KN[call_day_kn(_hour)])
+    elif _callback:
         _who = display_name(merged_state(known, followup).get("name"))
         lines.append(("ಸರಿ " + _who + " ಅವರೇ." if _who else "ಸರಿ.")
-                     + f" ನಮ್ಮ engineer *{callback_when_kn(_callback, followup.get('call_hour'))}* ನಿಮಗೆ "
+                     + f" ನಮ್ಮ engineer *{callback_when_kn(_callback, _hour)}* ನಿಮಗೆ "
                      "ಕರೆ ಮಾಡಿ, ಡೆಲಿವರಿ ಸಮಯ ಮತ್ತು order ವಿವರಗಳನ್ನು ತಿಳಿಸುತ್ತಾರೆ.\n"
                      "ಧನ್ಯವಾದಗಳು 🙏")
+    _chosen_time = followup.get("call_time")
+    if _chosen_time:
+        _who = display_name(merged_state(known, followup).get("name"))
+        _day = call_day_kn(_hour) + " " if _hour is not None else ""
+        lines.append(("ಸರಿ " + _who + " ಅವರೇ 🙏" if _who else "ಸರಿ 🙏")
+                     + f" ನಮ್ಮ engineer *{_day}{_chosen_time['label_kn']}* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
     if followup.get("asks_info"):
         lines.append(info_card_kn(merged_state(known, followup)))
     if followup.get("asks_scope"):
@@ -3650,15 +3743,19 @@ def compose_call_now_alert(phone: str, followup: dict, known: dict = None) -> st
     sent on its own. "" when neither moment applies.
     """
     missed = followup.get("call_missed")
-    if not (missed or followup.get("callback") == CALLBACK_NOW):
+    chosen = followup.get("call_time")
+    if not (missed or chosen or followup.get("callback") == CALLBACK_NOW):
         return ""
     state = merged_state(known, followup)
     facts = " · ".join(x for x in (
         (known or {}).get("name") or "",
         f"{state['capacity_kva']} kVA" if state.get("capacity_kva") else "",
         state.get("delivery_location") or "") if x)
+    _hour = followup.get("call_hour")
     head = ("📵🔥 *CALL NOW — the promised call did not come*" if missed else
-            f"🔥📞 *CALL {callback_when_en(CALLBACK_NOW, followup.get('call_hour')).upper()}*")
+            f"🕙📞 *CALL {'TOMORROW' if call_day_kn(_hour) == 'ನಾಳೆ' else 'TODAY'} "
+            f"{chosen['label_en']}* — the customer's own time" if chosen else
+            f"🔥📞 *CALL {callback_when_en(CALLBACK_NOW, _hour).upper()}*")
     return f"{head}\n{facts or 'Bairavi lead'}\nwa.me/{phone}"
 
 
@@ -3860,6 +3957,9 @@ def awaiting_after(followup: dict, known: dict = None) -> tuple:
     Kept separate so outstanding() keeps meaning "qualification still open".
     """
     out = outstanding(followup, known)
+    if (followup.get("callback") == CALLBACK_NOW and outside_call_hours(followup.get("call_hour"))
+            and not merged_state(known, followup).get("call_time")):
+        return (AWAITING_CALL_TIME,)
     if offers_call_time(followup, known):
         return (AWAITING_CALLBACK,)
     if not out and not merged_state(known, followup).get("callback"):

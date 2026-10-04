@@ -93,7 +93,7 @@ class Build(unittest.TestCase):
     def test_night_now_promise_is_call_first(self):
         """'Now' asked at night is promised for the morning (by 10, or 'after 9'
         before 2026-10-04): it must be in Call first, not in 'also waiting'."""
-        for wording in ("ನಾಳೆ ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ", "ಇಂದು ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ",
+        for wording in ("ನಾಳೆ ಬೆಳಿಗ್ಗೆ", "ಇಂದು ಬೆಳಿಗ್ಗೆ", "ನಾಳೆ ಬೆಳಿಗ್ಗೆ 11 ಗಂಟೆಗೆ",
                         "ನಾಳೆ ಬೆಳಿಗ್ಗೆ 9 ಗಂಟೆಯ ನಂತರ"):
             with self.subTest(wording=wording):
                 c = [lead("919000000007", "Night Caller", "2026-09-30T17:00:00+00:00")]
@@ -103,6 +103,21 @@ class Build(unittest.TestCase):
                 t = cb.build(c, m, NOW)
                 self.assertIn("🔥 *Call first* (1)", t)
                 self.assertIn("Night Caller", t.split("🔥 *Call first* (1)")[1])
+
+    def test_their_own_time_is_shown(self):
+        c = [lead("919000000008", "Own Time", "2026-09-30T17:00:00+00:00")]
+        for bot_text, expect, section in (
+                ("ಸರಿ 🙏 ನಮ್ಮ engineer *ನಾಳೆ ಬೆಳಿಗ್ಗೆ 11 ಗಂಟೆಗೆ* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.",
+                 "promised: ನಾಳೆ ಬೆಳಿಗ್ಗೆ 11 ಗಂಟೆಗೆ", "🔥 *Call first*"),
+                ("ಸರಿ 🙏 ನಮ್ಮ engineer *ನಾಳೆ ಸಂಜೆ 5 ಗಂಟೆಗೆ* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.",
+                 "promised: ನಾಳೆ ಸಂಜೆ 5 ಗಂಟೆಗೆ", "📅 *Promised a call*"),
+                ("ಸರಿ. ಈಗ ತಡವಾಗಿದೆ 🙏 ನಾಳೆ ಯಾವ ಸಮಯಕ್ಕೆ call ಮಾಡಲಿ? (ಉದಾ: 10 ಗಂಟೆ / ಸಂಜೆ)",
+                 "promised: time not given yet", "🔥 *Call first*")):
+            with self.subTest(expect=expect):
+                t = cb.build(c, [form("919000000008", "2026-09-30T17:00:00+00:00"),
+                                 bot("919000000008", "2026-09-30T17:01:00+00:00", bot_text)], NOW)
+                self.assertIn(expect, t)
+                self.assertIn(section, t)
 
     def test_everyone_marked(self):
         t = cb.build([self.clients[4]], [], NOW)

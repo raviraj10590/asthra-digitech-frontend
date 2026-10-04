@@ -66,10 +66,19 @@ def promise(history) -> dict:
             continue
         if bairavi.is_lead_form(text):
             continue
+        # THE CUSTOMER'S OWN TIME (2026-10-04, option B): the answer to "what
+        # time shall we call?" after a night-time "now" sets when it is due.
+        if found and bairavi.AWAITING_CALL_TIME in awaiting:
+            when = bairavi.parse_call_time(text)
+            if when:
+                found.update(time_hour=when["hour"], time_label=when["label_en"],
+                             time_at=r.get("created_at"))
+                continue
         slot = bairavi.callback_request(text, awaiting)
         if slot:
             found = {"slot": slot, "chosen_at": r.get("created_at"),
-                     "declined_after": False, "complained_after": False}
+                     "declined_after": False, "complained_after": False,
+                     "time_hour": None, "time_label": None, "time_at": None}
             continue
         if found:
             if bairavi.is_decline(text):
@@ -79,8 +88,17 @@ def promise(history) -> dict:
     return found
 
 
-def due_at(slot: str, chosen_at) -> datetime:
-    """When the promised call should have happened (aware, IST)."""
+def due_at(slot: str, chosen_at, time_hour: int = None, time_at=None) -> datetime:
+    """When the promised call should have happened (aware, IST).
+
+    A time the customer named wins: the call is due at that hour, today, or
+    tomorrow when they named it after call hours."""
+    if time_hour is not None and time_at:
+        said = (_ts(time_at) if isinstance(time_at, str) else time_at).astimezone(IST)
+        day = said.replace(hour=0, minute=0, second=0, microsecond=0)
+        if said.hour >= CALL_HOURS[1]:
+            day += timedelta(days=1)
+        return day + timedelta(hours=time_hour)
     chosen = (_ts(chosen_at) if isinstance(chosen_at, str) else chosen_at).astimezone(IST)
     start, end = CALL_HOURS
     day = chosen.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -156,7 +174,8 @@ def compose(items: list, now: datetime) -> str:
         facts = " · ".join(x for x in (_one_line(it.get("name"), 30) or "—",
                                        f"{it['kva']} kVA" if it.get("kva") else None,
                                        _one_line(it.get("place"))) if x)
-        lines.append(f"• {facts} — asked *{_SLOT_TEXT.get(it['slot'], it['slot'])}* "
+        lines.append(f"• {facts} — asked *{_SLOT_TEXT.get(it['slot'], it['slot'])}*"
+                     + (f" (their time: *{it['time_label']}*)" if it.get("time_label") else "") + " "
                      f"({_when(it['chosen_at'])})"
                      + (f" · day {days + 1}" if days else "")
                      + (" · 📵 *complained: no call*" if it.get("complained") else "")

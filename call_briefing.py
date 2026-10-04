@@ -30,13 +30,17 @@ OWNER_LAST4 = ("9951", "8141")
 
 # The bot's own confirmation of the chosen call time (bairavi.py, callback
 # close and the "will you call now?" confirmation). Latest one wins.
-# "now" includes the morning promise made at night or before 9 (bairavi
-# callback_when_kn): those customers were promised a call by 10, so they
-# belong in 🔥 Call first, not in "also waiting". The older "after 9" wording
-# is kept so promises made before 2026-10-04 are still recognised.
-_SLOT_RE = {"now": re.compile(r"engineer \*(?:ಈಗಲೇ|(?:ಇಂದು|ನಾಳೆ) ಬೆಳಿಗ್ಗೆ (?:9 ಗಂಟೆಯ ನಂತರ|10 ಗಂಟೆಯ ಒಳಗೆ))\*"),
-            "evening": re.compile(r"engineer \*ಇಂದು ಸಂಜೆ\*"),
-            "tomorrow": re.compile(r"engineer \*ನಾಳೆ\*")}
+# The bot's promise, read from its own words (bairavi.py). Latest one wins.
+#   now       "*ಈಗಲೇ*"; a morning time ("*ನಾಳೆ ಬೆಳಿಗ್ಗೆ*", "*ನಾಳೆ ಬೆಳಿಗ್ಗೆ 11 ಗಂಟೆಗೆ*",
+#             "*ಇಂದು ಮಧ್ಯಾಹ್ನ 2 ಗಂಟೆಗೆ*"); or the question "ಯಾವ ಸಮಯಕ್ಕೆ call ಮಾಡಲಿ?"
+#             asked after a night-time "now" — they asked for a call and are waiting
+#   evening   "*ಇಂದು ಸಂಜೆ*", "*ನಾಳೆ ಸಂಜೆ 5 ಗಂಟೆಗೆ*", "*ನಾಳೆ ರಾತ್ರಿ 8 ಗಂಟೆಗೆ*"
+#   tomorrow  "*ನಾಳೆ*"
+# The older "ಬೆಳಿಗ್ಗೆ 9 ಗಂಟೆಯ ನಂತರ" wording falls under the morning pattern.
+_SLOT_RE = {"now": re.compile(r"engineer \*(?P<when>ಈಗಲೇ|(?:ಇಂದು|ನಾಳೆ) (?:ಬೆಳಿಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ)[^*]*)\*"
+                              r"|(?P<ask>ಯಾವ ಸಮಯಕ್ಕೆ call ಮಾಡಲಿ)"),
+            "evening": re.compile(r"engineer \*(?P<when>(?:ಇಂದು|ನಾಳೆ) (?:ಸಂಜೆ|ರಾತ್ರಿ)[^*]*)\*"),
+            "tomorrow": re.compile(r"engineer \*(?P<when>ನಾಳೆ)\*")}
 _SLOT_EN = {"now": "asked: call NOW", "evening": "asked: this evening",
             "tomorrow": "asked: tomorrow"}
 _STAGE_ORDER = ("Won", "Negotiation", "Site Visit", "Interested", "Contacted",
@@ -72,12 +76,22 @@ def is_unmarked(c: dict) -> bool:
 
 def chosen_slot(outbound: list):
     """(slot, when) from the newest bot confirmation, else (None, None)."""
+    slot, at, _ = promise_of(outbound)
+    return slot, at
+
+
+def promise_of(outbound: list):
+    """(slot, when, promise words) from the newest bot confirmation.
+    The words are the bot's own ("ನಾಳೆ ಬೆಳಿಗ್ಗೆ 11 ಗಂಟೆಗೆ"); "time not given yet"
+    when the bot asked for a time and has no answer."""
     for m in sorted(outbound, key=lambda m: m.get("created_at") or "", reverse=True):
         body = m.get("body") or ""
         for slot, rx in _SLOT_RE.items():
-            if rx.search(body):
-                return slot, m.get("created_at")
-    return None, None
+            hit = rx.search(body)
+            if hit:
+                words = hit.groupdict().get("when") or ("time not given yet" if hit.groupdict().get("ask") else None)
+                return slot, m.get("created_at"), words
+    return None, None, None
 
 
 def _form_facts(inbound: list) -> dict:
@@ -108,7 +122,11 @@ def _line(n: int, lead: dict, now: datetime) -> str:
     if lead["place"]:
         bits.append(bairavi.place_display(lead["place"])[:40])
     if lead["slot"]:
-        bits.append(_SLOT_EN[lead["slot"]] + _when(lead["slot_at"], now))
+        # The exact promise when it is more than the bare choice: the time the
+        # customer gave ("ನಾಳೆ ಬೆಳಿಗ್ಗೆ 11 ಗಂಟೆಗೆ") is what the owner must keep.
+        words = lead.get("promise")
+        bare = words in (None, "ಈಗಲೇ", "ನಾಳೆ", "ಇಂದು ಸಂಜೆ")
+        bits.append((_SLOT_EN[lead["slot"]] if bare else f"promised: {words}") + _when(lead["slot_at"], now))
     elif lead["urgency"] == "IMMEDIATE":
         bits.append("needs it NOW")
     text = f"{n}. " + " · ".join(bits)
@@ -157,10 +175,11 @@ def build(clients: list, messages: list, now: datetime = None,
         if not is_unmarked(c):
             continue
         msgs = by_phone.get(c["phone"], [])
-        slot, slot_at = chosen_slot([m for m in msgs if m.get("direction") == "outbound"])
+        slot, slot_at, promise = promise_of([m for m in msgs if m.get("direction") == "outbound"])
         todo.append({"name": bairavi.display_name(c.get("name")) or c.get("name"),
                      "phone": c["phone"], "created_at": c["created_at"],
-                     "slot": slot, "slot_at": slot_at, "summary": ai_summary(c.get("notes")),
+                     "slot": slot, "slot_at": slot_at, "promise": promise,
+                     "summary": ai_summary(c.get("notes")),
                      **_form_facts([m for m in msgs if m.get("direction") == "inbound"])})
 
     first = [l for l in todo if l["slot"] == "now" or (not l["slot"] and l["urgency"] == "IMMEDIATE")]

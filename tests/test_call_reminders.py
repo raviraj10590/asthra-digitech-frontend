@@ -350,3 +350,30 @@ class TheEndpoint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheirOwnTimeIsWhenItIsDue(unittest.TestCase):
+    """Option B (2026-10-04): a time the customer named sets when the call is due."""
+
+    def test_due_at_their_hour(self):
+        import call_reminders as cr
+        from datetime import datetime
+        said_at_night = datetime(2026, 10, 4, 22, 30, tzinfo=cr.IST)
+        due = cr.due_at("now", said_at_night, time_hour=17, time_at=said_at_night)
+        self.assertEqual((due.day, due.hour), (5, 17))                 # tomorrow 5 pm
+        said_morning = datetime(2026, 10, 5, 8, 0, tzinfo=cr.IST)
+        due = cr.due_at("now", said_morning, time_hour=11, time_at=said_morning)
+        self.assertEqual((due.day, due.hour), (5, 11))                 # today 11 am
+
+    def test_promise_reads_the_answer(self):
+        import bairavi as b
+        import call_reminders as cr
+        hist = [
+            {"role": "assistant", "content": b.flow_marker((b.AWAITING_CALLBACK,)), "created_at": "2026-10-04T16:00:00+00:00"},
+            {"role": "user", "content": "1", "created_at": "2026-10-04T16:30:00+00:00"},
+            {"role": "assistant", "content": b.flow_marker((b.AWAITING_CALL_TIME,)), "created_at": "2026-10-04T16:30:01+00:00"},
+            {"role": "user", "content": "11", "created_at": "2026-10-04T16:31:00+00:00"},
+        ]
+        with mock.patch.object(b, "in_transformer_flow", lambda rows: True):
+            p = cr.promise(hist)
+        self.assertEqual((p["slot"], p["time_hour"], p["time_label"]), ("now", 11, "11 AM"))

@@ -225,6 +225,9 @@ def validate(interp, text: str, awaiting=(), known: dict = None) -> dict:
            "asks_documents": brain["asks_documents"],
            "declined": brain["declined"],
            "escom_area": brain["escom_area"],
+           # The answer to "what time shall we call?" (2026-10-04): read by the
+           # Brain's own rule, only when that question was asked.
+           "call_time": brain["call_time"],
            "customer_question": None}
     ambiguous = interp.get("ambiguous") or None
     correction = bool(interp.get("is_correction"))

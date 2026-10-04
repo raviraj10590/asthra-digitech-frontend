@@ -38,20 +38,23 @@ class ThePromise(unittest.TestCase):
                 self.assertIn("*ಈಗಲೇ*", reply)
                 self.assertIn("CALL NOW", alert)
 
-    def test_now_at_night_is_tomorrow_morning(self):
+    # OPTION B (owner, 2026-10-04: "naave ondu time fix madodu sari alla"):
+    # outside call hours the customer is ASKED for a time, none is invented.
+    def test_now_at_night_asks_them_for_a_time_tomorrow(self):
         for hour in (21, 22, 23):
             with self.subTest(hour=hour):
                 reply, alert = choose("1", hour)
-                self.assertIn("ನಾಳೆ ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ", reply)
+                self.assertIn("ನಾಳೆ ಯಾವ ಸಮಯಕ್ಕೆ call ಮಾಡಲಿ", reply)
                 self.assertNotIn("ಈಗಲೇ", reply)
-                self.assertIn("TOMORROW BY 10 AM", alert)
+                self.assertNotIn("ಗಂಟೆಯ ಒಳಗೆ", reply)
+                self.assertIn("TOMORROW MORNING", alert)
 
-    def test_now_before_nine_is_this_morning(self):
+    def test_now_before_nine_asks_them_for_a_time_today(self):
         for hour in (0, 5, 8):
             with self.subTest(hour=hour):
                 reply, alert = choose("1", hour)
-                self.assertIn("ಇಂದು ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ", reply)
-                self.assertIn("TODAY BY 10 AM", alert)
+                self.assertIn("ಇಂದು ಯಾವ ಸಮಯಕ್ಕೆ call ಮಾಡಲಿ", reply)
+                self.assertIn("TODAY MORNING", alert)
 
     def test_this_evening_after_nine_pm_is_tomorrow_evening(self):
         self.assertIn("*ಇಂದು ಸಂಜೆ*", choose("2", 18)[0])
@@ -112,7 +115,7 @@ class CallNowAlert(unittest.TestCase):
 
     def test_now_at_night_says_the_morning_promise(self):
         a = b.compose_call_now_alert("919000000001", {"callback": b.CALLBACK_NOW, "call_hour": 22}, {})
-        self.assertTrue(a.startswith("🔥📞 *CALL TOMORROW BY 10 AM"))
+        self.assertTrue(a.startswith("🔥📞 *CALL TOMORROW MORNING"))
         self.assertIn("Bairavi lead", a)
 
     def test_missed_call_complaint(self):
@@ -122,3 +125,45 @@ class CallNowAlert(unittest.TestCase):
     def test_nothing_for_other_messages(self):
         for f in ({}, {"callback": b.CALLBACK_EVENING}, {"callback": b.CALLBACK_TOMORROW}, {"asked_price": True}):
             self.assertEqual(b.compose_call_now_alert("919000000001", f, {}), "")
+
+
+class TheirOwnTime(unittest.TestCase):
+    """Option B end to end: night 'now' -> question -> their answer -> the promise."""
+
+    def night_turns(self, answer, answer_hour=22):
+        first = b.parse_followup("1", (b.AWAITING_CALLBACK,), KNOWN)
+        first["call_hour"] = 22
+        q_reply = b.compose_followup_reply(first, KNOWN, None, None)
+        awaiting = b.awaiting_after(first, KNOWN)
+        known = b.merged_state(KNOWN, first)
+        second = b.parse_followup(answer, awaiting, known)
+        second["call_hour"] = answer_hour
+        return q_reply, awaiting, second, b.compose_followup_reply(second, known, None, None), known
+
+    def test_their_hour_becomes_the_promise(self):
+        q, awaiting, f, reply, known = self.night_turns("11")
+        self.assertIn("ನಾಳೆ ಯಾವ ಸಮಯಕ್ಕೆ call ಮಾಡಲಿ", q)
+        self.assertEqual(awaiting, (b.AWAITING_CALL_TIME,))
+        self.assertIsNone(f["quantity"])                      # "11" is eleven o'clock, not 11 units
+        self.assertEqual(f["call_time"]["hour"], 11)
+        self.assertIn("engineer *ನಾಳೆ ಬೆಳಿಗ್ಗೆ 11 ಗಂಟೆಗೆ*", reply)
+        alert = b.compose_call_now_alert("919000000000", f, known)
+        self.assertTrue(alert.startswith("🕙📞 *CALL TOMORROW 11 AM* — the customer's own time"))
+
+    def test_evening_word(self):
+        _, _, f, reply, _ = self.night_turns("sanje")
+        self.assertIn("engineer *ನಾಳೆ ಸಂಜೆ*", reply)
+        self.assertIsNone(f["callback"])                      # a time, not a new "this evening" choice
+
+    def test_answered_next_morning_means_today(self):
+        _, _, f, reply, _ = self.night_turns("4 ಕ್ಕೆ", answer_hour=8)
+        self.assertIn("engineer *ಇಂದು ಸಂಜೆ 4 ಗಂಟೆಗೆ*", reply)
+
+    def test_remembered_from_history(self):
+        hist = [{"role": "assistant", "content": b.flow_marker((b.AWAITING_CALL_TIME,))},
+                {"role": "user", "content": "11 ಗಂಟೆಗೆ"}]
+        self.assertEqual(b.established_from_history(hist).get("call_time", {}).get("hour"), 11)
+
+    def test_not_a_time_is_left_alone(self):
+        _, _, f, _, _ = self.night_turns("Krishi")
+        self.assertIsNone(f["call_time"])

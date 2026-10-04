@@ -109,7 +109,7 @@ def run(now=None) -> dict:
         if not chosen or now - chosen > timedelta(days=cr.MAX_AGE_DAYS):
             _bump(counts, "too_old")
             continue
-        if cr.due_at(p["slot"], chosen) > now:
+        if cr.due_at(p["slot"], chosen, p.get("time_hour"), p.get("time_at")) > now:
             _bump(counts, "not_due_yet")
             continue
         markers = [r.get("content") or "" for r in history if r.get("role") == "system"]
@@ -140,6 +140,7 @@ def run(now=None) -> dict:
                       "kva": state.get("capacity_kva"),
                       "place": state.get("delivery_location") or state.get("location"),
                       "slot": p["slot"], "chosen_at": p["chosen_at"],
+                      "time_label": p.get("time_label"),
                       "complained": p["complained_after"]})
     if items:
         try:
