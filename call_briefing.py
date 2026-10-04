@@ -30,7 +30,11 @@ OWNER_LAST4 = ("9951", "8141")
 
 # The bot's own confirmation of the chosen call time (bairavi.py, callback
 # close and the "will you call now?" confirmation). Latest one wins.
-_SLOT_RE = {"now": re.compile(r"engineer \*ಈಗಲೇ\*"),
+# "now" includes the morning promise made at night or before 9 (bairavi
+# callback_when_kn): those customers were promised a call by 10, so they
+# belong in 🔥 Call first, not in "also waiting". The older "after 9" wording
+# is kept so promises made before 2026-10-04 are still recognised.
+_SLOT_RE = {"now": re.compile(r"engineer \*(?:ಈಗಲೇ|(?:ಇಂದು|ನಾಳೆ) ಬೆಳಿಗ್ಗೆ (?:9 ಗಂಟೆಯ ನಂತರ|10 ಗಂಟೆಯ ಒಳಗೆ))\*"),
             "evening": re.compile(r"engineer \*ಇಂದು ಸಂಜೆ\*"),
             "tomorrow": re.compile(r"engineer \*ನಾಳೆ\*")}
 _SLOT_EN = {"now": "asked: call NOW", "evening": "asked: this evening",

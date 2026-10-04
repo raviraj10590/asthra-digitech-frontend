@@ -90,6 +90,20 @@ class Build(unittest.TestCase):
     def test_nothing_to_say(self):
         self.assertEqual(cb.build([], [], NOW), "")
 
+    def test_night_now_promise_is_call_first(self):
+        """'Now' asked at night is promised for the morning (by 10, or 'after 9'
+        before 2026-10-04): it must be in Call first, not in 'also waiting'."""
+        for wording in ("ನಾಳೆ ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ", "ಇಂದು ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ",
+                        "ನಾಳೆ ಬೆಳಿಗ್ಗೆ 9 ಗಂಟೆಯ ನಂತರ"):
+            with self.subTest(wording=wording):
+                c = [lead("919000000007", "Night Caller", "2026-09-30T17:00:00+00:00")]
+                m = [form("919000000007", "2026-09-30T17:00:00+00:00"),
+                     bot("919000000007", "2026-09-30T17:01:00+00:00",
+                         f"ಸರಿ X ಅವರೇ. ನಮ್ಮ engineer *{wording}* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.")]
+                t = cb.build(c, m, NOW)
+                self.assertIn("🔥 *Call first* (1)", t)
+                self.assertIn("Night Caller", t.split("🔥 *Call first* (1)")[1])
+
     def test_everyone_marked(self):
         t = cb.build([self.clients[4]], [], NOW)
         self.assertIn("✅ Everyone from the last 14 days has been marked.", t)

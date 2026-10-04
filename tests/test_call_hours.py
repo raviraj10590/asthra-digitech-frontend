@@ -42,16 +42,16 @@ class ThePromise(unittest.TestCase):
         for hour in (21, 22, 23):
             with self.subTest(hour=hour):
                 reply, alert = choose("1", hour)
-                self.assertIn("ನಾಳೆ ಬೆಳಿಗ್ಗೆ 9 ಗಂಟೆಯ ನಂತರ", reply)
+                self.assertIn("ನಾಳೆ ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ", reply)
                 self.assertNotIn("ಈಗಲೇ", reply)
-                self.assertIn("TOMORROW AFTER 9 AM", alert)
+                self.assertIn("TOMORROW BY 10 AM", alert)
 
     def test_now_before_nine_is_this_morning(self):
         for hour in (0, 5, 8):
             with self.subTest(hour=hour):
                 reply, alert = choose("1", hour)
-                self.assertIn("ಇಂದು ಬೆಳಿಗ್ಗೆ 9 ಗಂಟೆಯ ನಂತರ", reply)
-                self.assertIn("TODAY AFTER 9 AM", alert)
+                self.assertIn("ಇಂದು ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ", reply)
+                self.assertIn("TODAY BY 10 AM", alert)
 
     def test_this_evening_after_nine_pm_is_tomorrow_evening(self):
         self.assertIn("*ಇಂದು ಸಂಜೆ*", choose("2", 18)[0])
@@ -100,3 +100,25 @@ class ThroughTheLivePipeline(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CallNowAlert(unittest.TestCase):
+    """#1 (2026-10-04): 'call now' and 'the call never came' get their own short alert."""
+
+    def test_now_in_hours(self):
+        a = b.compose_call_now_alert("919000000001", {"callback": b.CALLBACK_NOW, "call_hour": 12},
+                                     {"name": "Ravi", "capacity_kva": 63, "delivery_location": "Mandya"})
+        self.assertEqual(a, "🔥📞 *CALL NOW*\nRavi · 63 kVA · Mandya\nwa.me/919000000001")
+
+    def test_now_at_night_says_the_morning_promise(self):
+        a = b.compose_call_now_alert("919000000001", {"callback": b.CALLBACK_NOW, "call_hour": 22}, {})
+        self.assertTrue(a.startswith("🔥📞 *CALL TOMORROW BY 10 AM"))
+        self.assertIn("Bairavi lead", a)
+
+    def test_missed_call_complaint(self):
+        a = b.compose_call_now_alert("919000000001", {"call_missed": True}, {"name": "Ravi"})
+        self.assertTrue(a.startswith("📵🔥 *CALL NOW — the promised call did not come*"))
+
+    def test_nothing_for_other_messages(self):
+        for f in ({}, {"callback": b.CALLBACK_EVENING}, {"callback": b.CALLBACK_TOMORROW}, {"asked_price": True}):
+            self.assertEqual(b.compose_call_now_alert("919000000001", f, {}), "")

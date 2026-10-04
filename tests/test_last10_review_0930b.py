@@ -165,3 +165,23 @@ class ThroughTheLiveModelPath(unittest.TestCase):
 
     def test_english_customer_english_model_reply_passes(self):
         self.assertTrue(self.reply_for("where is your factory located", self.EN).startswith("We are"))
+
+    # #2 (2026-10-04): a one-word answer in Latin letters is not "writing
+    # English". Live: "Farming" / "Krishi" / "It's very High" mid-way through
+    # a Kannada conversation each got an English paragraph.
+    def test_one_english_word_in_a_kannada_chat_gets_no_english_reply(self):
+        for word in ("Farming", "Price", "It's very High", "Yes"):
+            with self.subTest(word=word):
+                self.assertEqual(self.reply_for(word, self.EN), "")
+
+    def test_brief_says_kannada_unless_english_sentences(self):
+        self.assertIn("ಉತ್ತರ ಕನ್ನಡ ಲಿಪಿಯಲ್ಲೇ ಇರಬೇಕು", b.model_brief_kn({}))
+        self.assertIn("ಸರಳ English ನಲ್ಲಿ ಉತ್ತರಿಸಿ", b.model_brief_kn({}, english=True))
+
+    def test_who_writes_english(self):
+        self.assertFalse(b.customer_writes_english(["Farming", "It's very High"]))
+        self.assertFalse(b.customer_writes_english(
+            ["Hello! I filled out your form and would like to know more about your business.\n\n"
+             "Full name: X\nphone: 1\ncity: Sira", "Price"]))
+        self.assertFalse(b.customer_writes_english(["I need a 63 kVA transformer for my farm", "rate yeshtu sir"]))
+        self.assertTrue(b.customer_writes_english(["I need a 63 kVA transformer for my factory"]))

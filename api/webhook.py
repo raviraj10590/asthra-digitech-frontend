@@ -1914,8 +1914,10 @@ def bairavi_model_reply(phone: str, user_text: str, history: list,
     # know your name" three turns after the customer had given it.
     _seen = [m for m in (history or [])
              if bairavi.FLOW_MARKER not in (m.get("content") or "")]
+    english = bairavi.customer_writes_english(
+        [m.get("content") for m in _seen if m.get("role") == "user"] + [user_text])
     messages = ([{"role": "system",
-                  "content": bairavi.model_brief_kn(known)}]
+                  "content": bairavi.model_brief_kn(known, english=english)}]
                 + _as_ai_messages(_seen[-8:])
                 + [{"role": "user", "content": user_text}])
     raw = _generate_ai_reply(messages, "",
@@ -1929,7 +1931,8 @@ def bairavi_model_reply(phone: str, user_text: str, history: list,
         print(f"BAIRAVI_MODEL_REFUSED reason='truncated' "
               f"phone=...{str(phone)[-4:]}")
         return ""
-    reply, reason = bairavi.compose_model_reply(raw, followup, known, customer_text=user_text)
+    reply, reason = bairavi.compose_model_reply(raw, followup, known, customer_text=user_text,
+                                                english=english)
     if reply is None:
         # Counted and named, never silently swallowed. The phone is reduced
         # to its last four digits and the refused text is NOT printed.
@@ -6451,6 +6454,11 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             upsert_lead(sender, {"source": "bairavi-transformer",
                                  "notes": alert})
             notify_owner(alert)
+            # "Call now" / "the call never came": also as its own short message,
+            # sent last so it is the newest notification on the owner's phone.
+            _call_now = bairavi.compose_call_now_alert(sender, followup, known)
+            if _call_now:
+                notify_owner(_call_now)
             # THE SALES SIGNAL FOR A QUOTATION REQUEST (owner ruling D3=A).
             #
             # Separate from the follow-up alert above because it asks for a

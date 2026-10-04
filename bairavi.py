@@ -1500,7 +1500,69 @@ def reply_violates_evidence(text: str, customer_text: str = None):
     return None
 
 
-def model_brief_kn(known: dict = None) -> str:
+# THE CONVERSATION'S LANGUAGE (owner, 2026-10-04: "1 2 3 madu" — #2). The
+# flow speaks Kannada, and customers answer it with one Latin word:
+# "Farming", "Krishi", "Price", "It's very High". The model read that as
+# "the customer writes English" and answered in English, mid-way through a
+# Kannada conversation (4 times in 10 days to 2026-10-04). The owner's
+# 2026-09-25 ruling stands — a customer who writes English gets English — but
+# "writes English" now means a real English SENTENCE (4+ words, with the small
+# words of English) and no Kannada or Kanglish anywhere in their messages,
+# judged over the conversation, not the last message alone.
+_EN_FUNCTION_WORDS = {"the", "is", "are", "i", "we", "you", "my", "our", "your", "for", "please",
+                      "what", "how", "when", "where", "need", "want", "can", "will", "would", "this",
+                      "that", "have", "has", "do", "does", "there", "about", "with"}
+_KANGLISH = re.compile(r"\b(beku|bekku|beda|madi|maadi|ide|illa|yavaga|yenu|enu|nimma|namma|"
+                       r"sar|saar|helu|heli|agutte|aagutte|kodi|swalpa|eshtu|yeshtu|estu|yestu|"
+                       r"bekagide|bekaagide|kodtira|kalsi|kalsthira|madtira|hege|elli|yaava|"
+                       r"nange|nanage|nimdu|namdu|barutte|bartira)\b", re.I)
+
+
+def _kannada_letters(text: str) -> int:
+    return sum(1 for ch in text or "" if "\u0c80" <= ch <= "\u0cff")
+
+
+def _latin_letters(text: str) -> int:
+    return sum(1 for ch in text or "" if ch.isascii() and ch.isalpha())
+
+
+def _english_sentence(text: str) -> bool:
+    words = re.findall(r"[A-Za-z']+", text or "")
+    return (len(words) >= 4 and _kannada_letters(text) == 0 and not _KANGLISH.search(text)
+            and any(w.lower() in _EN_FUNCTION_WORDS for w in words))
+
+
+def customer_writes_english(customer_texts) -> bool:
+    """True only for a customer who writes in English: at least one real
+    English sentence, and never Kannada script or Kanglish. A Meta form
+    handoff is Meta's template, not the customer's words, and is ignored."""
+    texts = [t for t in customer_texts or () if t and not is_lead_form(t)]
+    if any(_kannada_letters(t) or _KANGLISH.search(t) or _writes_latin_kannada(t) for t in texts):
+        return False
+    return any(_english_sentence(t) for t in texts)
+
+
+def kannada_share(text: str) -> float:
+    k, l = _kannada_letters(text), _latin_letters(text)
+    return k / (k + l) if (k + l) else 1.0
+
+
+def english_prose(text: str) -> bool:
+    """Written in English, not merely holding English product words.
+
+    A Kannada reply carries many Latin letters — "Bairavi Trans Solutions",
+    "oil-immersed 3-phase distribution transformer", a customer's name — so
+    letter counts alone call a correct Kannada greeting English. English
+    PROSE has the small words: we, the, your, will. A reply is English when
+    it has three or more of them and Kannada is not most of its letters.
+    """
+    words = [w.lower() for w in re.findall(r"[A-Za-z']+", text or "")]
+    small = sum(1 for w in words if w in _EN_FUNCTION_WORDS | {"and", "to", "of", "a", "an", "it", "be",
+                                                             "us", "at", "in", "on", "thank", "thanks"})
+    return small >= 3 and kannada_share(text) < 0.5
+
+
+def model_brief_kn(known: dict = None, english: bool = False) -> str:
     """The system prompt for a Bairavi reply, built from the same tables the
     deterministic answers use, so the two cannot disagree.
 
@@ -1544,8 +1606,13 @@ def model_brief_kn(known: dict = None) -> str:
         "4. Technical ಅಂಕಿಗಳು (loss values, impedance, ಅಳತೆ, ತೂಕ, GTP) ಹೇಳಬೇಡಿ.\n"
         "5. ಮೇಲಿನ range ನಲ್ಲಿ ಇಲ್ಲದ kVA ಇದೆ ಎಂದು ಹೇಳಬೇಡಿ.\n"
         "6. ಗೊತ್ತಿಲ್ಲದಿದ್ದರೆ: 'ನಮ್ಮ engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ' ಎಂದು ಹೇಳಿ.\n"
-        "7. ಕನ್ನಡ ಲಿಪಿಯಲ್ಲೇ ಉತ್ತರಿಸಿ (ಗ್ರಾಹಕ English ನಲ್ಲಿ ಬರೆದರೆ ಮಾತ್ರ "
-        "English). English ಅಕ್ಷರಗಳಲ್ಲಿ ಕನ್ನಡ ಬರೆಯಬೇಡಿ. ಯಾವಾಗಲೂ ಗೌರವದಿಂದ "
+        + ("7. ಈ ಗ್ರಾಹಕರು English ವಾಕ್ಯಗಳಲ್ಲಿ ಬರೆಯುತ್ತಿದ್ದಾರೆ — ಸರಳ English ನಲ್ಲಿ ಉತ್ತರಿಸಿ. "
+           if english else
+           "7. ಉತ್ತರ ಕನ್ನಡ ಲಿಪಿಯಲ್ಲೇ ಇರಬೇಕು — ಗ್ರಾಹಕರು 'Farming', 'Price', "
+           "'It's very high' ತರಹ English ಪದ ಬರೆದರೂ ಉತ್ತರ ಕನ್ನಡದಲ್ಲೇ. transformer, "
+           "kVA, MESCOM ತರಹದ ಪದಗಳು English ನಲ್ಲಿ ಇರಬಹುದು. English ಅಕ್ಷರಗಳಲ್ಲಿ "
+           "ಕನ್ನಡ ಬರೆಯಬೇಡಿ. ")
+        + "ಯಾವಾಗಲೂ ಗೌರವದಿಂದ "
         "'ನೀವು' ಬಳಸಿ — 'ನೀನು' ಎಂದಿಗೂ ಬೇಡ. ವೃತ್ತಿಪರ ಶೈಲಿ, 1–3 ಚಿಕ್ಕ ವಾಕ್ಯ. "
         "ಈಗಾಗಲೇ ತಿಳಿದ ವಿವರಗಳನ್ನು ಪುನರಾವರ್ತಿಸಬೇಡಿ.\n"
         "8. Asthra DigiTech ನ ಸೇವೆಗಳ ಬಗ್ಗೆ ಮಾತನಾಡಬೇಡಿ — ಇದು "
@@ -1581,7 +1648,7 @@ def _known_lines_kn(known: dict = None) -> str:
 
 
 def compose_model_reply(ai_text: str, followup: dict, known: dict = None,
-                        customer_text: str = None):
+                        customer_text: str = None, english: bool = False):
     """(reply, refusal_reason) for a generated answer.
 
     The guard runs FIRST, so a reply that states a price or a certification
@@ -1597,6 +1664,10 @@ def compose_model_reply(ai_text: str, followup: dict, known: dict = None,
     reason = reply_violates_evidence(ai_text, customer_text)
     if reason:
         return None, reason
+    # A Kannada conversation gets a Kannada answer. An English one from the
+    # model is refused whole, and the composed Kannada reply goes instead.
+    if not english and english_prose(ai_text):
+        return None, "wrong_language"
     lines = [(ai_text or "").strip()]
     fields = outstanding(followup, known)
     if fields:
@@ -2659,8 +2730,12 @@ CALLBACK_LABEL_EN = {CALLBACK_NOW: "NOW", CALLBACK_EVENING: "this evening", CALL
 # passes the current India hour as followup["call_hour"]. Absent, the hour is
 # unknown and the promise is exactly what it was before.
 CALL_HOURS = (9, 21)
-_AFTER_9_TODAY_KN = "ಇಂದು ಬೆಳಿಗ್ಗೆ 9 ಗಂಟೆಯ ನಂತರ"
-_AFTER_9_TOMORROW_KN = "ನಾಳೆ ಬೆಳಿಗ್ಗೆ 9 ಗಂಟೆಯ ನಂತರ"
+# A CLOCK TIME, NOT "AFTER 9" (owner, 2026-10-04: "1 2 3 madu" — #3). "After
+# 9" could mean noon; "by 10" is a promise a customer can hold us to, and it
+# is the one the system keeps: the 9:00 call briefing lists these customers
+# first (call_briefing._SLOT_RE), and call_reminders treats them as due at 10.
+_AFTER_9_TODAY_KN = "ಇಂದು ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ"
+_AFTER_9_TOMORROW_KN = "ನಾಳೆ ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ"
 
 
 def callback_when_kn(slot, hour=None) -> str:
@@ -2686,9 +2761,9 @@ def callback_when_en(slot, hour=None) -> str:
         return label
     start, end = CALL_HOURS
     if slot == CALLBACK_NOW and hour < start:
-        return "TODAY AFTER 9 AM (asked before 9)"
+        return "TODAY BY 10 AM (asked before 9)"
     if slot == CALLBACK_NOW and hour >= end:
-        return "TOMORROW AFTER 9 AM (asked after 9 pm)"
+        return "TOMORROW BY 10 AM (asked after 9 pm)"
     if slot == CALLBACK_EVENING and hour >= end:
         return "tomorrow evening (asked after 9 pm)"
     return label
@@ -3564,6 +3639,27 @@ def delivery_line(followup: dict, known: dict = None) -> str:
         # Their exact words are in the alert below — read those.
         return "stated in their own words below — not parsed, please read it"
     return "TBD — asked, not yet answered"
+
+
+def compose_call_now_alert(phone: str, followup: dict, known: dict = None) -> str:
+    """A SHORT, separate alert for the two moments a call cannot wait
+    (owner, 2026-10-04: "1 2 3 madu" — #1): the customer chose "call now", or
+    says the promised call never came. The full follow-up alert carries the
+    same signal on its first line, but every follow-up is forwarded, so a
+    "call now" arrived looking like all the others. This one is three lines,
+    sent on its own. "" when neither moment applies.
+    """
+    missed = followup.get("call_missed")
+    if not (missed or followup.get("callback") == CALLBACK_NOW):
+        return ""
+    state = merged_state(known, followup)
+    facts = " · ".join(x for x in (
+        (known or {}).get("name") or "",
+        f"{state['capacity_kva']} kVA" if state.get("capacity_kva") else "",
+        state.get("delivery_location") or "") if x)
+    head = ("📵🔥 *CALL NOW — the promised call did not come*" if missed else
+            f"🔥📞 *CALL {callback_when_en(CALLBACK_NOW, followup.get('call_hour')).upper()}*")
+    return f"{head}\n{facts or 'Bairavi lead'}\nwa.me/{phone}"
 
 
 def compose_followup_alert(phone: str, followup: dict, text: str,

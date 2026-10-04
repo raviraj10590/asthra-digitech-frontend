@@ -53,7 +53,7 @@ class WhenWillYouCall(unittest.TestCase):
     def test_call_hours_still_apply(self):
         f = b.parse_followup("Yavag", (), dict(CHOSEN, callback="now"))
         f["call_hour"] = 22
-        self.assertIn("ನಾಳೆ ಬೆಳಿಗ್ಗೆ 9", b.compose_followup_reply(f, dict(CHOSEN, callback="now"), None, None))
+        self.assertIn("ನಾಳೆ ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆಯ ಒಳಗೆ", b.compose_followup_reply(f, dict(CHOSEN, callback="now"), None, None))
 
     def test_a_when_about_delivery_is_still_a_delivery_question(self):
         for t in ("Yavaga barate", "Estu Dinake kalstira", "when will it be delivered"):
