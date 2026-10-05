@@ -2835,6 +2835,10 @@ def send_text(to: str, message: str):
     decides the CRM row's status. A transport error still RAISES, exactly as
     before — callers that retry on it (the Asthra decide path) are unchanged.
     """
+    # ONE CHOKE POINT for WhatsApp formatting: every text the bot sends,
+    # composed or model-written, so a glued "*ಉದ್ದೇಶ*ಕ್ಕೆ" or a model's
+    # "**bold**" never reaches a customer as literal stars.
+    message = bairavi.whatsapp_format(message)
     payload = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -7837,6 +7841,9 @@ class handler(BaseHTTPRequestHandler):
             # ── Text message ──────────────────────────────────────────────
             elif msg_type == "text":
                 user_text = msg["text"]["body"]
+                # A click-to-WhatsApp ad says what the enquiry is about even
+                # when the customer's text does not (see with_ad_context).
+                user_text = bairavi.with_ad_context(user_text, msg.get("referral"))
 
             # ── Image: Gemini vision (free) looks at it and replies in Kannada ──
             elif msg_type == "image":

@@ -197,6 +197,32 @@ def looks_like_transformer_enquiry(text: str) -> bool:
     return bool(_KVA_RE.search(low)) or _kv_as_kva(low) is not None
 
 
+def with_ad_context(text: str, referral) -> str:
+    """The message, plus the ad it came from when only the ad says what it is.
+
+    A click-to-WhatsApp ad sends Meta's `referral` (the ad's headline and
+    body) alongside the customer's text. "Hello! I filled out your form and
+    would like to know more about your business." with no form fields
+    carries no transformer word — so on 2026-10-01 (...3980, from the ad
+    "Bairavi Transformers — ಉಚಿತ ಕೊಟೇಶನ್") it was routed as an Asthra
+    enquiry, got no Bairavi reply and never became a CRM lead.
+
+    Only when the text alone is NOT already a transformer enquiry and the ad
+    IS one; the headline is appended as a visible "[Ad: …]" line, so the
+    transcript shows why the message was routed where it was.
+    """
+    if not isinstance(referral, dict) or looks_like_transformer_enquiry(text):
+        return text
+    headline = str(referral.get("headline") or "").strip()
+    ad_text = f"{headline}\n{referral.get('body') or ''}"
+    if not (looks_like_transformer_enquiry(ad_text) or "bairavi" in ad_text.lower()):
+        return text
+    label = headline or "Bairavi transformer ad"
+    if not looks_like_transformer_enquiry(label):
+        label += " (transformer)"
+    return f"{text}\n[Ad: {label}]"
+
+
 def is_lead_form(text: str) -> bool:
     """True for a Meta Lead Ads handoff, whatever it is about.
 
@@ -652,6 +678,15 @@ _NOT_TRANSFORMERS = ("ಕಂಬ", "ಕಹಬ", "ಕಂಭ", "kamba", "kamb", "po
                      "acre", "ekare", "ಎಕರೆ", "gunte", "ಗುಂಟೆ", "wire", "ವೈರ್")
 
 
+_SIZE_FIGURES = frozenset((25, 63, 100, 250, 500))
+_SIZE_FIGURE_RE = re.compile(r"(?<!\d)(25|63|100|250|500)(?!\d)")
+
+
+def _size_figures(low: str) -> set:
+    """The distinct transformer sizes written in this text, with or without kVA."""
+    return {int(n) for n in _SIZE_FIGURE_RE.findall(low or "")}
+
+
 def _read_quantity(low: str, cap=None):
     """How many units this text states, or None.
 
@@ -930,6 +965,27 @@ _DELIVERY_MENTION_RE = re.compile(
 _SAME_PLACE = ("same place", "same address", "same location", "same",
                "ಸೇಮ್", "ಅದೇ ಸ್ಥಳ", "ಅದೇ", "ಹೌದು", "houdu", "howdu",
                "yes same", "same only")
+# "this/that same place|village|address" in either script — a pointer at the
+# place already held, never a place itself (see parse_followup).
+_SAME_PLACE_RE = re.compile(
+    r"(?:ಇದೇ|ಅದೇ)\s*(?:ಸ್ಥಳ|ಊರು|ಜಾಗ|ವಿಳಾಸ|ಅಡ್ರೆಸ್|ಲೊಕೇಶನ್)"
+    r"|(?<![a-z])(?:ide|idhe|ade|adhe|same)\s*(?:sthala|place|uru|ooru|jaga|address|location)(?![a-z])")
+# A message that OPENS with a taluk or district label: "ತಾಲೂಕ. ಮೂಡಲಗಿ",
+# "Tq Tikota", "dist vijayapura".
+_TALUK_LEAD_RE = re.compile(
+    r"^(?:ತಾಲೂಕ|ತಾಲ್ಲೂಕ|ತಾ\.|ಜಿಲ್ಲೆ|taluka?|taluq|tq|tal|tk|dist|district|jille)(?![a-z])")
+# "ಊರು. ಬೀಸನಕೊಪ್ಪಾ" (village: Beesanakoppa, live ...2096, 2026-10-05) was
+# stored with the label. The label goes only when a separator or a further
+# word follows it, so a place really called "ಊರು" / "Ura" is untouched.
+_PLACE_LABEL_RE = re.compile(
+    r"^(?:(?:ಊರು|ಗ್ರಾಮ|ಹಳ್ಳಿ)\s*[.:\-–—]*\s+|(?:ಊರು|ಗ್ರಾಮ|ಹಳ್ಳಿ)\s*[.:\-–—]+\s*"
+    r"|(?:uru|ooru|village|gram|place)\s*[.:\-–—]+\s*)(?=\S)", re.IGNORECASE)
+
+
+def _without_place_label(place):
+    if not place:
+        return place
+    return _PLACE_LABEL_RE.sub("", place, count=1).strip() or place
 
 # ── COMMERCIAL INTENT: TWO DIFFERENT ASKS ─────────────────────────────────
 #
@@ -986,7 +1042,10 @@ _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
                 # Whole-word matches, so "broadcast" is unaffected.
                 "cast", "amuont", "amout", "amont",
                 # "Dar heli" (ದರ ಹೇಳಿ in Latin letters, live ...3294, 2026-10-03)
-                "dar", "dara")
+                "dar", "dara",
+                # "ಯಷ್ಟು ಖರ್ಚಾಗಬಹುದು" (what will it cost, live ...3294,
+                # 2026-10-03) — the stem covers ಖರ್ಚು / ಖರ್ಚಾಗುತ್ತೆ / ಖರ್ಚಾಗಬಹುದು.
+                "ಖರ್ಚ", "kharchu", "karchu", "kharch")
 # Already the bot's own words for this: the follow-up button is titled
 # "📋 ಕೋಟೇಶನ್" and its id is "quotation".
 _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
@@ -1141,6 +1200,30 @@ QUESTION_RANGE = "what_we_make"
 QUESTION_DELIVERY_AREA = "delivery_area"
 QUESTION_DELIVERY_TIME = "delivery_time"
 QUESTION_UNANSWERED = "unanswered"
+# AN UPGRADE OR EXCHANGE. "25 ತೆಗೆದುಕೊಂಡು 63 ಕೊಡಲೂ ಯಷ್ಟು ಖರ್ಚಾಗಬಹುದು" (take
+# back my 25, give a 63 — what does it cost?) and "25units sakagutill 63
+# units ಬೇಕಾಗಿದೆ" (live ...3294, 2026-10-03). Two sizes AND a word of
+# changing one for the other — "25 or 63 kVA?" alone is a customer choosing,
+# not exchanging. Whether an old unit is taken back is NOT a stated owner
+# fact, so the answer is the new size's price plus a person, never a promise.
+QUESTION_SIZE_CHANGE = "size_change"
+# "Yake sir" (why?) answering "is X the delivery place?" got the same
+# question again (live ...0033, 2026-10-02). A short "why" is about the
+# question we just asked; the answer says what it is for.
+QUESTION_WHY = "why_asked"
+_WHY_WORDS = ("yake", "yaake", "yak", "ಯಾಕೆ", "ಯಾಕ್", "why")
+_WHY_ANSWER_KN = {
+    "delivery": "ಡೆಲಿವರಿ ಸ್ಥಳ ತಿಳಿದರೆ ಸಾಗಣೆ (transport) ಮತ್ತು ಡೆಲಿವರಿ ಸಮಯವನ್ನು "
+                "ಸರಿಯಾಗಿ ತಿಳಿಸಲು ಸಾಧ್ಯ — ಅದಕ್ಕೇ ಕೇಳುತ್ತಿದ್ದೇವೆ 🙏",
+    "purpose": "ಯಾವ ಕೆಲಸಕ್ಕೆ ಬೇಕು ಎಂದು ತಿಳಿದರೆ ನಿಮಗೆ ಸೂಕ್ತವಾದ transformer "
+               "ಸೂಚಿಸಲು ಸಾಧ್ಯ — ಅದಕ್ಕೇ ಕೇಳುತ್ತಿದ್ದೇವೆ 🙏",
+}
+_SIZE_CHANGE_WORDS = ("exchange", "ಎಕ್ಸ್‌ಚೇಂಜ್", "ಎಕ್ಸ್ಚೇಂಜ್", "upgrade", "replace",
+                      "ಬದಲ", "badal", "ತೆಗೆದುಕೊಂಡು", "tagondu", "tegedukondu",
+                      "ಹಳೆಯ", "haleya", "hale", "old", "buyback", "buy back",
+                      "ಸಾಕಾಗ", "sakagalla", "saakagalla", "sakagutilla", "sakagutill",
+                      "sakagthilla", "sakagolla", "sakaglla", "not enough",
+                      "instead", "ಬದಲು", "ಬದಲಿಗೆ")
 
 # WHEN WILL YOU DELIVER — owner's ruling 2026-09-24: "delivery time call
 # with our team". On 2026-09-25 "Ayitu delivery Yavaga kodtira" was ignored
@@ -1208,6 +1291,11 @@ def customer_question(text: str):
     low = (text or "").lower()
     if any(w in low for w in _WHEN_WORDS) and any(w in low for w in _DELIVER_WORDS):
         return QUESTION_DELIVERY_TIME
+    if len(_size_figures(low)) >= 2 and _mentions(low, _SIZE_CHANGE_WORDS):
+        return QUESTION_SIZE_CHANGE
+    _short = re.sub(r"[?!.,🙏]+", " ", low).split()
+    if 0 < len(_short) <= 3 and any(w in _WHY_WORDS for w in _short):
+        return QUESTION_WHY
     for tag, vocabulary in ((QUESTION_NAME, _ASK_NAME),
                             (QUESTION_DELIVERY_AREA, _ASK_DELIVERY_AREA),
                             (QUESTION_RANGE, _ASK_RANGE),
@@ -1249,6 +1337,13 @@ def answer_question_kn(tag, known: dict = None) -> str:
         return _range_line_kn()
     if tag == QUESTION_DELIVERY_TIME:
         return _DELIVERY_TIME_KN
+    if tag == QUESTION_WHY:
+        return _WHY_ANSWER_KN.get(known.get("last_asked"),
+                                  "ನಿಮಗೆ ಸರಿಯಾದ ವಿವರ ನೀಡಲು ಈ ಮಾಹಿತಿ ಬೇಕಾಗಿದೆ 🙏")
+    if tag == QUESTION_SIZE_CHANGE:
+        return ("ಹಳೆಯ transformer ಬದಲಿಸಿ ಹೊಸ ಸಾಮರ್ಥ್ಯಕ್ಕೆ ಹೋಗುವ ವಿಚಾರ ಗಮನಿಸಿದ್ದೇವೆ. "
+                "ಹಳೆಯದನ್ನು ಹಿಂಪಡೆಯುವ (exchange) ಬಗ್ಗೆ ನಮ್ಮ engineer ಕರೆಯಲ್ಲಿ "
+                "ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
     if tag == QUESTION_DELIVERY_AREA:
         return (_DELIVERY_NOW_KN + " ನಿಮ್ಮ ಸ್ಥಳಕ್ಕೆ ಸಾಧ್ಯವೇ ಎಂದು ನಮ್ಮ "
                 "engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
@@ -1976,7 +2071,7 @@ _LONG_ANSWER_CHARS = 60
 _ADDRESS_MARKER = (
     # Kannada administrative structure, which is how the 113-character
     # production address was written
-    "ಜಿಲ್ಲೆ", "ತಾಲ್ಲೂಕು", "ತಾಲೂಕು", "ಹೋಬಳಿ", "ಗ್ರಾಮ", "ಹಳ್ಳಿ", "ನಗರ",
+    "ಜಿಲ್ಲೆ", "ತಾಲ್ಲೂಕ", "ತಾಲೂಕ", "ಹೋಬಳಿ", "ಗ್ರಾಮ", "ಹಳ್ಳಿ", "ನಗರ",
     "ಪೋಸ್ಟ್", "ಬಡಾವಣೆ", "ರಸ್ತೆ", "ಕ್ರಾಸ್", "ಮುಖ್ಯರಸ್ತೆ",
     # the same words as customers type them in Latin script
     "district", "dist", "taluk", "taluq", "tq", "hobli", "village",
@@ -1986,7 +2081,7 @@ _ADDRESS_MARKER = (
 
 
 # The strict subset of _ADDRESS_MARKER that names an administrative unit.
-_ADMIN_MARKER = ("ಜಿಲ್ಲೆ", "ತಾಲ್ಲೂಕು", "ತಾಲೂಕು", "ಹೋಬಳಿ", "ಗ್ರಾಮ",
+_ADMIN_MARKER = ("ಜಿಲ್ಲೆ", "ತಾಲ್ಲೂಕ", "ತಾಲೂಕ", "ಹೋಬಳಿ", "ಗ್ರಾಮ",
                  "district", "dist", "taluk", "taluq", "tq", "hobli",
                  "village")
 
@@ -2285,6 +2380,40 @@ _KEYCAP = {"0️⃣": "0", "1️⃣": "1", "2️⃣": "2", "3️⃣": "3", "4️
 VOICE_MAX_CHARS = 600
 
 
+# ── WhatsApp formatting ──────────────────────────────────────────────────
+# WhatsApp makes *text* bold only when the closing star is followed by a
+# space, punctuation or the end. "*ಉದ್ದೇಶ*ಕ್ಕೆ" — the Kannada case ending glued
+# to the star — is shown with the stars, and that line went out 48 times in
+# the week to 2026-10-05 (owner: "some lines show star mark between words").
+# Markdown from a model ("**bold**", "## heading") is shown literally too.
+_BOLD_SPAN_RE = re.compile(r"\*([^*\n]+)\*([ಀ-೿‌‍A-Za-z0-9]*)")
+_MD_DOUBLE_RE = re.compile(r"\*\*([^*\n]+?)\*\*")
+_MD_HEADING_RE = re.compile(r"(?m)^[ \t]*#{1,6}[ \t]+")
+
+
+def whatsapp_format(text: str) -> str:
+    """The same message, with bold that WhatsApp will actually render.
+
+    Spans are paired left to right, so "*a* ಯಾವ *b*" stays two spans. A word
+    glued after a span moves inside it ("*ಉದ್ದೇಶ*ಕ್ಕೆ" -> "*ಉದ್ದೇಶಕ್ಕೆ*"), and
+    spaces just inside the stars are moved outside. Nothing else changes.
+    """
+    if not text or "*" not in text and "#" not in text:
+        return text
+    out = _MD_DOUBLE_RE.sub(r"*\1*", text)
+    out = _MD_HEADING_RE.sub("", out)
+
+    def _fix(m):
+        inner, glued = m.group(1), m.group(2)
+        core = inner.strip()
+        if not core:
+            return m.group(0)
+        lead = " " if inner[:1].isspace() else ""
+        trail = " " if inner[-1:].isspace() and not glued else ""
+        return f"{lead}*{core}{glued}*{trail}"
+    return _BOLD_SPAN_RE.sub(_fix, out)
+
+
 def speech_text(reply: str) -> str:
     t = reply or ""
     for k, v in _KEYCAP.items():
@@ -2335,6 +2464,13 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     if (qty is not None and known_kva is not None and qty == known_kva
             and not re.search(r"units?|nos?|pcs?|ಯುನಿಟ್|ನಗ", low)):
         qty = None
+    # TWO SIZES IN ONE MESSAGE ARE ABOUT SIZE, NOT A COUNT (live ...3294,
+    # 2026-10-03). "25 ತೆಗೆದುಕೊಂಡು 63 ಕೊಡಲೂ ಯಷ್ಟು ಖರ್ಚಾಗಬಹುದು" (what would it
+    # cost to take back the 25 and give a 63?) and "25units sakagutill 63
+    # units ಬೇಕಾಗಿದೆ" (25 is not enough, 63 is needed — this customer says
+    # "units" for kVA) were both recorded as an order of 25 units.
+    if qty is not None and qty in _SIZE_FIGURES and len(_size_figures(low)) >= 2:
+        qty = None
     app = _application_of(low)
     # WHERE TO DELIVER. An explicit delivery word is required: a bare place
     # name in a follow-up cannot be told apart from an application, a company
@@ -2384,9 +2520,15 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
               # "Kamba yalla bantha" / "DP structure" answering "deliver
               # where?" were stored as the place (2026-10-03).
               or asks_scope(text))
+    # "THIS SAME PLACE" IS A CONFIRMATION, NOT A PLACE. "ಇಲ್ಲ ಇದೇ ಸ್ಥಳವಿದೇ"
+    # (no — it is this same place) answering "is X right?" was stored as the
+    # delivery place "ಇಲ್ಲ ಇದೇ ಸ್ಥಳವಿದೇ" (live ...3294, 2026-10-03), and that
+    # string became the lead's city in the CRM.
+    said_same = bool(_SAME_PLACE_RE.search(low))
     if (dl is None and AWAITING_DELIVERY in (awaiting or ())
-            and not asking and not plain_reply):
+            and not asking and not plain_reply and not said_same):
         dl = _bare_delivery_answer(text)
+        dl = _without_place_label(dl)
     # AN ADDRESS THAT SAYS WHAT IT IS. On 2026-09-23 a customer wrote
     # "ಹರಿಯಬ್ಬೆ,ಹಿರಿಯೂರು ತಾಲೂಕು,ಚಿತ್ರದುರ್ಗ ಜಿಲ್ಲೆ" — village, taluk, district —
     # at a moment the bot was not waiting for a place, so it was not read, and
@@ -2395,17 +2537,28 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # district does not, because that is how an address is built and nothing
     # else is. Only the ADMINISTRATIVE markers count here — "road" or "main"
     # alone would not be enough without the question.
-    if dl is None and any(
+    if dl is None and not said_same and any(
             _label_matches(low, m) if m.isascii() else m in low
             for m in _ADMIN_MARKER):
         dl = _bare_delivery_answer(text)
+    # THE TALUK, ADDED TO THE VILLAGE. "ಊರು. ಬೀಸನಕೊಪ್ಪಾ" then "ತಾಲೂಕ. ಮೂಡಲಗಿ"
+    # (live ...2096, 2026-10-05) — the second message is the rest of the same
+    # address. It used to go to the model, and "taluk X" alone REPLACED the
+    # village. A message that opens with a taluk/district label while a place
+    # is already held is appended to it, verbatim.
+    _held = (known or {}).get("location")
+    if (_held and _TALUK_LEAD_RE.match(low.strip(_TRIM))
+            and (dl is None or dl == _bare_delivery_answer(text))):
+        _addition = (text or "").strip(_TRIM)
+        if _addition and _addition.lower() not in _held.lower():
+            dl = f"{_held}, {_addition}"
 
     mentioned = bool(_DELIVERY_MENTION_RE.search(text or ""))
 
     # "Same place" answers the question without naming anywhere: it points at
     # the project location the form already captured, so it is recorded as a
     # confirmation rather than as an address.
-    same = any(w in low for w in _SAME_PLACE) if not dl else False
+    same = (any(w in low for w in _SAME_PLACE) or said_same) if not dl else False
     if (not dl and not same and AWAITING_DELIVERY in (awaiting or ())
             and (known or {}).get("location")
             and (bare in _AFFIRMATIONS or _all_affirmation_words(bare))):
@@ -2439,6 +2592,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "asked_price": _mentions(low, _PRICE_ASK),
             "asked_discount": asked_discount(text),
             "asks_call": asks_about_call(text),
+            "asks_call_when": asks_call_time(text),
             "call_missed": call_missed(text),
             "asks_info": asks_for_info(text),
             "asks_scope": asks_scope(text),
@@ -3003,7 +3157,7 @@ def compose_reply(parsed: dict) -> str:
     elif parsed["planned"]:
         # A CAPACITY THE AD OFFERS ON PURPOSE: planned, not made today.
         # Both halves said plainly — see the planned-capacity tests.
-        lines.append(f"*{kva} kVA* ನಮ್ಮ *ಮುಂದಿನ ಯೋಜನೆ*ಯಲ್ಲಿದೆ — ಸದ್ಯಕ್ಕೆ "
+        lines.append(f"*{kva} kVA* ನಮ್ಮ *ಮುಂದಿನ ಯೋಜನೆಯಲ್ಲಿದೆ* — ಸದ್ಯಕ್ಕೆ "
                      "ತಯಾರಿಸುತ್ತಿಲ್ಲ. ನಿಮ್ಮ requirement ನಮ್ಮ engineering "
                      f"ತಂಡಕ್ಕೆ ಕಳಿಸಿದ್ದೇವೆ. ಸದ್ಯದ range: *{_RANGE}*.")
     elif kva is not None:
@@ -3330,7 +3484,7 @@ def question_for(field: str, known: dict = None) -> str:
                     "ಬೇರೆ ಸ್ಥಳವಾದರೆ ದಯವಿಟ್ಟು ತಿಳಿಸಿ.")
         return "Transformer *ಡೆಲಿವರಿ* ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು? (ಊರು, ತಾಲ್ಲೂಕು)"
     if field == AWAITING_PURPOSE:
-        return ("ಈ transformer ಯಾವ *ಉದ್ದೇಶ*ಕ್ಕೆ ಬೇಕು? "
+        return ("ಈ transformer ಯಾವ *ಉದ್ದೇಶಕ್ಕೆ* ಬೇಕು? "
                 "(ಕೃಷಿ / ಕೈಗಾರಿಕೆ / ಕಟ್ಟಡ ನಿರ್ಮಾಣ / EV charging / solar / tender)")
     if field == AWAITING_CAPACITY:
         # The RANGE, not a guess. _RANGE is built from CATALOGUE_KVA, so the
@@ -3564,7 +3718,9 @@ def _compose_followup_reply(followup: dict, known: dict = None,
               or followup.get("asked_terms") or followup.get("call_missed")
               or followup.get("asks_call") or followup.get("asks_info")
               or followup.get("asks_scope") or followup.get("asks_photo")
-              or followup.get("asks_documents")):
+              or followup.get("asks_documents")
+              # "why?" is answered with the reason, not thanked for
+              or followup.get("customer_question") in (QUESTION_WHY, QUESTION_SIZE_CHANGE)):
         # A price question or a call choice is answered directly below; a
         # "message received" line above it is filler.
         lines.append("ಧನ್ಯವಾದಗಳು.")
@@ -3600,9 +3756,18 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     elif followup.get("asks_call") and _chosen and not followup.get("callback"):
         _who = display_name(merged_state(known, followup).get("name"))
         _their_time = (known or {}).get("call_time")
-        lines.append(("ಹೌದು " + _who + " ಅವರೇ" if _who else "ಹೌದು")
-                     + f", ನಮ್ಮ engineer *{_their_time['label_kn'] if _their_time else callback_when_kn(_chosen, followup.get('call_hour'))}* "
-                     "ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏")
+        _when = (f"*{_their_time['label_kn'] if _their_time else callback_when_kn(_chosen, followup.get('call_hour'))}*")
+        if followup.get("asks_call_when"):
+            # "ಯಾವಾಗ?" / "Time" / "Yastu ಗಂಟೆಗೆ" is not a yes/no question, and
+            # "ಹೌದು" (yes) answering it read oddly (live ...3294, 2026-10-03).
+            # The owner alert ("WAITING FOR YOUR CALL") fires on this turn, so
+            # saying the request was passed on again is true.
+            lines.append((_who + " ಅವರೇ, " if _who else "")
+                         + f"ನಮ್ಮ engineer {_when} ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ — ನಿಮ್ಮ "
+                         "ವಿನಂತಿಯನ್ನು ಅವರಿಗೆ ಮತ್ತೊಮ್ಮೆ ತಿಳಿಸಿದ್ದೇವೆ 🙏")
+        else:
+            lines.append(("ಹೌದು " + _who + " ಅವರೇ" if _who else "ಹೌದು")
+                         + f", ನಮ್ಮ engineer {_when} ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏")
     if followup.get("asked_discount"):
         # Never a discount and never the same price again: a person calls.
         # The value answer first (owner's selling points), then a person.

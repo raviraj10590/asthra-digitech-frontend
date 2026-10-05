@@ -20,7 +20,7 @@ WHO OWNS WHAT
   Brain-owned (always computed deterministically from the text + context,
   whatever an interpreter says):
     delivery_same, delivery_mentioned, discom_approval_ask, callback_offered,
-    asked_discount, asks_call, call_missed, asks_info, asks_scope, asks_photo,
+    asked_discount, asks_call, asks_call_when, call_missed, asks_info, asks_scope, asks_photo,
     asks_documents, declined, escom_area (sales alerts and a
     location pin's supply area: never an interpreter's guess)
 
@@ -218,6 +218,7 @@ def validate(interp, text: str, awaiting=(), known: dict = None) -> dict:
            "discom_approval_ask": brain["discom_approval_ask"],
            "asked_discount": brain["asked_discount"],
            "asks_call": brain["asks_call"],
+           "asks_call_when": brain["asks_call_when"],
            "call_missed": brain["call_missed"],
            "asks_info": brain["asks_info"],
            "asks_scope": brain["asks_scope"],

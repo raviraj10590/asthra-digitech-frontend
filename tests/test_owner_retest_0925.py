@@ -25,7 +25,7 @@ class Greetings(unittest.TestCase):
     def test_a_greeting_is_greeted_with_the_open_question(self):
         f, r = reply("Hii namaste", (b.AWAITING_PURPOSE,))
         self.assertTrue(r.startswith("ನಮಸ್ಕಾರ Ravi ಅವರೇ"), r)
-        self.assertIn("*ಉದ್ದೇಶ*ಕ್ಕೆ ಬೇಕು?", r)
+        self.assertIn("*ಉದ್ದೇಶಕ್ಕೆ* ಬೇಕು?", r)
         self.assertNotIn(b.CALLBACK_QUESTION, r)
 
     def test_nothing_open_offers_help(self):

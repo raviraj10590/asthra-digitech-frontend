@@ -946,7 +946,7 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
     def test_the_exact_2026_09_17_replies_now_carry_content(self):
         first = b.compose_followup_reply(b.parse_followup("Charging Station ⛽"))
         self.assertIn("EV charging", first)      # confirms what was said
-        self.assertNotIn("*ಉದ್ದೇಶ*ಕ್ಕೆ ಬೇಕು?", first)   # does not re-ask what it has
+        self.assertNotIn("*ಉದ್ದೇಶಕ್ಕೆ* ಬೇಕು?", first)   # does not re-ask what it has
         # The delivery place is now outstanding and IS asked — quantity is
         # not, because it defaults.
         self.assertIn("ಡೆಲಿವರಿ", first)
@@ -971,7 +971,7 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         self.assertIn("3 units", r)
         self.assertIn("ಕೈಗಾರಿಕೆ", r)
         self.assertNotIn("units* ಬೇಕು", r)
-        self.assertNotIn("*ಉದ್ದೇಶ*ಕ್ಕೆ ಬೇಕು?", r)
+        self.assertNotIn("*ಉದ್ದೇಶಕ್ಕೆ* ಬೇಕು?", r)
         self.assertIn("ಡೆಲಿವರಿ", r)                # the one thing still open
         known = {"delivery_same": True, "location": "X"}
         done = b.compose_followup_reply(b.parse_followup("3 units for industry", (), known), known)
