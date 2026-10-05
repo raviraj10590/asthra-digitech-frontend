@@ -2664,7 +2664,9 @@ _SALES_TERMS = (
     "(site estimate ನಂತರ)\n"
     "🛡️ *1 ವರ್ಷ warranty* — ನಂತರವೂ service ಲಭ್ಯ\n"
     "💳 *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ\n"
-    "🏭 ನೇರ ತಯಾರಕರಿಂದ (Kadaba) — ಮಧ್ಯವರ್ತಿ ಇಲ್ಲ\n"
+    # NOT "direct from the manufacturer, no middleman" (owner, 2026-10-05):
+    # Bairavi also sells through distributors and electrical contractors.
+    "🏭 ತಯಾರಿಕೆ: Kadaba, ದಕ್ಷಿಣ ಕನ್ನಡ\n"
     "✔️ MESCOM approved\n"
     "⏱️ ಡೆಲಿವರಿ ಸಮಯ — ನಮ್ಮ ತಂಡ call ನಲ್ಲಿ ಖಚಿತಪಡಿಸುತ್ತಾರೆ")
 
@@ -2780,6 +2782,8 @@ def owner_facts_en() -> str:
         "business; use these exactly, never invent beyond them):\n"
         "- Makes oil-immersed 3-phase DISTRIBUTION TRANSFORMERS (TC), Kadaba, Dakshina "
         "Kannada. It does NOT make generators — never ask 'generator or transformer'.\n"
+        "- Sells to end customers AND through distributors and electrical contractors — never "
+        "write 'direct from the manufacturer' or 'no middleman'. No dry-type transformers.\n"
         f"- Price list (TC only): {prices}. Transport INCLUDED. Installation NOT "
         "included and not done by Bairavi (a local electrical contractor does it, extra "
         "cost); poles / DP structure are priced only after a site estimate.\n"

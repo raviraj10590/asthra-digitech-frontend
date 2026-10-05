@@ -216,3 +216,19 @@ class OneReplyPerBurst(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoDirectManufacturerClaim(unittest.TestCase):
+    """Owner, 2026-10-05: Bairavi also sells through distributors and electrical
+    contractors, so "direct manufacturer — no middleman" must never be said."""
+
+    def test_the_customer_info_card(self):
+        for kva in (25, 63, 100, 250, None):
+            card = b.info_card_kn({"capacity_kva": kva})
+            self.assertNotIn("ಮಧ್ಯವರ್ತಿ", card)
+            self.assertNotIn("ನೇರ ತಯಾರಕ", card)
+
+    def test_the_owner_assistant_is_told(self):
+        f = b.owner_facts_en()
+        self.assertIn("distributors and electrical contractors", f)
+        self.assertIn("No dry-type", f)
