@@ -232,3 +232,13 @@ class NoDirectManufacturerClaim(unittest.TestCase):
         f = b.owner_facts_en()
         self.assertIn("distributors and electrical contractors", f)
         self.assertIn("No dry-type", f)
+
+
+class OwnerConfirmedCertifications(unittest.TestCase):
+    def test_in_the_details_card_and_owner_facts(self):
+        card = b.info_card_kn({"capacity_kva": 63})
+        self.assertIn("BIS (IS 1180) · BEE star rated · ISO 9001", card)
+        self.assertIn("ISO 9001", b.owner_facts_en())
+
+    def test_the_model_still_may_not_write_them(self):
+        self.assertIsNotNone(b.reply_violates_evidence("ನಮ್ಮ transformer BIS certified ಆಗಿದೆ"))

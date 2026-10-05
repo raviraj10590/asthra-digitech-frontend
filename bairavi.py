@@ -2668,6 +2668,10 @@ _SALES_TERMS = (
     # Bairavi also sells through distributors and electrical contractors.
     "🏭 ತಯಾರಿಕೆ: Kadaba, ದಕ್ಷಿಣ ಕನ್ನಡ\n"
     "✔️ MESCOM approved\n"
+    # Owner-confirmed 2026-10-05 ("yes" to BIS licence for IS 1180, BEE star
+    # label, ISO 9001). Composed text only: the MODEL is still never allowed
+    # to write a certification itself (_REPLY_BANNED_TERMS).
+    "🏅 BIS (IS 1180) · BEE star rated · ISO 9001\n"
     "⏱️ ಡೆಲಿವರಿ ಸಮಯ — ನಮ್ಮ ತಂಡ call ನಲ್ಲಿ ಖಚಿತಪಡಿಸುತ್ತಾರೆ")
 
 
@@ -2784,6 +2788,8 @@ def owner_facts_en() -> str:
         "Kannada. It does NOT make generators — never ask 'generator or transformer'.\n"
         "- Sells to end customers AND through distributors and electrical contractors — never "
         "write 'direct from the manufacturer' or 'no middleman'. No dry-type transformers.\n"
+        "- Certifications (owner-confirmed 2026-10-05): BIS licence for IS 1180, BEE star label "
+        "(4 Star / 5 Star), ISO 9001.\n"
         f"- Price list (TC only): {prices}. Transport INCLUDED. Installation NOT "
         "included and not done by Bairavi (a local electrical contractor does it, extra "
         "cost); poles / DP structure are priced only after a site estimate.\n"
