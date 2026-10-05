@@ -1207,6 +1207,17 @@ QUESTION_UNANSWERED = "unanswered"
 # not exchanging. Whether an old unit is taken back is NOT a stated owner
 # fact, so the answer is the new size's price plus a person, never a promise.
 QUESTION_SIZE_CHANGE = "size_change"
+# "Gst estu aguthe sir" (live ...5514, 2026-10-05) went to the model, which
+# said the engineer would tell — and named the wrong size. The owner answered
+# himself: "gst sersi 1,12,000 aagutte 25kva ge" (25 kVA with GST ~ ₹1,12,000),
+# which is the 18 % GST on transformers. Totals are computed, never typed.
+QUESTION_GST = "gst"
+GST_RATE = 18
+_GST_WORDS = ("gst", "g.s.t", "ಜಿಎಸ್ಟಿ", "ಜಿ ಎಸ್ ಟಿ", "ಜಿಎಸ್‌ಟಿ", "tax", "ಟ್ಯಾಕ್ಸ್")
+
+
+def with_gst(amount: int) -> int:
+    return int(round(amount * (100 + GST_RATE) / 100))
 # "Yake sir" (why?) answering "is X the delivery place?" got the same
 # question again (live ...0033, 2026-10-02). A short "why" is about the
 # question we just asked; the answer says what it is for.
@@ -1291,6 +1302,8 @@ def customer_question(text: str):
     low = (text or "").lower()
     if any(w in low for w in _WHEN_WORDS) and any(w in low for w in _DELIVER_WORDS):
         return QUESTION_DELIVERY_TIME
+    if _mentions(low, _GST_WORDS):
+        return QUESTION_GST
     if len(_size_figures(low)) >= 2 and _mentions(low, _SIZE_CHANGE_WORDS):
         return QUESTION_SIZE_CHANGE
     _short = re.sub(r"[?!.,🙏]+", " ", low).split()
@@ -1337,6 +1350,14 @@ def answer_question_kn(tag, known: dict = None) -> str:
         return _range_line_kn()
     if tag == QUESTION_DELIVERY_TIME:
         return _DELIVERY_TIME_KN
+    if tag == QUESTION_GST:
+        kva = known.get("capacity_kva")
+        if kva in PRICE_LIST:
+            amt = PRICE_LIST[kva][0]
+            return (f"GST *{GST_RATE}%*. *{kva} kVA*: ₹{inr(amt)} + GST = "
+                    f"*₹{inr(with_gst(amt))}* (GST ಸೇರಿ). Transport ದರದಲ್ಲೇ ಸೇರಿದೆ.")
+        return (f"GST *{GST_RATE}%*. GST ಸೇರಿ ಒಟ್ಟು ದರ: "
+                + " · ".join(f"{k} kVA ₹{inr(with_gst(a))}" for k, (a, _) in sorted(PRICE_LIST.items())))
     if tag == QUESTION_WHY:
         return _WHY_ANSWER_KN.get(known.get("last_asked"),
                                   "ನಿಮಗೆ ಸರಿಯಾದ ವಿವರ ನೀಡಲು ಈ ಮಾಹಿತಿ ಬೇಕಾಗಿದೆ 🙏")
@@ -2308,7 +2329,15 @@ _DECLINES = ("no thanks", "no thanx", "no thank you", "no thanku", "not interest
              "ನಮಗೆ ಬೇಡ", "ಬೇಡ ಸರ್", "beda sir",
              # The opt-out the Meta-lead template offers ("ಬೇಡವಾದರೆ STOP ಎಂದು
              # ಉತ್ತರಿಸಿ"). Whole message only: "near bus stop" is still a place.
-             "stop", "ಸ್ಟಾಪ್", "unsubscribe")
+             "stop", "ಸ್ಟಾಪ್", "unsubscribe",
+             # "Beda bidi" (no, leave it; live ...6244, 2026-10-05) was stored
+             # as the DELIVERY PLACE "Beda bidi".
+             "beda bidi", "bidi", "bidi sir", "beda bidi sir", "ಬೇಡ ಬಿಡಿ", "ಬಿಡಿ",
+             "beda bidri", "beda biddi", "beda bidu", "ಬೇಡ ಬಿಡಿ ಸರ್")
+# "Dara jasti beda" (too costly, don't want; live ...6244) — a refusal over
+# price: read as BOTH a decline and a price objection.
+_PRICE_DECLINE_RE = re.compile(
+    r"(?:dara|rate|price|bele|ದರ|ಬೆಲೆ|ರೇಟ್)?\s*(?:jasti|ಜಾಸ್ತಿ|high|costly|too much)\s*(?:aytu|ಆಯ್ತು|ide|ಇದೆ)?\s*(?:beda|ಬೇಡ|bidi|ಬಿಡಿ)$")
 
 
 # "ಸರಿ ಇದೆ" (yes, that's right; live ...1709) was stored as the ADDRESS.
@@ -2343,7 +2372,7 @@ def _is_thanks(bare: str) -> bool:
 def is_decline(text: str) -> bool:
     bare = re.sub(r"[^\w\s\u0C80-\u0CFF]", " ", (text or "").lower())
     bare = " ".join(bare.split())
-    return bare in _DECLINES
+    return bare in _DECLINES or bool(_PRICE_DECLINE_RE.fullmatch(bare))
 
 
 # ── A SHARED WHATSAPP LOCATION ────────────────────────────────────────────
@@ -2525,8 +2554,9 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # delivery place "ಇಲ್ಲ ಇದೇ ಸ್ಥಳವಿದೇ" (live ...3294, 2026-10-03), and that
     # string became the lead's city in the CRM.
     said_same = bool(_SAME_PLACE_RE.search(low))
+    refused = is_decline(text)
     if (dl is None and AWAITING_DELIVERY in (awaiting or ())
-            and not asking and not plain_reply and not said_same):
+            and not asking and not plain_reply and not said_same and not refused):
         dl = _bare_delivery_answer(text)
         dl = _without_place_label(dl)
     # AN ADDRESS THAT SAYS WHAT IT IS. On 2026-09-23 a customer wrote
@@ -3738,7 +3768,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         got.append("ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳಕ್ಕೆ")
 
     _state_now = merged_state(known, followup)
-    if followup.get("declined") and not got:
+    if followup.get("declined") and not got and not followup.get("asked_discount"):
         # A courteous close, once. No more questions; the owner is told why.
         _who = display_name(_state_now.get("name"))
         return (("ಸರಿ " + _who + " ಅವರೇ 🙏" if _who else "ಸರಿ 🙏")
@@ -3766,7 +3796,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
               or followup.get("asks_scope") or followup.get("asks_photo")
               or followup.get("asks_documents")
               # "why?" is answered with the reason, not thanked for
-              or followup.get("customer_question") in (QUESTION_WHY, QUESTION_SIZE_CHANGE)):
+              or followup.get("customer_question") in (QUESTION_WHY, QUESTION_SIZE_CHANGE, QUESTION_GST)):
         # A price question or a call choice is answered directly below; a
         # "message received" line above it is filler.
         lines.append("ಧನ್ಯವಾದಗಳು.")
@@ -3886,6 +3916,15 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         lines.append(PHOTO_KN)
     if followup.get("asks_documents"):
         lines.append(DOCUMENTS_KN)
+    if followup.get("declined"):
+        # A PRICE REFUSAL IS NOT A FORM TO COMPLETE. (A plain "please reduce
+        # the rate" is still an interested buyer and keeps the next question,
+        # owner ruling 2026-09-30.) "Dara jasti
+        # beda" was answered with "ಎಷ್ಟು units ಬೇಕು?" (live ...6244): the value
+        # line and a person are the whole answer.
+        missing = []
+        followup = dict(followup, callback_offered=True)
+        _callback = _callback or "-"
     if offers_call_time(followup, known):
         # "WHEN?" BEFORE ANY CALL TIME WAS CHOSEN (replay 2026-10-03). The one
         # thing we do next is call — so say so and let them pick when. It is
@@ -4212,6 +4251,8 @@ def awaiting_after(followup: dict, known: dict = None) -> tuple:
     qualification questions are all answered and no call time is known yet.
     Kept separate so outstanding() keeps meaning "qualification still open".
     """
+    if followup.get("declined"):
+        return ()
     out = outstanding(followup, known)
     if (followup.get("callback") == CALLBACK_NOW and outside_call_hours(followup.get("call_hour"))
             and not merged_state(known, followup).get("call_time")):
