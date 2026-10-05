@@ -2760,6 +2760,42 @@ def asks_documents(text: str) -> bool:
     return _mentions(_customer_words(text), _DOCUMENTS_ASK)
 
 
+def owner_facts_en() -> str:
+    """Bairavi's owner-stated facts, for the OWNER'S assistant (English).
+
+    On 2026-10-05 the owner asked his assistant for a quotation and was told
+    "the only transformer rate on record is 25 kVA", asked to fill in the
+    warranty, and asked "generator or transformer?". The customer side had
+    every one of those answers; the owner side had none. Built from the same
+    constants the customer replies use, so the two cannot drift apart.
+    """
+    prices = "; ".join(f"{k} kVA {star} Star ₹{inr(amt)} + GST"
+                       for k, (amt, star) in sorted(PRICE_LIST.items()))
+    approved = ", ".join(k.upper() for k, v in _DISCOM_APPROVAL_STATED.items() if v == "APPROVED")
+    pending = ", ".join(k.upper() for k, v in _DISCOM_APPROVAL_STATED.items()
+                        if v == "IN_PROGRESS" and k != "cescom")
+    planned = ", ".join(f"{k} kVA" for k in PLANNED_KVA)
+    return (
+        "BAIRAVI TRANS SOLUTIONS — OWNER-STATED FACTS (the owner also runs this "
+        "business; use these exactly, never invent beyond them):\n"
+        "- Makes oil-immersed 3-phase DISTRIBUTION TRANSFORMERS (TC), Kadaba, Dakshina "
+        "Kannada. It does NOT make generators — never ask 'generator or transformer'.\n"
+        f"- Price list (TC only): {prices}. Transport INCLUDED. Installation NOT "
+        "included and not done by Bairavi (a local electrical contractor does it, extra "
+        "cost); poles / DP structure are priced only after a site estimate.\n"
+        f"- Manufacturing up to 250 kVA; {planned} planned. Repair up to 2500 kVA, "
+        "servicing up to 5000 kVA — never mix these three figures.\n"
+        "- Warranty: 1 year, service available after. Payment: 50% advance, 50% at delivery.\n"
+        f"- DISCOM approval: {approved} approved; {pending} expected within 3 months.\n"
+        "- NOT stated by the owner (leave as a blank for him, never invent): GST rate, "
+        "delivery time in days, installation cost, quotation validity, any discount.\n"
+        "- A quotation draft must use these figures and terms directly — do not ask the "
+        "owner for prices, warranty, transport or payment terms he has already given.\n"
+        "- Call notes the owner types (e.g. 'Shashi interested, call after 1 month') are "
+        "saved to the CRM by the system before you see them; if a note reaches you, the "
+        "system could not match it to one lead — ask for the lead's last 4 digits.")
+
+
 def price_line(kva: int) -> str:
     amount, star = PRICE_LIST[kva]
     return f"*{kva} kVA {star} Star* — *₹{inr(amount)} + GST*"

@@ -37,6 +37,9 @@ import os
 
 os.environ.setdefault("OWNER_PHONE", "910000000001,910000000002")
 os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
+# The owner burst wait (api/webhook.py OWNER_BURST_SECONDS) sleeps and re-reads
+# the transcript; off for the suite, and its own tests turn it on with mocks.
+os.environ.setdefault("OWNER_BURST_SECONDS", "0")
 
 
 # THE CALL-HOURS CLOCK (2026-10-03). The live pipeline promises "call now"

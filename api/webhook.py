@@ -5195,6 +5195,9 @@ def generate_owner_reply(sender: str, role: str, label: str, user_text: str, his
     recent = (history or [])[-OWNER_HISTORY_TURNS:]
 
     messages = [{"role": "system", "content": OWNER_SYSTEM_PROMPT.format(label=label or "the owner", role=role)}]
+    # The owner also runs Bairavi; without these the assistant told him only one
+    # transformer price was "on record" (2026-10-05).
+    messages.append({"role": "system", "content": bairavi.owner_facts_en()})
     if mem:
         messages.append({"role": "system", "content": f"LONG-TERM MEMORY:\n{mem}"})
 
@@ -5522,23 +5525,49 @@ def _crm_leads_ending(digits: str) -> list:
     return call_log.matches(digits, r.json())
 
 
-def tool_call_outcome(sender: str, digits: str, stage, words: str, **_) -> str:
-    """The owner's call outcome onto the CRM lead's EXISTING fields."""
+def _crm_lead_by_id(lead_id: str) -> list:
+    r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=_crm_headers(),
+                     params={"id": f"eq.{lead_id}", "user_id": f"eq.{CRM_OWNER_USER_ID}",
+                             "select": "id,name,phone,notes,business_id"}, timeout=5)
+    r.raise_for_status()
+    return r.json()
+
+
+def _crm_owner_leads() -> list:
+    """Every lead's id, name and phone — for matching a call note by NAME."""
+    r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=_crm_headers(),
+                     params={"user_id": f"eq.{CRM_OWNER_USER_ID}", "select": "id,name,phone",
+                             "order": "created_at.desc", "limit": "1000"}, timeout=5)
+    r.raise_for_status()
+    return r.json()
+
+
+def tool_call_outcome(sender: str, stage, words: str, digits: str = None,
+                      lead_id: str = None, days: int = None, **_) -> str:
+    """The owner's call outcome onto the CRM lead's EXISTING fields.
+
+    The lead comes from its last digits ("5711 called interested") or, for a
+    note that named the customer (2026-10-05), from the id the name matched.
+    `days` adds a CRM follow-up that many days from today (IST).
+    """
     if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
         return "⚠️ CRM is not connected, so the call was not saved."
     try:
-        rows = _crm_leads_ending(digits)
+        rows = _crm_lead_by_id(lead_id) if lead_id else _crm_leads_ending(digits)
     except Exception as e:
         print(f"CALL_OUTCOME_LOOKUP_FAILED type={type(e).__name__}")
         return "⚠️ Could not reach the CRM. Please send it again in a minute."
     if not rows:
-        return call_log.not_found_reply(digits)
+        return call_log.not_found_reply(digits or "that name")
     if len(rows) > 1:
         return call_log.ambiguous_reply(digits, rows)
     lead = rows[0]
     now = datetime.now(timezone.utc)
-    when = now.astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%d %b %H:%M")
-    line = call_log.note_line(stage, words, when)
+    ist_now = now.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    when = ist_now.strftime("%d %b %H:%M")
+    due = (ist_now.date() + timedelta(days=int(days))) if days else None
+    due_label = due.strftime("%d %b %Y") if due else None
+    line = call_log.note_line_with_followup(stage, words, when, due_label)
     patch = {"notes": ((lead.get("notes") or "").rstrip() + "\n" + line).strip()}
     if stage is not call_log.NO_ANSWER:
         patch["pipeline_stage"] = stage
@@ -5551,7 +5580,63 @@ def tool_call_outcome(sender: str, digits: str, stage, words: str, **_) -> str:
         print(f"CALL_OUTCOME_SAVE_FAILED type={type(e).__name__}")
         return "⚠️ Could not save to the CRM. Please send it again in a minute."
     print(f"CALL_OUTCOME_SAVED stage={call_log.stage_label(stage)} phone=...{lead['phone'][-4:]}")
-    return call_log.reply(stage, lead.get("name"), lead["phone"])
+    if due:
+        # The CRM's own follow-up row, so it shows on the Follow-ups page and in
+        # #followups. The lead is already saved; a failed follow-up is reported
+        # rather than undoing that.
+        try:
+            fr = requests.post(f"{CRM_SUPABASE_URL}/rest/v1/follow_ups",
+                               headers={**_crm_headers(), "Prefer": "return=minimal"},
+                               json={"user_id": CRM_OWNER_USER_ID, "client_id": lead["id"],
+                                     "note": f"📞 Call back — {words.strip()}"[:300],
+                                     "due_date": due.isoformat(), "platform": "Call",
+                                     **({"business_id": lead["business_id"]}
+                                        if lead.get("business_id") else {})},
+                               timeout=5)
+            fr.raise_for_status()
+        except Exception as e:
+            print(f"CALL_FOLLOWUP_SAVE_FAILED type={type(e).__name__}")
+            return (call_log.reply(stage, lead.get("name"), lead["phone"])
+                    + f"\n⚠️ The follow-up for {due_label} was NOT saved — add it in the CRM.")
+    return call_log.named_reply(stage, lead.get("name"), lead["phone"], due_label)
+
+
+def named_call_note(sender: str, text: str, history: list):
+    """A call note that names the customer instead of their digits, or None.
+
+    None means "not a call note" and the message goes on to the assistant as
+    before. Never writes when the name fits several leads.
+    """
+    if call_log.is_request(text):
+        return None
+    got = call_log.outcome_of(text)
+    pend = None
+    if got is None:
+        if not call_log.is_bare_name(text):
+            return None
+        pend = call_log.pending_note(history, datetime.now(timezone.utc))
+        if pend is None:
+            return None
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        return None
+    try:
+        leads = _crm_owner_leads()
+    except Exception as e:
+        print(f"CALL_NOTE_LEADS_FAILED type={type(e).__name__}")
+        return None
+    found = call_log.name_matches(text, leads)
+    if not found:
+        return None                    # the assistant asks for the digits
+    if len(found) > 1:
+        return call_log.several_reply(found)
+    if pend:
+        stage, days, words = pend
+        words = f"{words} — {text.strip()}"
+    else:
+        stage, days = got
+        words = text.strip()
+    return run_tool(sender, "crm_call_outcome", _fallback=tool_call_outcome,
+                    lead_id=found[0]["id"], stage=stage, words=words, days=days)
 
 
 def tool_customer_brief(sender: str, kind: str, value: str, **_) -> str:
@@ -5772,6 +5857,10 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
         digits, stage, words = outcome
         return run_tool(sender, "crm_call_outcome", _fallback=tool_call_outcome,
                         digits=digits, stage=stage, words=words)
+    # THE SAME, BY NAME (2026-10-05): "Shashi interested, call after 1 month".
+    named = named_call_note(sender, stripped, ctx.get("history"))
+    if named is not None:
+        return named
     if low in ("#calls", "#call", "#tocall"):
         return run_tool(sender, "crm_calls_to_make", _fallback=tool_calls_to_make)
     view = owner_crm.command(low)
@@ -5835,7 +5924,56 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
     if lookup == "roles_list":
         return run_tool(sender, "roles_list", _fallback=tool_roles_list)
 
-    return generate_owner_reply(sender, role, label, user_text, ctx.get("history"))
+    burst = owner_burst(sender, user_text, ctx.get("history"))
+    if burst is None:
+        return ""                      # a newer message in this burst answers all of it
+    text, history = burst
+    return generate_owner_reply(sender, role, label, text, history)
+
+
+# ONE REPLY PER BURST (owner, 2026-10-05). "Transformer", "25kva", "4 star",
+# "95k plus gst" sent within a minute got four replies, each answering an
+# older message — a quotation drafted, then "which capacity?" asked again
+# after the capacity had been given. A message bound for the assistant is
+# saved at once, the turn waits OWNER_BURST_SECONDS, and only the turn
+# holding the NEWEST message replies, to everything sent since the last
+# reply. 0 turns it off (the legacy behaviour, and the test suite's).
+OWNER_BURST_SECONDS = float(os.environ.get("OWNER_BURST_SECONDS", "7"))
+
+
+def owner_burst(sender: str, user_text: str, history: list):
+    """(combined text, history before it), or None when a newer message exists."""
+    if OWNER_BURST_SECONDS <= 0:
+        return user_text, history
+    save_message(sender, "user", user_text)
+    _TURN_EXTRAS["owner_user_saved"] = True
+    time.sleep(OWNER_BURST_SECONDS)
+    fresh = fetch_context(sender)
+    rows = fresh.get("history") or []
+    if fresh.get("degraded") or not rows:
+        return user_text, history      # cannot see the burst: answer this one
+    mine = next((i for i in range(len(rows) - 1, -1, -1)
+                 if rows[i].get("role") == "user"
+                 and (rows[i].get("content") or "").strip() == user_text.strip()), None)
+    if mine is None:
+        return user_text, history      # our row is not visible: answer this one
+    if mine < len(rows) - 1 and rows[-1].get("role") == "user":
+        # A newer message is still unanswered: its own turn is waiting and
+        # will answer the whole burst. (A newer # command that was already
+        # answered ends in an assistant row, and does not count.)
+        print(f"OWNER_BURST_DEFERRED phone=...{sender[-4:]}")
+        return None
+    # The run of owner messages ending at this one. A # command answered in
+    # between (an assistant row AFTER this message) does not silence it.
+    start = mine
+    while start > 0 and rows[start - 1].get("role") == "user":
+        start -= 1
+    trailing = rows[start:mine + 1]
+    earlier = rows[:start]
+    combined = "\n".join((m.get("content") or "").strip() for m in trailing[-8:])
+    if len(trailing) > 1:
+        print(f"OWNER_BURST_COMBINED n={len(trailing)} phone=...{sender[-4:]}")
+    return combined, earlier
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7413,8 +7551,19 @@ def _bic_owner_turn(sender: str, user_text: str, ctx: dict,
         request, bic_brain.Flows(owner=owner_flow, client=client_flow))
 
     wa_adapter.render(response, request, send_text=send_text)
-    save_messages([(sender, "user", user_text),
-                   (sender, "assistant", response.text)])
+    _save_owner_turn(sender, user_text, response.text, sent=True)
+
+
+def _save_owner_turn(sender: str, user_text: str, reply: str, sent: bool = False) -> None:
+    """Send (unless already sent) and save an owner turn. The burst wait has
+    already saved the owner's own message, and a deferred turn has no reply."""
+    if not sent and (reply or "").strip():
+        send_text(sender, reply)
+    items = [] if _TURN_EXTRAS.get("owner_user_saved") else [(sender, "user", user_text)]
+    if (reply or "").strip():
+        items.append((sender, "assistant", reply))
+    if items:
+        save_messages(items)
 
 
 def _bic_client_turn(sender: str, user_text: str, ctx: dict,
@@ -7499,8 +7648,10 @@ if BIC_AVAILABLE:
         return tool_voice_test(principal.sender_id, text=text)
 
     @bic_tools.register("crm_call_outcome")
-    def _tool_h_crm_call_outcome(principal, digits, stage, words, **_):
-        return tool_call_outcome(principal.sender_id, digits=digits, stage=stage, words=words)
+    def _tool_h_crm_call_outcome(principal, stage, words, digits=None, lead_id=None,
+                                 days=None, **_):
+        return tool_call_outcome(principal.sender_id, stage=stage, words=words,
+                                 digits=digits, lead_id=lead_id, days=days)
 
     @bic_tools.register("service_interest")
     def _tool_h_service_interest(principal, timeout=10, **_):
@@ -7974,8 +8125,7 @@ class handler(BaseHTTPRequestHandler):
                     else:
                         # Legacy path — unchanged, byte for byte.
                         reply = handle_owner_text(sender, role, label, user_text, ctx)
-                        send_text(sender, reply)
-                        save_messages([(sender, "user", user_text), (sender, "assistant", reply)])
+                        _save_owner_turn(sender, user_text, reply)
                 elif _bic_enabled():
                     _bic_client_turn(sender, user_text, ctx, brain_ref)
                 else:
