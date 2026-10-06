@@ -43,6 +43,13 @@ function protect_(sh) {
   p.addEditor(me);
   p.removeEditors(p.getEditors().filter(function (u) { return u.getEmail() !== me.getEmail(); }));
   if (p.canDomainEdit()) p.setDomainEdit(false);
+  // The owner is never blocked by a protection (Google's rule), so the owner
+  // gets a warning instead: "lock aagilla" (owner, 2026-10-06) was the owner
+  // editing column A. Warning-only ranges show their prompt to everyone.
+  sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (r) { r.remove(); });
+  ['A:I', 'K:Z'].forEach(function (a1) {
+    sh.getRange(a1).protect().setDescription('Filled from the CRM — type only in Team note (J)').setWarningOnly(true);
+  });
 }
 
 function onOpen() {
