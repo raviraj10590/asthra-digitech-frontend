@@ -197,7 +197,7 @@ class TheTableIsVocabularyNotGeography(unittest.TestCase):
         src = inspect.getsource(b._read_quantity)
         self.assertIn("_MEASUREMENT_UNIT", src)
         self.assertNotIn('"kv" in span', src)
-        self.assertIn("_read_quantity", inspect.getsource(b.parse_followup))
+        self.assertIn("_read_quantity", inspect.getsource(b._parse_followup))
         self.assertIn("_read_quantity", inspect.getsource(b._is_place_like))
 
 

@@ -529,6 +529,22 @@ def _unlabelled_form_lines(text: str) -> list:
     return [l for l in lines[1:] if ":" not in l]
 
 
+def _without_rating(text: str) -> str:
+    """Drop "7 hp" / "7hp" / "10 kva" figures and the bare words the place
+    filter rejects on their own (electric, current, tc ...)."""
+    text = re.sub(r"\b\d+(\.\d+)?\s*(" + "|".join(re.escape(u) for u in _MEASUREMENT_UNIT) + r")\b",
+                  " ", text, flags=re.I)
+    text = re.sub(r"\b(bore\s*well|pump\s*set)\b", " ", text, flags=re.I)
+    words = [w for w in text.split()
+             if w.lower().strip(_TRIM) not in _NOT_A_PLACE_EXACT and w.lower().strip(_TRIM) not in _EQUIPMENT]
+    return " ".join(words)
+
+
+# What the power is FOR, never where it goes ("10hp motor Hosur" -> "Hosur").
+_EQUIPMENT = ("motor", "motors", "motar", "pump", "pumps", "pumpset", "pump set", "borewell", "bore",
+              "ಮೋಟಾರ್", "ಮೋಟರ್", "ಪಂಪ್", "ಬೋರ್‌ವೆಲ್", "ಬೋರ್ವೆಲ್")
+
+
 def _form_location(value):
     """(location, application) from the ad form's location answer.
 
@@ -549,7 +565,10 @@ def _form_location(value):
         # "Agriculture Kanakagiri" (live ...2829): the purpose AND the place.
         # Words that are themselves a purpose are removed; the rest may be
         # the place, judged by the same filter.
-        rest = " ".join(w for w in value.split() if not _application_of(w.lower()))
+        # A motor rating and the product word go too: "Agriculture farming 7 hp
+        # pump Electric" (live ...9608, 2026-10-06) left "7 hp Electric" and the
+        # bot asked to deliver there.
+        rest = _without_rating(" ".join(w for w in value.split() if not _application_of(w.lower())))
         if rest and rest != value and _is_place_like(rest.strip(_TRIM)):
             return rest.strip(_TRIM), app
     if _is_place_like(value.strip(_TRIM)):
@@ -2465,6 +2484,24 @@ def speech_text(reply: str) -> str:
 
 
 def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
+    """See _parse_followup. Adds one rule on top: A MENU DIGIT AFTER THE MENU.
+
+    Live ...5389 (2026-10-06) chose "1" (call now) and a minute later sent
+    "3". The bot answered "3 units ಗಮನಿಸಿದ್ದೇವೆ" — but 3 is also "ನಾಳೆ" on the
+    menu he had just used. A bare 2 or 3, once a call time is on record and
+    nothing else is being asked, is read as neither; the reply asks which.
+    """
+    out = _parse_followup(text, awaiting, known)
+    bare = (text or "").strip().strip(".")
+    if (bare in ("2", "3") and out.get("quantity") is not None
+            and AWAITING_QUANTITY not in (awaiting or ()) and AWAITING_CALLBACK not in (awaiting or ())
+            and (known or {}).get("callback") in CALLBACK_LABEL_KN):
+        out["quantity"] = None
+        out["digit_unclear"] = int(bare)
+    return out
+
+
+def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     """Quantity, application and whether a price was asked. None when unread.
 
     Deliberately NOT a general extractor. It reads the two fields the first
@@ -3718,6 +3755,12 @@ def compose_followup_reply(followup: dict, known: dict = None, *args, **kwargs) 
     call. A lone thanks after "25" (live ...1709, 2026-10-01) read as the
     conversation being dropped; when a call time is on record it now says
     when the engineer will call."""
+    n = followup.get("digit_unclear")
+    if n:
+        slot_n = (CALLBACK_NOW, CALLBACK_EVENING, CALLBACK_TOMORROW)[n - 1]
+        return (f"ದಯವಿಟ್ಟು ಸ್ಪಷ್ಟಪಡಿಸಿ 🙏\n"
+                f"• *{n} units* transformer ಬೇಕೇ? — \"{n} units\" ಎಂದು ತಿಳಿಸಿ\n"
+                f"• ಅಥವಾ ಕರೆ ಸಮಯ *{CALLBACK_LABEL_KN[slot_n]}* ಗೆ ಬದಲಿಸಬೇಕೇ? — \"{CALLBACK_LABEL_KN[slot_n]}\" ಎಂದು ತಿಳಿಸಿ")
     reply = _compose_followup_reply(followup, known, *args, **kwargs)
     slot = merged_state(known, followup).get("callback")
     if reply.strip() == "ಧನ್ಯವಾದಗಳು." and slot in CALLBACK_LABEL_KN:
@@ -4259,6 +4302,8 @@ def awaiting_after(followup: dict, known: dict = None) -> tuple:
     """
     if followup.get("declined"):
         return ()
+    if followup.get("digit_unclear"):    # asked "units, or a new call time?"
+        return (AWAITING_CALLBACK, AWAITING_QUANTITY)
     out = outstanding(followup, known)
     if (followup.get("callback") == CALLBACK_NOW and outside_call_hours(followup.get("call_hour"))
             and not merged_state(known, followup).get("call_time")):

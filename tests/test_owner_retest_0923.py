@@ -43,7 +43,7 @@ class EvAsAWholeWord(unittest.TestCase):
 
     def test_one_reader_serves_every_caller(self):
         import inspect
-        for fn in (b.parse_followup, b._is_place_like, b._form_location):
+        for fn in (b._parse_followup, b._is_place_like, b._form_location):
             with self.subTest(fn=fn.__name__):
                 self.assertIn("_application_of", inspect.getsource(fn))
 
