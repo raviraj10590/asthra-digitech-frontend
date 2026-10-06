@@ -6,10 +6,19 @@ The sheet holds one cell:  =IMPORTDATA("https://<brain>/api/leads_sheet?key=…"
 Google refetches it about once an hour, so every lead the CRM has — Meta form
 and WhatsApp alike — shows up there without anyone copying rows.
 
-Read-only. The key (LEADS_SHEET_KEY) is the only gate, so it is long, random
-and compared in constant time; without it set the endpoint answers 503 rather
-than serving anyone. Logs carry counts only — no name, phone or note.
+TEAM NOTES BACK INTO THE CRM (owner, 2026-10-06: "marketing guys e sheet nodi
+call madtare matte entry madtare ... crm li gottagbeku"). The sheet's Apps
+Script (sheet/leads_sheet.gs) POSTs {id, note, by} here when someone types in
+the "Team note" column; the note is appended to that lead's CRM notes as
+"📝 06 Oct 15:40 Sheet (by): …" and comes back in the "Call notes" column on
+the next refresh. Only a lead of this source and owner can be written, and
+only its notes field.
+
+The key (LEADS_SHEET_KEY) is the only gate, so it is long, random and compared
+in constant time; without it set the endpoint answers 503 rather than serving
+anyone. Logs carry counts only — no name, phone or note.
 """
+import json
 import csv
 import hmac
 import io
@@ -30,7 +39,9 @@ SOURCE = os.environ.get("LEADS_SHEET_SOURCE", "bairavi-transformer")
 IST = timezone(timedelta(hours=5, minutes=30))
 PAGE = 1000
 MAX_PAGES = 10
-HEADER = ["Date (IST)", "Name", "Phone", "Transformer", "Place", "Stage", "Last contacted (IST)", "Call notes"]
+HEADER = ["Date (IST)", "Name", "Phone", "Transformer", "Place", "Stage", "Last contacted (IST)", "Call notes", "CRM id"]
+NOTE_MAX = 500
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 def _ist(ts: str) -> str:
@@ -89,7 +100,7 @@ def to_csv(rows: list) -> str:
         n = parse_notes(r.get("notes"))
         w.writerow([_ist(r.get("created_at")), _cell(r.get("name")), _phone(r.get("phone")),
                     _cell(n["service"]), _cell(n["city"]), _cell(r.get("pipeline_stage")),
-                    _ist(r.get("last_contacted_at")), _cell(n["calls"])])
+                    _ist(r.get("last_contacted_at")), _cell(n["calls"]), r.get("id") or ""])
     return out.getvalue()
 
 
@@ -99,7 +110,7 @@ def fetch_leads() -> list:
     for page in range(MAX_PAGES):
         r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=headers, timeout=10, params={
             "user_id": f"eq.{CRM_OWNER_USER_ID}", "source": f"eq.{SOURCE}",
-            "select": "name,phone,notes,pipeline_stage,created_at,last_contacted_at",
+            "select": "id,name,phone,notes,pipeline_stage,created_at,last_contacted_at",
             "order": "created_at.desc", "limit": str(PAGE), "offset": str(page * PAGE)})
         r.raise_for_status()
         rows = r.json()
@@ -107,6 +118,41 @@ def fetch_leads() -> list:
         if len(rows) < PAGE:
             break
     return out
+
+
+def note_line(note: str, by: str, now: datetime) -> str:
+    """"📝 06 Oct 15:40 Sheet (Ravi): called, will visit Monday"."""
+    note = " ".join((note or "").split())[:NOTE_MAX]
+    by = " ".join((by or "").split())[:40]
+    when = now.astimezone(IST).strftime("%d %b %H:%M")
+    return f"📝 {when} Sheet{f' ({by})' if by else ''}: {note}"
+
+
+def valid_note(body: dict):
+    """(id, note, by) or None — an id that is a CRM uuid and a non-empty note."""
+    lead_id = str(body.get("id") or "").strip().lower()
+    note = " ".join(str(body.get("note") or "").split())
+    if not _UUID.match(lead_id) or not note:
+        return None
+    return lead_id, note, str(body.get("by") or "")
+
+
+def save_note(lead_id: str, line: str) -> bool:
+    """Append to THIS owner's lead of THIS source; False if there is no such lead."""
+    headers = {"apikey": CRM_SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {CRM_SUPABASE_SERVICE_KEY}",
+               "Content-Type": "application/json"}
+    where = {"id": f"eq.{lead_id}", "user_id": f"eq.{CRM_OWNER_USER_ID}", "source": f"eq.{SOURCE}"}
+    r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=headers, timeout=10,
+                     params=dict(where, select="notes"))
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        return False
+    notes = ((rows[0].get("notes") or "").rstrip() + "\n" + line).strip()
+    r = requests.patch(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=headers, timeout=10,
+                       params=where, json={"notes": notes, "updated_at": datetime.now(timezone.utc).isoformat()})
+    r.raise_for_status()
+    return True
 
 
 def authorised(query: str) -> bool:
@@ -129,6 +175,29 @@ class handler(BaseHTTPRequestHandler):
             return self._send(502, "CRM unreachable\n")
         print(f"LEADS_SHEET ok rows={len(rows)}")
         return self._send(200, to_csv(rows), "text/csv; charset=utf-8")
+
+    def do_POST(self):
+        if not (LEADS_SHEET_KEY and CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+            return self._send(503, "not configured\n")
+        if not authorised(urlparse(self.path).query):
+            print("LEADS_SHEET_NOTE denied")
+            return self._send(403, "forbidden\n")
+        try:
+            length = min(int(self.headers.get("Content-Length", 0) or 0), 8192)
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            return self._send(400, "bad json\n")
+        parsed = valid_note(body if isinstance(body, dict) else {})
+        if not parsed:
+            return self._send(400, "need id and note\n")
+        lead_id, note, by = parsed
+        try:
+            ok = save_note(lead_id, note_line(note, by, datetime.now(timezone.utc)))
+        except Exception as e:
+            print(f"LEADS_SHEET_NOTE_FAILED type={type(e).__name__}")
+            return self._send(502, "CRM unreachable\n")
+        print(f"LEADS_SHEET_NOTE {'saved' if ok else 'no-such-lead'}")
+        return self._send(200 if ok else 404, "saved\n" if ok else "no such lead\n")
 
     def _send(self, code: int, body: str, ctype: str = "text/plain; charset=utf-8"):
         data = body.encode("utf-8")

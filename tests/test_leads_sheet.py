@@ -49,3 +49,23 @@ class Gate(unittest.TestCase):
         self.assertFalse(m.authorised(""))
         os.environ["LEADS_SHEET_KEY"] = ""
         self.assertFalse(importlib.reload(ls).authorised("key="))
+
+
+class TeamNotes(unittest.TestCase):
+    ID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+
+    def test_note_line(self):
+        from datetime import datetime, timezone
+        line = ls.note_line("  called,\n will visit  Monday ", "Ravi", datetime(2026, 10, 6, 10, 10, tzinfo=timezone.utc))
+        self.assertEqual(line, "📝 06 Oct 15:40 Sheet (Ravi): called, will visit Monday")
+        self.assertTrue(ls.note_line("x" * 900, "", datetime(2026, 10, 6, tzinfo=timezone.utc)).endswith("x" * 500))
+
+    def test_only_a_uuid_and_a_real_note_are_accepted(self):
+        self.assertEqual(ls.valid_note({"id": self.ID.upper(), "note": " ok "}), (self.ID, "ok", ""))
+        self.assertIsNone(ls.valid_note({"id": "1 or 1=1", "note": "x"}))
+        self.assertIsNone(ls.valid_note({"id": self.ID, "note": "   "}))
+
+    def test_csv_carries_the_crm_id_last(self):
+        out = list(csv.reader(io.StringIO(ls.to_csv([dict(Csv.ROW, id=self.ID)]))))
+        self.assertEqual(out[0][-1], "CRM id")
+        self.assertEqual(out[1][-1], self.ID)
