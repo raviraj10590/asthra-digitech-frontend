@@ -483,3 +483,27 @@ class TheEndpoint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OnlyBairaviLeads(unittest.TestCase):
+    """2026-10-06: the ad account is shared with other clients' lead ads."""
+    NOW = datetime(2026, 10, 6, 10, 0, tzinfo=timezone.utc)
+
+    def lead(self, fields, form_id="999"):
+        return {"id": "L1", "form_id": form_id, "created_time": "2026-10-06T09:00:00+0000",
+                "field_data": [{"name": k, "values": [v]} for k, v in fields.items()]}
+
+    def test_a_real_estate_lead_is_skipped(self):
+        lead = self.lead({"full_name": "Ramesh", "phone": "+919845012345",
+                          "which_plot_size_are_you_looking_for?": "30x40", "budget": "50 lakh"})
+        self.assertEqual(ml.decide(lead, self.NOW, wrote_before=False, handled=False, internal=False),
+                         ml.SKIP_NOT_BAIRAVI)
+
+    def test_a_bairavi_form_by_id_or_by_its_questions(self):
+        by_id = self.lead({"full_name": "A", "phone": "+919845012345"}, form_id="1117749831150704")
+        by_q = self.lead({"full_name": "B", "phone": "+919845012346",
+                          "ನಿಮಗೆ_ಅಗತ್ಯವಿರುವ_ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್_ಸಾಮರ್ಥ್ಯ_ಯಾವುದು?": "A. 25 kVA"})
+        for lead in (by_id, by_q):
+            self.assertTrue(ml.is_bairavi_lead(lead))
+            self.assertEqual(ml.decide(lead, self.NOW, wrote_before=False, handled=False, internal=False),
+                             ml.CONTACT)

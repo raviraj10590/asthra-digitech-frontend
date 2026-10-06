@@ -26,6 +26,7 @@ template-only, and that is the only thing sent.
 
 Pure: no network, no clock unless one is passed.
 """
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -67,6 +68,22 @@ SKIP_NO_PHONE = "SKIP_NO_PHONE"
 SKIP_ALREADY_WROTE = "SKIP_ALREADY_WROTE"
 SKIP_ALREADY_HANDLED = "SKIP_ALREADY_HANDLED"
 SKIP_INTERNAL = "SKIP_INTERNAL"
+SKIP_NOT_BAIRAVI = "SKIP_NOT_BAIRAVI"
+
+# THE AD ACCOUNT IS SHARED (2026-10-06). Asthra runs other clients' lead ads
+# (e.g. ADT real estate) from the same account, and the sync read EVERY active
+# ad's leads — a real-estate lead could have been sent the Bairavi transformer
+# template. A lead is Bairavi's only when its form is a known Bairavi form, or
+# its questions/answers are about a transformer.
+BAIRAVI_FORM_IDS = tuple(f for f in os.environ.get(
+    "BAIRAVI_LEAD_FORM_IDS", "1117749831150704,1075770095174181").replace(" ", "").split(",") if f)
+
+
+def is_bairavi_lead(lead: dict) -> bool:
+    if str(lead.get("form_id") or "") in BAIRAVI_FORM_IDS:
+        return True
+    labels = " ".join(str(f.get("name") or "") for f in lead.get("field_data") or [])
+    return bairavi.looks_like_transformer_enquiry(form_text(lead) + "\n" + labels.replace("_", " "))
 
 _FORM_INTRO = ("[Meta form] Hello! I filled out your form and would like to "
                "know more about your business.")
@@ -153,6 +170,8 @@ def decide(lead: dict, now: datetime, *, wrote_before: bool, handled: bool,
            internal: bool) -> str:
     """What to do with one lead. Order matters: the cheap, certain reasons
     first, and the ones that need a lookup only for leads still in play."""
+    if not is_bairavi_lead(lead):
+        return SKIP_NOT_BAIRAVI
     created = _ts(lead.get("created_time"))
     if created is None or now - created > timedelta(hours=MAX_AGE_HOURS):
         return SKIP_TOO_OLD

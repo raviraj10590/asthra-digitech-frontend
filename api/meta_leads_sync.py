@@ -69,7 +69,7 @@ def fetch_leads(now) -> list:
     """
     account = os.environ.get("META_AD_ACCOUNT_ID", DEFAULT_AD_ACCOUNT).strip()
     ads = _graph(f"act_{account}/ads", {
-        "fields": f"id,leads.limit({LEADS_PER_AD}){{id,created_time,field_data}}",
+        "fields": f"id,leads.limit({LEADS_PER_AD}){{id,created_time,field_data,form_id}}",
         "effective_status": json.dumps(["ACTIVE"]),
         "limit": "100"}).get("data") or []
     cutoff = ml.since(now)
