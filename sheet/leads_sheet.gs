@@ -29,6 +29,20 @@ function setup() {
   ScriptApp.newTrigger('onTeamNote').forSpreadsheet(SpreadsheetApp.getActive()).onEdit().create();
   refresh();
   style_(sheet_());
+  protect_(sheet_());
+}
+
+// Owner, 2026-10-06: "j column bittu berellu edit madada haage lock maadu".
+// Everyone except the owner can type only in J (Team note). The script and
+// its triggers run as the owner, so refresh and the ✓ in K still write.
+function protect_(sh) {
+  sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function (p) { p.remove(); });
+  var p = sh.protect().setDescription('Only the Team note column (J) can be edited');
+  p.setUnprotectedRanges([sh.getRange('J2:J')]);
+  var me = Session.getEffectiveUser();
+  p.addEditor(me);
+  p.removeEditors(p.getEditors().filter(function (u) { return u.getEmail() !== me.getEmail(); }));
+  if (p.canDomainEdit()) p.setDomainEdit(false);
 }
 
 function onOpen() {
