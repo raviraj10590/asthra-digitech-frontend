@@ -2051,6 +2051,12 @@ _NOT_A_PLACE_EXACT = (
     # "I NEED IT" IN THE PLACE SLOT (owner-approved 2026-09-30; live
     # ...3476 answered "ನನಗೆ ಬೇಕಾ ಆಗಿದಿ" and was asked to deliver there).
     "ಬೇಕು", "ಬೇಕಾಗಿದೆ", "ಬೇಕಾಗಿದಿ", "need", "needed", "required", "beku",
+    # THE PRODUCT IN THE PLACE SLOT (live ...8890, 2026-10-06: the form's
+    # place field said "tc" and the bot asked "ಡೆಲಿವರಿ ಸ್ಥಳ: tc — ಇದು
+    # ಸರಿಯೇ?"). Whole answer only, so "TC road" or a village still reads.
+    "tc", "t.c", "t.c.", "t c", "ಟಿಸಿ", "ಟಿ.ಸಿ", "transformer", "transformers",
+    "ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್", "ಟ್ರಾನ್ಸ್ಫಾರ್ಮರ್", "electric", "electrical",
+    "electricity", "current", "power", "ವಿದ್ಯುತ್", "ಕರೆಂಟ್",
 )
 
 # Phrases that cannot occur inside a place name, so these may be matched

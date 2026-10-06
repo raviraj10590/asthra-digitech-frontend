@@ -64,3 +64,16 @@ class RefusalsAreRefusals(unittest.TestCase):
 
     def test_a_thing_not_wanted_is_not_a_refusal(self):
         self.assertFalse(read("kamba beda", (), self.K)["declined"])
+
+
+class TheProductIsNotAPlace(unittest.TestCase):
+    """...8890 (2026-10-06): the form's place field said "tc" and the bot
+    asked "ಡೆಲಿವರಿ ಸ್ಥಳ: tc — ಇದು ಸರಿಯೇ?"."""
+
+    def test_product_words_are_not_places(self):
+        for word in ("tc", "TC", "T.C", "t c", "ಟಿಸಿ", "transformer", "current", "ವಿದ್ಯುತ್"):
+            self.assertFalse(b._is_place_like(word), word)
+
+    def test_places_that_contain_them_still_read(self):
+        for place in ("Kadaba TC road", "tarikere", "channagiri", "Chikkaballapura"):
+            self.assertTrue(b._is_place_like(place), place)
