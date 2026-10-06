@@ -43,7 +43,10 @@ def _ist(ts: str) -> str:
         return ""
     tz = m.group(3) or "+00:00"
     tz = "+00:00" if tz == "Z" else (tz + ":00" if len(tz) == 3 else tz[:3] + ":" + tz[-2:])
-    return datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}{tz}").astimezone(IST).strftime("%d-%m-%Y %H:%M")
+    # "06 Oct 2026 · 15:09": a Sheet in a US locale read "06-10-2026" as 10
+    # June and showed it as 46183.63 (owner, 2026-10-06). The "·" keeps Sheets
+    # from converting it at all, so it reads the same in every locale.
+    return datetime.fromisoformat(f"{m.group(1)}T{m.group(2)}{tz}").astimezone(IST).strftime("%d %b %Y · %H:%M")
 
 
 def _phone(raw: str) -> str:

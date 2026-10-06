@@ -30,7 +30,7 @@ class Csv(unittest.TestCase):
     def test_header_and_ist_and_phone_as_text(self):
         head, row = self.rows(self.ROW)
         self.assertEqual(head[0], "Date (IST)")
-        self.assertEqual(row[0], "06-10-2026 11:16")
+        self.assertEqual(row[0], "06 Oct 2026 · 11:16")
         self.assertEqual(row[2], "+91 95905 59112")
         self.assertEqual(row[3:6], ["Transformer 25 kVA", "Chikkaballapura", "Lead"])
 
