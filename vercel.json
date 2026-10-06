@@ -32,6 +32,10 @@
       "config": {
         "maxDuration": 300
       }
+    },
+    {
+      "src": "api/leads_sheet.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
@@ -62,6 +66,10 @@
     {
       "src": "/api/recovery",
       "dest": "api/recovery.py"
+    },
+    {
+      "src": "/api/leads_sheet",
+      "dest": "api/leads_sheet.py"
     }
   ],
   "crons": [
