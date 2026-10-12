@@ -39,6 +39,14 @@ DOCUMENTED_DIVERGENCE = {
     # 2026-09-27, when the LIVE parser got the same rule (a delivery-time
     # question is not a place) — the two now agree, so it is no divergence.
     ("customer_question", "nanna hesaru gotta"): "their_name is not in the closed question list",
+    # 2026-10-12, replies to the price message: a bare size other than the one
+    # on record ("63 kva" from a 25 kVA lead) asks that size's price. A rule of
+    # the live parser's wrapper; the interpretation layer does not have it yet.
+    ("asked_price", "100 kv"): "a bare size different from the held one asks its price (live parser only)",
+    ("asked_price", "100kv"): "a bare size different from the held one asks its price (live parser only)",
+    ("asked_price", "63 kVA"): "a bare size different from the held one asks its price (live parser only)",
+    ("asked_price", "63 kva"): "a bare size different from the held one asks its price (live parser only)",
+    ("asked_price", "25"): "a bare catalogue number from a lead holding another size is that size, and asks its price",
 }
 
 

@@ -2491,7 +2491,30 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     menu he had just used. A bare 2 or 3, once a call time is on record and
     nothing else is being asked, is read as neither; the reply asks which.
     """
+    # THREE THINGS SEEN IN THE REPLIES TO THE PRICE MESSAGE OF 2026-10-12:
+    #  * "👍🏿" — a thumbs-up with a skin tone — was not the "👍" the yes-list
+    #    holds, so "deliver to X?" was asked again (...9594). Skin tones and
+    #    the emoji variation selector are removed before anything is read.
+    #  * WhatsApp's canned opener "Hello from Asthra DigiTech! How can we
+    #    empower your brand's digital journey toda…" (...9370) is a greeting,
+    #    not a message about brands; it is read as "hi".
+    #  * "65kva" / "63kva" answering a 25 kVA price (...9594) is "and this
+    #    size?": a bare size different from the one on record asks its price.
+    text = _EMOJI_MODIFIERS.sub("", text or "")
+    if _CANNED_OPENER.match(text):
+        text = "hi"
     out = _parse_followup(text, awaiting, known)
+    held = (known or {}).get("capacity_kva")
+    if (out.get("capacity_kva") and held and out["capacity_kva"] != held
+            and not out.get("asked_price") and _BARE_SIZE.match(text)):
+        out["asked_price"] = True
+    # A BARE CATALOGUE SIZE IS A SIZE. "100" from someone holding a 25 kVA
+    # price is "and 100 kVA?", not an order for a hundred transformers. Only
+    # when no quantity was asked for, and only the sizes we actually list.
+    q = out.get("quantity")
+    if (held and q in PRICE_LIST and q != held and out.get("capacity_kva") is None
+            and AWAITING_QUANTITY not in (awaiting or ()) and re.fullmatch(r"\s*\d{2,3}\s*[?.!]*\s*", text)):
+        out["capacity_kva"], out["quantity"], out["asked_price"] = q, None, True
     bare = (text or "").strip().strip(".")
     if (bare in ("2", "3") and out.get("quantity") is not None
             and AWAITING_QUANTITY not in (awaiting or ()) and AWAITING_CALLBACK not in (awaiting or ())
@@ -2499,6 +2522,11 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
         out["quantity"] = None
         out["digit_unclear"] = int(bare)
     return out
+
+
+_EMOJI_MODIFIERS = re.compile("[\U0001F3FB-\U0001F3FF\uFE0F]")
+_CANNED_OPENER = re.compile(r"^\s*hello from asthra digitech\b", re.I)
+_BARE_SIZE = re.compile(r"^\s*\d{2,4}\s*(?:k\.?\s?v\.?\s?a?|ಕೆವಿಎ|ಕೆ\.ವಿ\.ಎ)\.?\s*(?:tc|transformer|ಟಿಸಿ)?\s*[?.!]*\s*$", re.I)
 
 
 def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
