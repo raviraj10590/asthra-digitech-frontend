@@ -91,3 +91,39 @@ class BedaAsPeopleTypeIt(unittest.TestCase):
     def test_places_and_things_not_wanted_are_not_a_refusal(self):
         for t in ("ಬೇಡರಹಳ್ಳಿ", "Bedarahalli", "kamba beda", "installation beda", "beda andre yake"):
             self.assertFalse(turn(t, (b.AWAITING_DELIVERY,))[0]["declined"], t)
+
+
+class QuestionsAfterThePrice(unittest.TestCase):
+    """More replies to the price message, 2026-10-12 evening."""
+    K63 = {"capacity_kva": 63, "location": "thirthalli", "name": "Madhan", "application": "AGRICULTURE",
+           "delivery_same": True, "callback": b.CALLBACK_NOW}
+
+    def test_location_asks_where_we_are(self):
+        """...8578: "Location" got the call-time menu."""
+        for t in ("Location", "location?", "address sir", "nimma location elli", "address kalisi"):
+            f, reply = turn(t, (), self.K63)
+            self.assertEqual(f["customer_question"], b.QUESTION_WHO, t)
+            self.assertIn("Kadaba, ದಕ್ಷಿಣ ಕನ್ನಡ", reply)
+
+    def test_their_own_location_is_still_theirs(self):
+        f, _ = turn("location hubli", (b.AWAITING_DELIVERY,), {"capacity_kva": 25})
+        self.assertIsNone(f["customer_question"])
+        self.assertIn("hubli", f["delivery_location"])
+
+    def test_is_there_a_smaller_one_gets_sizes_and_prices(self):
+        """...5389: "63kva githa kadme ellva sir" was told the engineer would call."""
+        f, reply = turn("63kva githa kadme ellva sir", (), self.K63)
+        self.assertEqual(f["customer_question"], b.QUESTION_RANGE)
+        for line in ("25 kVA 4 Star* — *₹85,000 + GST", "100 kVA 5 Star* — *₹2,50,000 + GST"):
+            self.assertIn(line, reply)
+
+    def test_details_as_typed(self):
+        """...5389: "ditels heli" got no answer."""
+        _, reply = turn("ditels heli", (), self.K63)
+        self.assertTrue(reply.startswith("📋"))
+        self.assertIn("₹1,90,000 + GST", reply)
+
+    def test_a_discount_request_is_not_a_size_question(self):
+        f, reply = turn("price kadime madi", (), self.K63)
+        self.assertNotEqual(f["customer_question"], b.QUESTION_RANGE)
+        self.assertIn("sales ತಂಡ", reply)

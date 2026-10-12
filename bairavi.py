@@ -1307,11 +1307,28 @@ _ASK_WHO = ("who are you", "who is this", "your company", "about your company",
             # "ಧನ್ಯವಾದಗಳು."; the answer is that we manufacture it.
             "yav company", "yaav company", "which company", "company yavdu",
             "which brand", "yav brand", "ಯಾವ ಕಂಪನಿ", "yavdu company",
-            "ಎಲ್ಲಿಂದ", "ಎಲ್ಲಿಯವರು", "ellinda", "ellinavru", "ellinavaru")
+            "ಎಲ್ಲಿಂದ", "ಎಲ್ಲಿಯವರು", "ellinda", "ellinavru", "ellinavaru",
+            # Asked for OUR place after the price message of 2026-10-12
+            # (live ...8578: "Location" got the call-time menu).
+            "nimma location", "nim location", "nimma address", "nim address", "your location",
+            "factory elli", "office elli", "location elli", "location kalisi", "address kalisi",
+            "location send", "send location", "location heli", "address heli", "ನಿಮ್ಮ ಲೊಕೇಶನ್")
+# The same question as ONE bare word. Whole message only: "location" inside a
+# longer message is usually the customer giving theirs.
+_ASK_WHERE_BARE = ("location", "loction", "locatin", "lokation", "address", "adress", "addres",
+                   "ಲೊಕೇಶನ್", "ಲೋಕೇಶನ್", "ವಿಳಾಸ", "ಅಡ್ರೆಸ್")
+_ASK_WHERE_FILLER = ("sir", "please", "pls", "plz", "ಸರ್", "heli", "tilisi", "ಹೇಳಿ", "ತಿಳಿಸಿ")
 _ASK_RANGE = ("what do you make", "what do you manufacture", "which models",
               "what models", "your range", "available sizes", "which kva",
               "what kva", "which capacity", "your products",
-              "ಯಾವ ಮಾಡೆಲ್", "ನಿಮ್ಮ range", "ಎಷ್ಟು kva ಇದೆ", "ಉತ್ಪನ್ನ")
+              "ಯಾವ ಮಾಡೆಲ್", "ನಿಮ್ಮ range", "ಎಷ್ಟು kva ಇದೆ", "ಉತ್ಪನ್ನ",
+              # "63kva githa kadme ellva sir" — is there nothing smaller than
+              # 63? (live ...5389, 2026-10-12, was told the engineer would call)
+              "ginta kadime", "ginta kadme", "gintha kadime", "gintha kadme", "githa kadme",
+              "githa kadime", "kinta kadime", "kinta kadme", "ginta kammi", "ಗಿಂತ ಕಡಿಮೆ",
+              "ginta chikka", "ginta sanna", "ಗಿಂತ ಚಿಕ್ಕ", "ಗಿಂತ ಸಣ್ಣ", "smaller size", "smaller one",
+              "ginta dodda", "ginta jasti", "ಗಿಂತ ದೊಡ್ಡ", "bigger size", "bere size", "ಬೇರೆ size",
+              "yava size", "yav size", "ಯಾವ size", "yav yav kva", "yava yava kva")
 _ASK_DELIVERY_AREA = ("do you deliver", "can you deliver", "deliver to",
                       "delivery available", "do you supply", "supply to",
                       "outside karnataka", "other state", "all india",
@@ -1339,6 +1356,9 @@ def customer_question(text: str):
     _short = re.sub(r"[?!.,🙏]+", " ", low).split()
     if 0 < len(_short) <= 3 and any(w in _WHY_WORDS for w in _short):
         return QUESTION_WHY
+    if (0 < len(_short) <= 3 and any(w in _ASK_WHERE_BARE for w in _short)
+            and all(w in _ASK_WHERE_BARE or w in _ASK_WHERE_FILLER for w in _short)):
+        return QUESTION_WHO
     for tag, vocabulary in ((QUESTION_NAME, _ASK_NAME),
                             (QUESTION_DELIVERY_AREA, _ASK_DELIVERY_AREA),
                             (QUESTION_RANGE, _ASK_RANGE),
@@ -2813,6 +2833,9 @@ _SALES_TERMS = (
 # rating, the value, and the terms. Nothing here is new — each line is an
 # owner-stated fact already used elsewhere in this module.
 _INFO_ASK = ("ಮಾಹಿತಿ", "mahiti", "maahiti", "information", "info", "details", "detail",
+             # as typed (live ...5389, 2026-10-12: "ditels heli" got no answer)
+             "ditels", "ditel", "detels", "detel", "detals", "detals", "dtails", "deteils", "ditails",
+             "ಡೀಟೇಲ್ಸ್", "ಡಿಟೇಲ್ಸ್", "ಡೀಟೈಲ್ಸ್", "ಡಿಟೈಲ್ಸ್",
              "ವಿವರ", "full details", "ಅರ್ಥ ಆಗಲಿಲ್ಲ", "ಅರ್ಥ ಆಗಿಲ್ಲ", "artha agilla",
              "artha aagilla", "artha agalilla", "didn't understand", "did not understand",
              "not understood", "explain")
@@ -3821,6 +3844,12 @@ def compose_followup_reply(followup: dict, known: dict = None, *args, **kwargs) 
                 f"• *{n} units* transformer ಬೇಕೇ? — \"{n} units\" ಎಂದು ತಿಳಿಸಿ\n"
                 f"• ಅಥವಾ ಕರೆ ಸಮಯ *{CALLBACK_LABEL_KN[slot_n]}* ಗೆ ಬದಲಿಸಬೇಕೇ? — \"{CALLBACK_LABEL_KN[slot_n]}\" ಎಂದು ತಿಳಿಸಿ")
     reply = _compose_followup_reply(followup, known, *args, **kwargs)
+    # "Is there a smaller one?" is a price question too (live ...5389,
+    # 2026-10-12): the sizes are answered with what each costs. Here, not in
+    # answer_question_kn — prices leave only through the composer.
+    if followup.get("customer_question") == QUESTION_RANGE and "₹" not in reply and _range_line_kn() in reply:
+        reply = reply.replace(_range_line_kn(), _range_line_kn() + "\n"
+                              + "\n".join(f"• {price_line(k)}" for k in sorted(PRICE_LIST)), 1)
     slot = merged_state(known, followup).get("callback")
     if reply.strip() == "ಧನ್ಯವಾದಗಳು." and slot in CALLBACK_LABEL_KN:
         reply = (f"ಧನ್ಯವಾದಗಳು 🙏 ನಮ್ಮ engineer "
