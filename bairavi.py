@@ -394,11 +394,22 @@ def capacity_kva(text: str):
     catalogue size would be the confidently-wrong capacity AC-07 forbids.
     """
     answer = _latin_kv(_field(text, _FIELD_PATTERNS["capacity"]) or (text or ""))
+    # "65 kv" too: the kv-for-kVA reader only knows the sizes we make
+    answer = re.sub(r"(?<!\d)65(?=\s*k\.?\s?v)", "63", answer, flags=re.I)
     m = _KVA_RE.search(answer)
     if m:
-        return int(m.group(1))
+        return SAID_AS.get(int(m.group(1)), int(m.group(1)))
     # "kv" for kVA, accepted only inside the known product range.
-    return _kv_as_kva(answer)
+    kva = _kv_as_kva(answer)
+    return SAID_AS.get(kva, kva)
+
+
+# A SIZE AS CUSTOMERS SAY IT. Owner ruling, 2026-10-12, verbatim: "65 kva andru
+# 65 andru 63 kva anta arta madkibeku" — a customer who says 65 means our
+# 63 kVA (live ...9594 wrote "65kva" and got no price). This is the ONLY alias:
+# it is the owner's statement about one figure, not permission to round any
+# other size to the nearest one we make (AC-07 still holds for everything else).
+SAID_AS = {65: 63}
 
 
 def sku_status(kva) -> str:
@@ -2523,7 +2534,11 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # price is "and 100 kVA?", not an order for a hundred transformers. Only
     # when no quantity was asked for, and only the sizes we actually list.
     q = out.get("quantity")
-    if (held and q in PRICE_LIST and q != held and out.get("capacity_kva") is None
+    if q in SAID_AS and AWAITING_QUANTITY not in (awaiting or ()) and re.fullmatch(r"\s*\d{2,3}\s*[?.!]*\s*", text):
+        # a bare "65" is 63 kVA too (owner 2026-10-12), with or without a size on record
+        out["capacity_kva"], out["quantity"] = SAID_AS[q], None
+        out["asked_price"] = out["asked_price"] or SAID_AS[q] != held
+    elif (held and q in PRICE_LIST and q != held and out.get("capacity_kva") is None
             and AWAITING_QUANTITY not in (awaiting or ()) and re.fullmatch(r"\s*\d{2,3}\s*[?.!]*\s*", text)):
         out["capacity_kva"], out["quantity"], out["asked_price"] = q, None, True
     bare = (text or "").strip().strip(".")

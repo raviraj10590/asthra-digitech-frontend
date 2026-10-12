@@ -33,8 +33,21 @@ class AnotherSizeAsksItsPrice(unittest.TestCase):
         self.assertIn("₹1,90,000 + GST", reply)
         self.assertIn("₹2,50,000 + GST", turn("100 kva transformer")[1])
 
+    def test_65_is_our_63(self):
+        """Owner 2026-10-12: "65 kva andru 65 andru 63 kva anta arta madkibeku"."""
+        for t in ("65kva", "65 KVA", "65 kv", "65"):
+            f, reply = turn(t)
+            self.assertEqual((f["capacity_kva"], f["quantity"]), (63, None), t)
+            self.assertIn("*63 kVA 5 Star* — *₹1,90,000 + GST*", reply)
+        self.assertEqual(b.capacity_kva("65 kva"), 63)
+        self.assertEqual(turn("65", (), {"location": "Hangal"})[0]["capacity_kva"], 63)   # no size on record
+        self.assertEqual(turn("65", (b.AWAITING_QUANTITY,))[0]["quantity"], 65)          # a count when a count was asked
+
+    def test_only_65_no_other_rounding(self):
+        self.assertEqual([b.capacity_kva(t) for t in ("60 kva", "64 kva", "75 kva", "100 kva")], [60, 64, 75, 100])
+
     def test_an_unlisted_size_gets_the_whole_list(self):
-        _, reply = turn("65kva")
+        _, reply = turn("75kva")
         for price in ("₹85,000", "₹1,90,000", "₹2,50,000", "₹4,95,000"):
             self.assertIn(price, reply)
 
