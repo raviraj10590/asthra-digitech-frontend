@@ -2394,10 +2394,21 @@ def _is_thanks(bare: str) -> bool:
     return all(w.startswith(_THANKS_STEMS) or w in _THANKS_FILLER for w in words)
 
 
+# "ಬೇಡ" AS PEOPLE TYPE IT. "ನಮಗೆಬೆಡಾ" — no space, short ೆ, long ಾ — answered
+# the price message of 2026-10-12 (live ...0983) and was stored as the delivery
+# place "ನಮಗೆಬೆಡಾ"; the bot then asked what the transformer was for. The word,
+# with or without "to us/me" in front and "sir" behind, in either script.
+_BEDA_RE = re.compile(
+    r"(?:(?:ನಮಗೆ|ನನಗೆ|ನಂಗೆ|ನಮ್ಗೆ|ನಮಗ|ನನಗ|namage|nanage|nange|namge|namag|nanag)\s*)?"
+    r"(?:ಬೇಡ|ಬೆಡ|ಬ್ಯಾಡ|bed+a+|bedha|byada)[ಾa]?"
+    r"(?:\s*(?:ಸರ್|sir|sar|ರಿ|ri|ಬಿಡಿ|bidi|bidri))?")
+
+
 def is_decline(text: str) -> bool:
     bare = re.sub(r"[^\w\s\u0C80-\u0CFF]", " ", (text or "").lower())
     bare = " ".join(bare.split())
-    return bare in _DECLINES or bool(_PRICE_DECLINE_RE.fullmatch(bare))
+    return (bare in _DECLINES or bool(_PRICE_DECLINE_RE.fullmatch(bare))
+            or bool(_BEDA_RE.fullmatch(bare)))
 
 
 # ── A SHARED WHATSAPP LOCATION ────────────────────────────────────────────

@@ -61,3 +61,20 @@ class TheCannedOpenerIsAGreeting(unittest.TestCase):
         f, reply = turn("Hello from Asthra DigiTech! How can we empower your brand’s digital journey toda")
         self.assertFalse(b.should_ask_model(f, K))
         self.assertIn("ನಮಸ್ಕಾರ", reply)
+
+
+class BedaAsPeopleTypeIt(unittest.TestCase):
+    """...0983 answered the price message with "ನಮಗೆಬೆಡಾ"; it was stored as
+    the delivery place and the next question was asked."""
+
+    def test_spellings_of_no(self):
+        for t in ("ನಮಗೆಬೆಡಾ", "ನಮಗೆ ಬೇಡ", "ಬೆಡ", "ಬೇಡಾ ಸರ್", "namage beda", "nange bedaa", "ಬ್ಯಾಡ"):
+            f, reply = turn(t, (b.AWAITING_DELIVERY,))
+            self.assertTrue(f["declined"], t)
+            self.assertIsNone(f["delivery_location"], t)
+            self.assertNotIn("ಉದ್ದೇಶ", reply)
+            self.assertEqual(b.awaiting_after(f, K), ())
+
+    def test_places_and_things_not_wanted_are_not_a_refusal(self):
+        for t in ("ಬೇಡರಹಳ್ಳಿ", "Bedarahalli", "kamba beda", "installation beda", "beda andre yake"):
+            self.assertFalse(turn(t, (b.AWAITING_DELIVERY,))[0]["declined"], t)
