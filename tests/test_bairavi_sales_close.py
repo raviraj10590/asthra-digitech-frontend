@@ -24,18 +24,18 @@ DONE = {"location": "Sira", "capacity_kva": 25, "application": "AGRICULTURE", "d
 
 class ThePriceList(unittest.TestCase):
     def test_exactly_the_owners_figures(self):
-        self.assertEqual(b.PRICE_LIST, {25: (95_000, 4), 63: (200_000, 5),
-                                        100: (295_000, 5), 250: (495_000, 5)})
+        self.assertEqual(b.PRICE_LIST, {25: (85_000, 4), 63: (190_000, 5),
+                                        100: (250_000, 5), 250: (495_000, 5)})
 
     def test_indian_grouping(self):
-        self.assertEqual([b.inr(x) for x in (950, 95_000, 200_000, 295_000, 495_000)],
-                         ["950", "95,000", "2,00,000", "2,95,000", "4,95,000"])
-        self.assertEqual(OWNER_PRICES, {"95,000", "2,00,000", "2,95,000", "4,95,000"})
+        self.assertEqual([b.inr(x) for x in (950, 85_000, 190_000, 250_000, 495_000)],
+                         ["950", "85,000", "1,90,000", "2,50,000", "4,95,000"])
+        self.assertEqual(OWNER_PRICES, {"85,000", "1,90,000", "2,50,000", "4,95,000"})
 
     def test_each_capacity_gets_its_own_price_and_star(self):
-        for cap, line in (("A. 25 kVA", "*25 kVA 4 Star* — *₹95,000 + GST*"),
-                          ("B. 63 kVA", "*63 kVA 5 Star* — *₹2,00,000 + GST*"),
-                          ("C. 100 kVA", "*100 kVA 5 Star* — *₹2,95,000 + GST*"),
+        for cap, line in (("A. 25 kVA", "*25 kVA 4 Star* — *₹85,000 + GST*"),
+                          ("B. 63 kVA", "*63 kVA 5 Star* — *₹1,90,000 + GST*"),
+                          ("C. 100 kVA", "*100 kVA 5 Star* — *₹2,50,000 + GST*"),
                           ("D. 250 kVA", "*250 kVA 5 Star* — *₹4,95,000 + GST*")):
             r = b.compose_reply(b.parse(FORM.format(cap=cap) + PRICE_ASKED))
             self.assertIn(line, r, cap)
@@ -85,7 +85,7 @@ class ThePriceList(unittest.TestCase):
 class PriceAndTermsQuestions(unittest.TestCase):
     def test_a_price_question_gets_the_price_for_their_capacity(self):
         r = b.compose_followup_reply(b.parse_followup("rate?", (), DONE), DONE)
-        self.assertIn("₹95,000 + GST", r)
+        self.assertIn("₹85,000 + GST", r)
         self.assertEqual(r.count("₹"), 1)
 
     def test_without_a_capacity_the_whole_list(self):

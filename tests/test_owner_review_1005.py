@@ -35,8 +35,8 @@ def ago(minutes):
 class BairaviFactsForTheOwner(unittest.TestCase):
     def test_every_price_and_term_is_there(self):
         f = b.owner_facts_en()
-        for s in ("25 kVA 4 Star ₹95,000", "63 kVA 5 Star ₹2,00,000",
-                  "100 kVA 5 Star ₹2,95,000", "250 kVA 5 Star ₹4,95,000",
+        for s in ("25 kVA 4 Star ₹85,000", "63 kVA 5 Star ₹1,90,000",
+                  "100 kVA 5 Star ₹2,50,000", "250 kVA 5 Star ₹4,95,000",
                   "Transport INCLUDED", "Installation NOT", "1 year", "50% advance",
                   "MESCOM approved", "does NOT make generators", "Repair up to 2500 kVA"):
             self.assertIn(s, f)
@@ -54,7 +54,7 @@ class BairaviFactsForTheOwner(unittest.TestCase):
              mock.patch.object(w, "update_owner_memory"), \
              redirect_stdout(io.StringIO()):
             w.generate_owner_reply(OWNER, "OWNER", "Raviraj", "quotation for Bharath", [])
-        self.assertTrue(any("₹2,95,000" in m["content"] for m in seen["m"]
+        self.assertTrue(any("₹2,50,000" in m["content"] for m in seen["m"]
                             if m["role"] == "system"))
 
 

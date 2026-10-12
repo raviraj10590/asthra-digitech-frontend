@@ -30,7 +30,7 @@ class GstAnswered(unittest.TestCase):
         f = read("Gst estu aguthe sir", (), known)
         reply = b.compose_followup_reply(f, known, None, None)
         self.assertIn("GST *18%*", reply)
-        self.assertIn("₹1,12,100", reply)
+        self.assertIn("₹1,00,300", reply)     # 85,000 + 18% (owner prices 2026-10-12)
         self.assertNotIn("63", reply)
 
     def test_totals_are_computed(self):

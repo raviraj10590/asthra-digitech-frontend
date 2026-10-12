@@ -2713,7 +2713,12 @@ _NO_PRICE = ("ದರ ಮತ್ತು ಡೆಲಿವರಿ ಸಮಯ — ನಮ�
 # a call), the installation cost, a validity date, any discount. The model
 # path's evidence guard still refuses money in generated text: prices come
 # only from this table, through the composer.
-PRICE_LIST = {25: (95_000, 4), 63: (200_000, 5), 100: (295_000, 5), 250: (495_000, 5)}
+#
+# REVISED BY THE OWNER, 2026-10-12, verbatim: "now onward price of transformer
+# are 100 kva 2.50 lakh plus gst. 63 kva 1.90 lakh plus gst 25 kva 85k plus
+# gst". 250 kVA was not mentioned, so it stays at the 2026-09-24 figure; the
+# star ratings were not mentioned either and are unchanged.
+PRICE_LIST = {25: (85_000, 4), 63: (190_000, 5), 100: (250_000, 5), 250: (495_000, 5)}
 
 
 def inr(amount: int) -> str:

@@ -52,7 +52,7 @@ class MoneyIsPrice(unittest.TestCase):
         for t in ("ಹಣ", "ಹಣ ಎಷ್ಟು", "duddu yestu", "ದುಡ್ಡು"):
             f = b.parse_followup(t, (), known=k)
             self.assertTrue(f["asked_price"], t)
-            self.assertIn("₹95,000 + GST", b.compose_followup_reply(f, k), t)
+            self.assertIn("₹85,000 + GST", b.compose_followup_reply(f, k), t)
 
 
 class DeliveryArea(unittest.TestCase):
@@ -107,7 +107,7 @@ class SellingPoints(unittest.TestCase):
     def test_after_the_price(self):
         k = {"capacity_kva": 63}
         reply = b.compose_followup_reply(b.parse_followup("rate eshtu", (), known=k), k)
-        self.assertIn("₹2,00,000 + GST", reply)
+        self.assertIn("₹1,90,000 + GST", reply)
         self.assertIn("*5 Star* premium transformer", reply)
 
     def test_on_a_price_objection(self):

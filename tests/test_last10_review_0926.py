@@ -56,7 +56,7 @@ class RateInKannadaLetters(unittest.TestCase):
             self.assertTrue(f["asked_price"], t)
             self.assertEqual(f["commercial_intent"], b.PRICE_REQUEST, t)
             self.assertFalse(b.should_ask_model(f, K), t)          # not the model
-            self.assertIn("₹95,000 + GST", b.compose_followup_reply(f, K), t)
+            self.assertIn("₹85,000 + GST", b.compose_followup_reply(f, K), t)
 
 
 class KannadaDigitsInTheCallBackChoice(unittest.TestCase):

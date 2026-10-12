@@ -76,7 +76,7 @@ class WordsAsTyped(unittest.TestCase):
     def test_dar_heli_is_a_price_question(self):
         f, reply = turn("Dar heli", NOT_CHOSEN)
         self.assertTrue(f["asked_price"])
-        self.assertIn("₹2,00,000 + GST", reply)
+        self.assertIn("₹1,90,000 + GST", reply)
 
     def test_farming_is_agriculture(self):
         self.assertEqual(b.parse_followup("Farming", (b.AWAITING_PURPOSE,), {})["application"],
@@ -96,7 +96,7 @@ class YouToldUsNothing(unittest.TestCase):
                 f, reply = turn(t, self.KNOWN, (b.AWAITING_DELIVERY,))
                 self.assertFalse(b.should_ask_model(f, self.KNOWN))
                 self.assertTrue(reply.startswith("📋"), reply[:40])
-                for fact in ("₹95,000 + GST", "1 ವರ್ಷ warranty", "50% advance", "MESCOM approved"):
+                for fact in ("₹85,000 + GST", "1 ವರ್ಷ warranty", "50% advance", "MESCOM approved"):
                     self.assertIn(fact, reply)
 
     def test_never_stored_as_the_delivery_place(self):
@@ -120,7 +120,7 @@ class YouToldUsNothing(unittest.TestCase):
         """Delivery time stays a call, never a number of days."""
         card = b.info_card_kn({"capacity_kva": 100})
         self.assertIsNone(b._REPLY_LEADTIME_RE.search(card))
-        self.assertIn("₹2,95,000 + GST", card)
+        self.assertIn("₹2,50,000 + GST", card)
 
 
 class TheShadowContract(unittest.TestCase):

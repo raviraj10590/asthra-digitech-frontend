@@ -130,7 +130,7 @@ class TwoSizesAreNotACount(unittest.TestCase):
         self.assertTrue(f["asked_price"])
         self.assertEqual(f["customer_question"], b.QUESTION_SIZE_CHANGE)
         reply = b.compose_followup_reply(f, self.K, None, None)
-        self.assertIn("₹2,00,000", reply)                  # the 63 kVA price
+        self.assertIn("₹1,90,000", reply)                  # the 63 kVA price
         self.assertIn("engineer", reply)                   # exchange: a person, no promise
         self.assertNotIn("units", reply)
 

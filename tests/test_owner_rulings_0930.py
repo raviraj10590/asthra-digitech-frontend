@@ -44,7 +44,7 @@ class AskingForALowerPrice(unittest.TestCase):
 
     def test_a_plain_price_question_still_gets_the_price(self):
         f = b.parse_followup("rate eshtu", D, known=K)
-        self.assertIn("₹2,00,000 + GST", b.compose_followup_reply(f, K))
+        self.assertIn("₹1,90,000 + GST", b.compose_followup_reply(f, K))
         self.assertNotIn("PRICE NEGOTIATION", b.compose_followup_alert("9", f, "rate eshtu", K))
 
     def test_no_discount_is_ever_offered(self):

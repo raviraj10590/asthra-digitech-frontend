@@ -54,7 +54,7 @@ class RepeatedSizeIsNotThanked(unittest.TestCase):
         f = b.parse_followup("25 kva price sir", (b.AWAITING_PURPOSE,), known=k)
         reply = b.compose_followup_reply(f, k)
         self.assertNotIn("*25 kVA* ಗಮನಿಸಿದ್ದೇವೆ", reply)
-        self.assertIn("₹95,000 + GST", reply)
+        self.assertIn("₹85,000 + GST", reply)
 
     def test_a_new_size_is_still_thanked(self):
         k = {"capacity_kva": 25}
