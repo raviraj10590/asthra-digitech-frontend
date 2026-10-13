@@ -921,7 +921,10 @@ def fetch_context(phone: str) -> dict:
                 # 45 rows because this window also carries system markers
                 # (BOT_PAUSED, PENDING_CONFIRM, OWNER_MEMORY::, alert flags);
                 # after filtering those out, ~20 real turns still remain.
-                "limit":  "45",
+                # 60 since 2026-10-13: each reply now also writes one
+                # REPLY_CLAIM:: system row (claim_reply), so the same ~20 real
+                # turns need a slightly wider window.
+                "limit":  "60",
                 "select": "role,content,created_at",
             },
             timeout=5,
@@ -2876,6 +2879,54 @@ def send_text(to: str, message: str):
     if _send_error is not None:
         raise _send_error
     return _result
+
+
+# ── ONE REPLY, ONCE ────────────────────────────────────────────────────────
+#
+# Two messages from one customer in the same second each get their own
+# invocation, and both composed the same reply: on 2026-10-12 live ...9703
+# sent WhatsApp's canned opener and "Hello sar" together and received
+# "ನಮಸ್ಕಾರ Santhosh ಅವರೇ … ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?" twice (owner, 2026-10-13:
+# "4 mattu 5 maadu").
+#
+# No waiting — a customer reply takes ~5 s and must not get slower. Before a
+# reply goes out, the turn writes a small system row naming the reply (a hash,
+# never its text) and reads back every such row of the last few seconds. Row
+# ids are assigned in insert order, so exactly one of two simultaneous turns
+# sees its own row first: that one sends, the other stays quiet. Whatever
+# order the two inserts and reads happen in, they cannot both be first.
+#
+# FAILS OPEN. A reply sent twice is a small harm; a reply not sent because
+# the guard broke is a lost customer. Any error here means "send".
+REPLY_CLAIM = "REPLY_CLAIM::"
+REPLY_CLAIM_WINDOW_S = int(os.environ.get("REPLY_CLAIM_WINDOW_S", "20"))
+
+
+def claim_reply(sender: str, reply: str) -> bool:
+    """True when this turn may send `reply`; False when another turn claimed
+    the identical reply to this customer within the window."""
+    if REPLY_CLAIM_WINDOW_S <= 0 or not (reply or "").strip():
+        return True
+    content = REPLY_CLAIM + hashlib.sha1(reply.strip().encode("utf-8")).hexdigest()[:16]
+    try:
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+                          headers=_supa_headers("return=representation"),
+                          json=[{"phone": sender, "role": "system", "content": content}], timeout=4)
+        if not r.ok:
+            return True
+        mine = (r.json() or [{}])[0].get("id")
+        since = (datetime.now(timezone.utc) - timedelta(seconds=REPLY_CLAIM_WINDOW_S)).isoformat()
+        q = requests.get(f"{SUPABASE_URL}/rest/v1/whatsapp_messages", headers=_supa_headers(),
+                         params={"phone": f"eq.{sender}", "role": "eq.system", "content": f"eq.{content}",
+                                 "created_at": f"gte.{since}", "select": "id", "order": "id.asc", "limit": "5"},
+                         timeout=4)
+        if not q.ok or mine is None:
+            return True
+        ids = [row.get("id") for row in q.json() or []]
+        return not ids or ids[0] == mine
+    except Exception as e:                       # fail open, type only (no URL, no body)
+        print(f"REPLY_CLAIM_FAILED type={type(e).__name__}")
+        return True
 
 
 def send_text_checked(to: str, message: str) -> dict:
@@ -6600,6 +6651,13 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # customer was asked something; for a reply that did not go out
             # that claim is false, and the next message would be read
             # against a question they never saw.
+            if not claim_reply(sender, _reply):
+                # Another turn is sending this exact reply right now.
+                _saved = save_messages([(sender, "user", user_text)])
+                warn_if_transcript_lost(sender, _saved, "Bairavi duplicate reply")
+                print(f"BAIRAVI_DUPLICATE_REPLY_SUPPRESSED phone=...{sender[-4:]}")
+                shadow_interpret(sender, user_text, ctx["history"], followup, known, message_id)
+                return
             _delivery = send_text_checked(sender, _reply)
             _delivered = _delivery["verdict"] == DELIVERY_ACCEPTED
             # The marker records WHAT this reply is still waiting for, so the

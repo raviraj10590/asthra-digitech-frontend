@@ -4172,6 +4172,14 @@ def takeover_decision(followup: dict, text: str, owner_texts, known: dict = None
         asked.append(("price", price_short_kn(merged_state(known, followup).get("capacity_kva"))))
     if followup.get("customer_question") in _ABOUT_QUESTIONS:
         asked.append(("about", answer_question_kn(followup["customer_question"], known)))
+    # "DETAILS" WHILE THE OWNER IS TALKING (owner, 2026-10-13: "4 mattu 5
+    # maadu"). Live ...5389, 2026-10-12: staff wrote "25 kva barutte", the
+    # customer answered "ditels heli" and "25 kva", and nobody replied — the
+    # bot was quiet because a person was talking, and the person had gone.
+    # The details card is all owner-stated facts, so it is safe to send; it
+    # replaces the single lines above rather than repeating them.
+    if asks_for_info(text):
+        return "answer", info_card_kn(merged_state(known, followup))
     if not asked:
         return "silent", "talking with the owner"
     todo = [answer for topic, answer in asked if not _OWNER_ANSWERED[topic].search(said)]

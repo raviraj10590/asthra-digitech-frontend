@@ -40,6 +40,10 @@ os.environ.setdefault("SUPABASE_KEY", "test-anon-key")
 # The owner burst wait (api/webhook.py OWNER_BURST_SECONDS) sleeps and re-reads
 # the transcript; off for the suite, and its own tests turn it on with mocks.
 os.environ.setdefault("OWNER_BURST_SECONDS", "0")
+# The duplicate-reply claim (api/webhook.py claim_reply) writes and reads a
+# real row; the harness's fake database does not model it. Off here, tested on
+# its own in tests/test_reply_claim.py.
+os.environ.setdefault("REPLY_CLAIM_WINDOW_S", "0")
 
 
 # THE CALL-HOURS CLOCK (2026-10-03). The live pipeline promises "call now"
