@@ -127,3 +127,38 @@ class QuestionsAfterThePrice(unittest.TestCase):
         f, reply = turn("price kadime madi", (), self.K63)
         self.assertNotEqual(f["customer_question"], b.QUESTION_RANGE)
         self.assertIn("sales ತಂಡ", reply)
+
+
+class NotEveryMessageIsAnEnquiry(unittest.TestCase):
+    """2026-10-13, the day after the price message."""
+    CHAIN = ("ಪ್ರಧಾನಿ ಮೋದಿ: ದಸರಾ ಸಂದರ್ಭದಲ್ಲಿ ಎಲ್ಲಾ ಭಾರತೀಯ ನಾಗರಿಕರಿಗೆ ₹10,000 ಮೊತ್ತದ ನಗದು ನೆರವು\n"
+             "ಈ ವರ್ಷದ ದಸರಾ ಆಚರಣೆಯ ಭಾಗವಾಗಿ, ಪ್ರಧಾನಿ ಮೋದಿ ಅವರು ಎಲ್ಲಾ ಭಾರತೀಯ ನಾಗರಿಕರಿಗೆ ₹10,000 ಮೊತ್ತದ "
+             "ನಗದು ನೆರವು ನೀಡಲು ಅನುಮೋದಿಸಿದ್ದಾರೆ.\nಪಡೆಯುವ ವಿಧಾನ: ಕೆಳಗಿನ ಲಿಂಕ್ ಮೇಲೆ ಕ್ಲಿಕ್ ಮಾಡಿ https://example-gift.xyz/abc")
+
+    def test_a_forwarded_chain_message_is_not_ten_units(self):
+        """...5212 forwarded this and got "10 units ಗಮನಿಸಿದ್ದೇವೆ" and a price."""
+        for awaiting in ((), (b.AWAITING_DELIVERY,), (b.AWAITING_QUANTITY,)):
+            f = b.parse_followup(self.CHAIN, awaiting, K)
+            self.assertIsNone(f["quantity"])
+            self.assertIsNone(f["delivery_location"])
+            self.assertTrue(b.is_silent_ack(f, awaiting))
+
+    def test_a_long_real_enquiry_with_a_link_is_still_read(self):
+        text = "nanna site location https://maps.app.goo.gl/xyz 63 kva transformer beku " + "hubli hattira " * 20
+        f = b.parse_followup(text, (), K)
+        self.assertFalse(f.get("forwarded"))
+        self.assertEqual(f["capacity_kva"], 63)
+
+    def test_money_is_not_a_count(self):
+        for t in ("budget ₹10,000 ide", "Rs 5000 advance kodtini", "2,00,000 alva"):
+            self.assertIsNone(turn(t)[0]["quantity"], t)
+        self.assertEqual(turn("10 units beku")[0]["quantity"], 10)
+
+    def test_a_reaction_gets_no_reply(self):
+        """...7377 reacted 🙏 twice and was sent the generic receipt four times."""
+        src = open(os.path.join(os.path.dirname(__file__), "..", "api", "webhook.py"), encoding="utf-8").read()
+        branch = src[src.index('elif msg_type == "reaction":'):]
+        branch = branch[:branch.index("else:")]
+        self.assertIn("self._ok(); return", branch)
+        for forbidden in ("send_text(", "notify_owner("):
+            self.assertNotIn(forbidden, branch)

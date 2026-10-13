@@ -8060,6 +8060,15 @@ class handler(BaseHTTPRequestHandler):
                 notify_owner(f"{emoji} {msg_type.capitalize()} from wa.me/{sender} — open WhatsApp to view. Reply personally!")
                 self._ok(); return
 
+            # ── Reaction (👍 / 🙏 on one of our messages, or removing one) ──
+            # Not a message: no reply, no owner alert. On 2026-10-13 live
+            # ...7377 reacted 🙏 to the price message, removed it and reacted
+            # again, and was sent "ನಿಮ್ಮ ಸಂದೇಶ ಸ್ವೀಕರಿಸಿದ್ದೇವೆ … ಟೈಪ್ ಮಾಡಿ" four times
+            # (and the owner four "unreadable message" alerts).
+            elif msg_type == "reaction":
+                print("💬 Reaction — no reply")
+                self._ok(); return
+
             else:
                 # Sticker, contact, location, poll, view-once, or Meta's
                 # "unsupported" type. We cannot read the content — so we must

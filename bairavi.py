@@ -2545,7 +2545,20 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     text = _EMOJI_MODIFIERS.sub("", text or "")
     if _CANNED_OPENER.match(text):
         text = "hi"
+    # A FORWARDED BROADCAST IS NOT AN ENQUIRY. Live ...5212, 2026-10-13: a
+    # chain message ("ಪ್ರಧಾನಿ ಮೋದಿ … ₹10,000 ನಗದು ನೆರವು … link") was read as an
+    # order for 10 units and answered with a price. Long, carries a link, and
+    # says nothing about a transformer: nothing is read from it and no reply
+    # is owed.
+    if len(text) > 200 and _LINK_RE.search(text) and not looks_like_transformer_enquiry(text):
+        out = _parse_followup("", awaiting, known)
+        out.update(is_ack=True, forwarded=True)
+        return out
     out = _parse_followup(text, awaiting, known)
+    # MONEY IS NOT A COUNT: "₹10,000" / "Rs 5000" / "2,00,000" are amounts.
+    q0 = out.get("quantity")
+    if q0 is not None and re.search(r"(?:₹|rs\.?|inr|ರೂ\.?)\s*%d(?!\d)|(?<!\d)%d,\d{2,3}(?!\d)" % (q0, q0), text, re.I):
+        out["quantity"] = None
     held = (known or {}).get("capacity_kva")
     if (out.get("capacity_kva") and held and out["capacity_kva"] != held
             and not out.get("asked_price") and _BARE_SIZE.match(text)):
@@ -2571,6 +2584,7 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
 
 
 _EMOJI_MODIFIERS = re.compile("[\U0001F3FB-\U0001F3FF\uFE0F]")
+_LINK_RE = re.compile(r"https?://|www\.|wa\.me/|bit\.ly/|t\.me/|\.(?:com|in|xyz|top|link|shop|online)/", re.I)
 _CANNED_OPENER = re.compile(r"^\s*hello from asthra digitech\b", re.I)
 _BARE_SIZE = re.compile(r"^\s*\d{2,4}\s*(?:k\.?\s?v\.?\s?a?|ಕೆವಿಎ|ಕೆ\.ವಿ\.ಎ)\.?\s*(?:tc|transformer|ಟಿಸಿ)?\s*[?.!]*\s*$", re.I)
 
@@ -4367,6 +4381,8 @@ def is_silent_ack(followup: dict, awaiting=()) -> bool:
     reply was not waiting for anything (an "Ok" to "same place?" is an
     answer, and is handled by delivery_same).
     """
+    if followup.get("forwarded"):
+        return True   # a forwarded chain message is never answered, whatever was pending
     if not followup.get("is_ack") or awaiting or followup.get("is_greeting"):
         return False  # a greeting is always greeted back
     read_something = any(followup.get(k) for k in (
