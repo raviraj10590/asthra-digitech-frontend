@@ -145,6 +145,11 @@ _SUBJECT = (
     # TC is a transformer centre. Kannada forms only; a bare English "tc"
     # is too short to match safely.
     "ಟಿ ಸಿ", "ಟಿಸಿ",
+    # SOLAR IS TRANSFORMER BUSINESS. Owner ruling, 2026-10-24, verbatim:
+    # "solar sha transformer releted irodu". A solar plant or a solar pump
+    # needs a transformer; "ಮನೆಗೆ ಸೋಲಾರ್ ಕರೆಂಟ್ ಲೈಟಿಗೆ ಬೇಕು" (live ...3608,
+    # 2026-10-22) was routed to Asthra and told "digital marketing only".
+    "solar", "ಸೋಲಾರ್",
 )
 _KVA_RE = re.compile(r"\b(\d{1,4})\s*k\s*v\s*a\b", re.IGNORECASE)
 
@@ -3394,7 +3399,23 @@ def callback_request(text: str, awaiting=()):
     return None
 
 
+# Said once in the opening reply to a solar enquiry: what we make for solar,
+# without claiming panels, inverters or a solar installation (none of those is
+# owner-stated).
+SOLAR_LINE_KN = "☀️ Solar plant / solar pump ಗೆ ಬೇಕಾದ *transformer* ಬಗ್ಗೆ ನಮ್ಮ engineer ಮಾರ್ಗದರ್ಶನ ನೀಡುತ್ತಾರೆ."
+
+
 def compose_reply(parsed: dict) -> str:
+    """The opening reply, plus the solar line when the enquiry is about solar."""
+    reply = _compose_opening_reply(parsed)
+    raw = (parsed.get("raw") or "").lower()
+    if ("solar" in raw or "ಸೋಲಾರ್" in raw) and SOLAR_LINE_KN not in reply:
+        head, sep, tail = reply.partition("\n\n")
+        reply = f"{head}\n{SOLAR_LINE_KN}{sep}{tail}" if sep else f"{reply}\n{SOLAR_LINE_KN}"
+    return reply
+
+
+def _compose_opening_reply(parsed: dict) -> str:
     """What the customer sees. No price, no lead time, no certification.
 
     Acknowledges what the form already told us rather than asking it again —

@@ -243,3 +243,22 @@ class LastTwentyCustomers1024(unittest.TestCase):
         act, reply = b.takeover_decision(f, "engineer number kodi", ("ok",), self.K)
         self.assertEqual(act, "answer")
         self.assertIn("73492 59369", reply)
+
+
+class SolarIsTransformerBusiness(unittest.TestCase):
+    """Owner 2026-10-24: "solar sha transformer releted irodu" (...3608's
+    "ಮನೆಗೆ ಸೋಲಾರ್ ಕರೆಂಟ್ ಲೈಟಿಗೆ ಬೇಕು" went to Asthra: "digital marketing only")."""
+
+    def test_solar_is_a_bairavi_enquiry(self):
+        for t in ("ಮನೆಗೆ ಸೋಲಾರ್ ಕರೆಂಟ್ ಲೈಟಿಗೆ ಬೇಕು.", "solar", "1 MW solar plant", "ಸೋಲಾರ್ ಬಗ್ಗೆ heli"):
+            self.assertTrue(b.looks_like_transformer_enquiry(t), t)
+
+    def test_the_opening_reply_says_what_we_make_for_solar(self):
+        reply = b.compose_reply(b.parse("ಮನೆಗೆ ಸೋಲಾರ್ ಕರೆಂಟ್ ಲೈಟಿಗೆ ಬೇಕು."))
+        self.assertIn(b.SOLAR_LINE_KN, reply)
+        self.assertEqual(reply.count(b.SOLAR_LINE_KN), 1)
+        for claim in ("panel", "ಪ್ಯಾನೆಲ್", "inverter", "installation ನಮ್ಮಿಂದ"):
+            self.assertNotIn(claim, reply)
+
+    def test_no_solar_line_without_solar(self):
+        self.assertNotIn(b.SOLAR_LINE_KN, b.compose_reply(b.parse("63 kva beku")))
