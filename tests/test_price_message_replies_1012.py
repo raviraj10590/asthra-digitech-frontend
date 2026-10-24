@@ -195,3 +195,51 @@ class LastTwentyOfOctober24(unittest.TestCase):
     def test_a_place_starting_with_the_same_letters_is_still_a_place(self):
         f, _ = turn("ಸರಿ ದೆಹಲಿ", (b.AWAITING_DELIVERY,))
         self.assertFalse(f["delivery_same"])
+
+
+class LastTwentyCustomers1024(unittest.TestCase):
+    """Analysis of the last 20 customers, 19–24 Oct 2026 (owner: "maadu")."""
+    K = {"capacity_kva": 63, "location": "tarikere", "name": "Nagaraj Koppala", "delivery_same": True,
+         "application": "AGRICULTURE"}
+
+    def test_purpose_as_typed(self):
+        for t in ("ಕೃಷೀ", "CRUSHY", "Crushy", "Ip", "ip set", "ಐಪಿ ಸೆಟ್"):
+            self.assertEqual(b._application_of(t.lower()), "AGRICULTURE", t)
+        for t in ("stone crusher", "ಕೃಷ್ಣಾಪುರ", "krishna", "tip top"):
+            self.assertIsNone(b._application_of(t.lower()), t)
+
+    def test_a_star_rating_is_not_a_count(self):
+        """...9786: "4 star" after the 63 kVA price → "4 units ಗಮನಿಸಿದ್ದೇವೆ"."""
+        f, reply = turn("4 star", (), self.K)
+        self.assertIsNone(f["quantity"])
+        self.assertIn("*25 kVA 4 Star* — *₹85,000 + GST*", reply)
+        self.assertIn("*63 kVA 5 Star* — *₹1,90,000 + GST*", reply)
+
+    def test_a_load_is_not_a_count(self):
+        """...4779: "Namige 5hp 6 motor run agutta" → "6 units ಗಮನಿಸಿದ್ದೇವೆ"."""
+        f, reply = turn("Namige 5hp 6 motor run agutta", (), self.K)
+        self.assertIsNone(f["quantity"])
+        self.assertIn("engineer", reply)
+        self.assertNotIn("units* ಗಮನಿಸ", reply)
+
+    def test_the_engineers_number(self):
+        """Owner 2026-10-24: "engineer number share maadu 7349259369" (...4233 said
+        "ನಾನೇ ಕಾಲ್ ಮಾಡುತ್ತೇನೆ ಓಕೆ ಬಾಯ್" and got the call menu again)."""
+        for t in ("ನಾನೇ ಕಾಲ್ ಮಾಡುತ್ತೇನೆ ಓಕೆ ಬಾಯ್", "engineer number kodi", "nimma number", "I will call you",
+                  "number kalisi"):
+            f, reply = turn(t, (), self.K)
+            self.assertIn("73492 59369", reply, t)
+            self.assertNotIn("1️⃣", reply, t)
+            self.assertEqual(b.awaiting_after(f, self.K), (), t)
+
+    def test_the_number_is_not_given_where_nobody_asked(self):
+        form = ("Hello! I filled out your form and would like to know more about your business.\n\n"
+                "Full name: X Y\nPhone number: +919999999999\nನಿಮಗೆ ಅಗತ್ಯವಿರುವ ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಸಾಮರ್ಥ್ಯ ಯಾವುದು?: A. 25 kVA")
+        for t in (form, "call me", "nanna number 9999999999", "10 units beku"):
+            self.assertFalse(turn(t, (), self.K)[0].get("wants_number"), t[:30])
+
+    def test_while_the_owner_is_talking_the_number_is_given_too(self):
+        f = b.parse_followup("engineer number kodi", (), self.K)
+        act, reply = b.takeover_decision(f, "engineer number kodi", ("ok",), self.K)
+        self.assertEqual(act, "answer")
+        self.assertIn("73492 59369", reply)

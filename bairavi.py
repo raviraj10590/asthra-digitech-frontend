@@ -809,6 +809,9 @@ _APPLICATIONS = (
     # ಕೃಷಿ as typed without the vowel sign ಋ (live ...3350, 2026-10-01: "ಕ್ರುಷಿ"
     # twice, unread both times, answered by a company introduction).
     ("ಕ್ರುಷಿ", "AGRICULTURE"), ("ಕ್ರಷಿ", "AGRICULTURE"),
+    # "ಕೃಷೀ" with a long ೀ (live ...1809, 2026-10-23, asked again) and the
+    # IP set (irrigation pump set) in Kannada letters.
+    ("ಕೃಷೀ", "AGRICULTURE"), ("ಐಪಿ ಸೆಟ್", "AGRICULTURE"), ("ಐ ಪಿ ಸೆಟ್", "AGRICULTURE"),
     # "Farming" (live ...4765, 2026-10-03, answering the purpose question).
     ("farming", "AGRICULTURE"), ("farmer", "AGRICULTURE"), ("ಫಾರ್ಮಿಂಗ್", "AGRICULTURE"),
     # THE SAME WORDS AS CUSTOMERS TYPE THEM, 2026-09-23. Two real answers to
@@ -862,6 +865,10 @@ DEFAULT_QUANTITY = 1
 # substring list above: it sits inside Devanahalli, Bevinahalli, every, never
 # and level, and would read half the map as a charging station.
 _APPLICATIONS_WHOLE_WORD = (("ev", "EV_CHARGING"),
+                            # "Ip" — IP set, the irrigation pump connection
+                            # (live ...9786, 2026-10-19, purpose asked again).
+                            ("ip", "AGRICULTURE"), ("ip set", "AGRICULTURE"), ("ipset", "AGRICULTURE"),
+                            ("i p set", "AGRICULTURE"), ("ಐಪಿ", "AGRICULTURE"),
                             # ಕೃಷಿ typed in English letters (2026-09-25:
                             # "Krushi", "Krusshi" were not understood and the
                             # purpose was asked twice more).
@@ -917,6 +924,8 @@ def _edit_distance(a: str, b: str, limit: int) -> int:
 # table cannot see a stem with "-ge" on it. Stems at a word start, any ending.
 _LATIN_FARM_STEM_RE = re.compile(
     r"(?<![a-z])(?:kr[ua]s{1,2}h?[iy]|krishi|kurshi|krash[iy]|raith|vyavasa|borewell)"
+    # "CRUSHY" (live ...9539, 2026-10-20) — but never a stone "crusher"
+    r"|(?<![a-z])crush[iy](?![a-z])"
     # "Krish" alone (live ...1945) — but never Krishna, Krishnarajpet
     r"|(?<![a-z])krish(?![a-z])")
 # "Beligalige niru hasalu" — to water the crops — is irrigation.
@@ -2575,6 +2584,17 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
         if q0 is not None and _BUDGET_RE.search(text) and str(q0) in _BUDGET_RE.search(text).group(0):
             out["quantity"] = None
         out["asked_discount"] = True
+    q1 = out.get("quantity")
+    if q1 is not None and _STAR_RE.search(text) and _STAR_RE.search(text).group(1) == str(q1):
+        out["quantity"] = None
+        out["customer_question"] = QUESTION_RANGE      # sizes, each with its star rating and price
+    m_load = _LOAD_COUNT_RE.search(text)
+    if q1 is not None and m_load and m_load.group(1) == str(q1):
+        out["quantity"] = None
+        out["customer_question"] = out.get("customer_question") or QUESTION_UNANSWERED
+    # Not a lead form (it carries "Phone number:" as a label) and not a long message.
+    if _WANTS_NUMBER_RE.search(text) and not is_lead_form(text) and len(text) < 200:
+        out["wants_number"] = True
     held = (known or {}).get("capacity_kva")
     if (out.get("capacity_kva") and held and out["capacity_kva"] != held
             and not out.get("asked_price") and _BARE_SIZE.match(text)):
@@ -2602,6 +2622,20 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
 _EMOJI_MODIFIERS = re.compile("[\U0001F3FB-\U0001F3FF\uFE0F]")
 # "63k" / "100 k" from a transformer buyer is a size, not ₹63,000: a bare "k"
 # after one of our sizes is left to the size reader.
+# THE ENGINEER'S NUMBER. Owner ruling, 2026-10-24, verbatim: "engineer number
+# share maadu 7349259369". Given when a customer says he will call himself or
+# asks for a number (live ...4233, 2026-10-23: "ನಾನೇ ಕಾಲ್ ಮಾಡುತ್ತೇನೆ ಓಕೆ ಬಾಯ್"
+# was sent the call-time menu again).
+ENGINEER_PHONE = "73492 59369"
+_WANTS_NUMBER_RE = re.compile(
+    r"ನಾನೇ\s*(?:ಕಾಲ್|ಕರೆ|ಫೋನ್)|naane?\s*(?:call|phone|kal)|nane\s*(?:call|phone)"
+    r"|i\s*(?:will|'ll|ll)\s*call|will\s*call\s*you|(?:your|nimma|nim|engineer|contact|phone|mobile|office)\s*(?:number|no\.?|nambar|ನಂಬರ್)"
+    r"|(?:number|nambar|ನಂಬರ್)\s*(?:kodi|kalisi|send|share|heli|beku|ಕೊಡಿ|ಕಳಿಸಿ|ಹೇಳಿ|ಬೇಕು)", re.I)
+# "4 star" is a rating, never four transformers (live ...9786, 2026-10-19).
+_STAR_RE = re.compile(r"(?<!\d)([1-5])\s*(?:star|stars|ಸ್ಟಾರ್|\*)", re.I)
+# "5hp 6 motor run agutta" is a LOAD question (live ...4779, 2026-10-22, read
+# as 6 units). Which kVA suits a load is the engineer's answer (rule 11).
+_LOAD_COUNT_RE = re.compile(r"(?<!\d)(\d{1,3})\s*(?:motors?|motar|moter|pumps?|pumpset|bore(?:well)?s?|lights?|fans?|ಮೋಟಾರ್|ಮೋಟರ್|ಪಂಪ್)", re.I)
 _BUDGET_RE = re.compile(r"(?<![\d.])(?:(?!(?:25|63|65|100|250|500)\s*k\b)\d{1,3}(?:\.\d)?\s*k\b"
                         r"|\d{1,3}(?:\.\d)?\s*(?:thousands?\b|ಸಾವಿರ|saavira|savira|lakhs?\b|lacs?\b|ಲಕ್ಷ|laksha))", re.I)
 _YES_IT_IS = re.compile(r"\s*(ಸರಿ|sari|ok|okay|yes|ಹೌದು|houdu|howdu)[\s/.,]+(?:ಇದೆ|ದೆ|ಅದೆ|ಐತೆ|ಆದೆ|ide|ade|aite|idhe)[\s.!]*", re.I)
@@ -3872,6 +3906,10 @@ def compose_followup_reply(followup: dict, known: dict = None, *args, **kwargs) 
     call. A lone thanks after "25" (live ...1709, 2026-10-01) read as the
     conversation being dropped; when a call time is on record it now says
     when the engineer will call."""
+    if followup.get("wants_number") and not followup.get("declined"):
+        name = display_name((known or {}).get("name"))
+        return (f"ಸರಿ{(' ' + name + ' ಅವರೇ') if name else ''} 🙏 ನಮ್ಮ engineer ನಂಬರ್: *{ENGINEER_PHONE}*\n"
+                "ನೇರವಾಗಿ ಕರೆ ಮಾಡಬಹುದು (ಬೆಳಿಗ್ಗೆ 9 ರಿಂದ ರಾತ್ರಿ 9).")
     n = followup.get("digit_unclear")
     if n:
         slot_n = (CALLBACK_NOW, CALLBACK_EVENING, CALLBACK_TOMORROW)[n - 1]
@@ -4199,6 +4237,8 @@ def takeover_decision(followup: dict, text: str, owner_texts, known: dict = None
     # bot was quiet because a person was talking, and the person had gone.
     # The details card is all owner-stated facts, so it is safe to send; it
     # replaces the single lines above rather than repeating them.
+    if followup.get("wants_number"):
+        return "answer", f"ನಮ್ಮ engineer ನಂಬರ್: *{ENGINEER_PHONE}* 🙏"
     if asks_for_info(text):
         return "answer", info_card_kn(merged_state(known, followup))
     if not asked:
@@ -4434,6 +4474,8 @@ def awaiting_after(followup: dict, known: dict = None) -> tuple:
     Kept separate so outstanding() keeps meaning "qualification still open".
     """
     if followup.get("declined"):
+        return ()
+    if followup.get("wants_number"):     # they will call; nothing is asked
         return ()
     if followup.get("digit_unclear"):    # asked "units, or a new call time?"
         return (AWAITING_CALLBACK, AWAITING_QUANTITY)

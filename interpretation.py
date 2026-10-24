@@ -230,6 +230,12 @@ def validate(interp, text: str, awaiting=(), known: dict = None) -> dict:
            # Brain's own rule, only when that question was asked.
            "call_time": brain["call_time"],
            "customer_question": None}
+    # Brain-owned, present only when the Brain's own rule fired (2026-10-24):
+    # the engineer's number was asked for; a bare menu digit is ambiguous; a
+    # forwarded chain message. Passed through like call_missed / asks_info.
+    for _k in ("wants_number", "digit_unclear", "forwarded"):
+        if _k in brain:
+            out[_k] = brain[_k]
     ambiguous = interp.get("ambiguous") or None
     correction = bool(interp.get("is_correction"))
     fields = interp.get("fields") or {}
@@ -378,7 +384,8 @@ import hashlib
 
 # ── versions — so results from different code are never mixed ────────────
 RECORD_VERSION = 2          # the row layout (1 was the Step 2 log line)
-VALIDATOR_VERSION = "v4"    # bump on ANY change to validate()'s rules
+VALIDATOR_VERSION = "v5"    # bump on ANY change to validate()'s rules
+                            # v5 (2026-10-24): wants_number/digit_unclear/forwarded passed through, Brain-owned
                             # v2 (2026-10-03): call_missed passed through, Brain-owned
                             # v3 (2026-10-03): asks_info passed through, Brain-owned
                             # v4 (2026-10-03): asks_scope/photo/documents passed through

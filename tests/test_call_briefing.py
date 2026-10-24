@@ -151,13 +151,19 @@ class TheNineOClockRun(unittest.TestCase):
             def raise_for_status(self):
                 if crm_fails: raise RuntimeError("crm down")
 
+        # Yesterday, not a fixed date: the briefing lists the last 14 days, so
+        # a fixed 2026-09-30 made this test fail from mid-October on.
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        asked = (_dt.now(_tz.utc) - _td(days=1)).replace(microsecond=0)
+        asked_at, replied_at = asked.isoformat(), (asked + _td(minutes=3)).isoformat()
+
         def get(url, params=None, **k):
             if "crm.example" in url:
                 if "clients" in url:
-                    return R([lead("919100005711", "Asked Now", "2026-09-30T14:00:00+00:00"),
+                    return R([lead("919100005711", "Asked Now", asked_at),
                               # an OWNER_PHONE number (tests/conftest.py) — never listed
-                              lead("910000000002", "Owner Phone", "2026-09-30T14:00:00+00:00")])
-                return R([bot("919100005711", "2026-09-30T14:03:00+00:00", NOW_OK)])
+                              lead("910000000002", "Owner Phone", asked_at)])
+                return R([bot("919100005711", replied_at, NOW_OK)])
             return R([])
 
         with mock.patch.object(d, "CRM_SUPABASE_URL", "https://crm.example"), \
