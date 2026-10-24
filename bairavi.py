@@ -2545,6 +2545,14 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     text = _EMOJI_MODIFIERS.sub("", text or "")
     if _CANNED_OPENER.match(text):
         text = "hi"
+    # "ಸರಿ ದೆ" — a voice note's "ಸರಿ ಇದೆ" as the transcriber heard it (live
+    # ...3316, 2026-10-24) — was not a yes, and typed it was stored as the
+    # delivery place. A yes followed only by "it is" (ide/ade/aite) is a yes.
+    m = _YES_IT_IS.fullmatch(text or "")
+    if m:
+        text = m.group(1)
+    # "63k" / "100 k" alone: one of our sizes with the "VA" left off.
+    text = re.sub(r"^\s*(25|63|65|100|250|500)\s*k\s*([?.!]*)\s*$", r"\1 kva\2", text, flags=re.I)
     # A FORWARDED BROADCAST IS NOT AN ENQUIRY. Live ...5212, 2026-10-13: a
     # chain message ("ಪ್ರಧಾನಿ ಮೋದಿ … ₹10,000 ನಗದು ನೆರವು … link") was read as an
     # order for 10 units and answered with a price. Long, carries a link, and
@@ -2559,6 +2567,14 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     q0 = out.get("quantity")
     if q0 is not None and re.search(r"(?:₹|rs\.?|inr|ರೂ\.?)\s*%d(?!\d)|(?<!\d)%d,\d{2,3}(?!\d)" % (q0, q0), text, re.I):
         out["quantity"] = None
+    # A FIGURE IN THOUSANDS OR LAKHS IS A BUDGET. "May be 45 k range" (live
+    # ...9365, 2026-10-24, holding the ₹85,000 price) was recorded as 45 units.
+    # It is what they want to pay: the price conversation the owner's sales
+    # team has, so it is answered as a discount ask is.
+    if _BUDGET_RE.search(text or ""):
+        if q0 is not None and _BUDGET_RE.search(text) and str(q0) in _BUDGET_RE.search(text).group(0):
+            out["quantity"] = None
+        out["asked_discount"] = True
     held = (known or {}).get("capacity_kva")
     if (out.get("capacity_kva") and held and out["capacity_kva"] != held
             and not out.get("asked_price") and _BARE_SIZE.match(text)):
@@ -2584,6 +2600,11 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
 
 
 _EMOJI_MODIFIERS = re.compile("[\U0001F3FB-\U0001F3FF\uFE0F]")
+# "63k" / "100 k" from a transformer buyer is a size, not ₹63,000: a bare "k"
+# after one of our sizes is left to the size reader.
+_BUDGET_RE = re.compile(r"(?<![\d.])(?:(?!(?:25|63|65|100|250|500)\s*k\b)\d{1,3}(?:\.\d)?\s*k\b"
+                        r"|\d{1,3}(?:\.\d)?\s*(?:thousands?\b|ಸಾವಿರ|saavira|savira|lakhs?\b|lacs?\b|ಲಕ್ಷ|laksha))", re.I)
+_YES_IT_IS = re.compile(r"\s*(ಸರಿ|sari|ok|okay|yes|ಹೌದು|houdu|howdu)[\s/.,]+(?:ಇದೆ|ದೆ|ಅದೆ|ಐತೆ|ಆದೆ|ide|ade|aite|idhe)[\s.!]*", re.I)
 _LINK_RE = re.compile(r"https?://|www\.|wa\.me/|bit\.ly/|t\.me/|\.(?:com|in|xyz|top|link|shop|online)/", re.I)
 _CANNED_OPENER = re.compile(r"^\s*hello from asthra digitech\b", re.I)
 _BARE_SIZE = re.compile(r"^\s*\d{2,4}\s*(?:k\.?\s?v\.?\s?a?|ಕೆವಿಎ|ಕೆ\.ವಿ\.ಎ)\.?\s*(?:tc|transformer|ಟಿಸಿ)?\s*[?.!]*\s*$", re.I)

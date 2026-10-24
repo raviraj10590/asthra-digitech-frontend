@@ -162,3 +162,36 @@ class NotEveryMessageIsAnEnquiry(unittest.TestCase):
         self.assertIn("self._ok(); return", branch)
         for forbidden in ("send_text(", "notify_owner("):
             self.assertNotIn(forbidden, branch)
+
+
+class LastTwentyOfOctober24(unittest.TestCase):
+    """Review of the last 20 customer messages, 2026-10-24."""
+
+    def test_a_budget_is_not_a_count(self):
+        """...9365 wrote "May be 45 k range" and was told "45 units ಗಮನಿಸಿದ್ದೇವೆ"."""
+        for t in ("May be 45 k range", "45k", "45 thousand", "budget 50k", "2 lakh", "1.5 lakh ge kodi"):
+            f, reply = turn(t)
+            self.assertIsNone(f["quantity"], t)
+            self.assertTrue(f["asked_discount"], t)
+            self.assertNotIn("units", reply)
+
+    def test_our_sizes_with_a_k_are_still_sizes(self):
+        for t, kva in (("63k", 63), ("100 k", 100), ("250k", 250)):
+            f, _ = turn(t)
+            self.assertFalse(f.get("asked_discount"), t)
+            self.assertEqual((f["capacity_kva"], f["quantity"]), (kva, None), t)
+
+    def test_counts_are_still_counts(self):
+        self.assertEqual(turn("10 units beku")[0]["quantity"], 10)
+        self.assertEqual(turn("2 beku")[0]["quantity"], 2)
+
+    def test_yes_it_is_from_a_voice_note(self):
+        """...3316's voice note came through as "ಸರಿ / ದೆ"; the place question was asked again."""
+        for t in ("ಸರಿ\nದೆ", "ಸರಿ ದೆ", "ಸರಿ ಅದೆ", "ok ide", "ಸರಿ ಇದೆ"):
+            f, reply = turn(t, (b.AWAITING_DELIVERY,))
+            self.assertTrue(f["delivery_same"], t)
+            self.assertIsNone(f["delivery_location"], t)
+
+    def test_a_place_starting_with_the_same_letters_is_still_a_place(self):
+        f, _ = turn("ಸರಿ ದೆಹಲಿ", (b.AWAITING_DELIVERY,))
+        self.assertFalse(f["delivery_same"])
