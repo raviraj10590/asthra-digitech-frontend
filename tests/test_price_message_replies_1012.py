@@ -285,3 +285,46 @@ class PriceAskedInEnglishLetters(unittest.TestCase):
             f, reply = turn(t)
             self.assertFalse(f["asked_price"], t)
             self.assertNotIn("₹", reply, t)
+
+
+class StressTestFindings1025(unittest.TestCase):
+    """2026-10-25 NaraRouter offline stress test: three replies the owner asked to fix ("mooru sari padisi")."""
+
+    def test_dry_type_gets_a_plain_no_never_a_price(self):
+        for t in ("dry type ideya", "Boss ನೀವು dry type transformer ನಿರ್ಮಿಸುವಿರಿ ಎಂದರೆ?", "drytype transformer madtira"):
+            f, reply = turn(t)
+            self.assertEqual(f["customer_question"], b.QUESTION_DRY_TYPE, t)
+            self.assertIn("dry-type ಸದ್ಯ ಲಭ್ಯವಿಲ್ಲ", reply, t)
+            self.assertIn("oil-immersed", reply, t)
+            self.assertNotIn("₹", reply, t)
+            self.assertFalse(b.should_ask_model(f, K), t)        # a model could offer one
+
+    def test_location_asked_in_kannada_letters(self):
+        for t in ("ಸ್ಥಳ ಹೇಳಿ", "address ಹೇಳಿ ಸರ್", "ನಿಮ್ಮ ಸ್ಥಳ ಎಲ್ಲಿ"):
+            f, reply = turn(t)
+            self.assertEqual(f["customer_question"], b.QUESTION_WHO, t)
+            self.assertIn("Kadaba", reply, t)
+
+    def test_bought_elsewhere_is_a_courteous_close(self):
+        for t in ("We found a second hand 50kVA near Rajaji Nagar cheaper", "already bought sir thanks",
+                  "bere kade tagondidivi"):
+            f, reply = turn(t)
+            self.assertTrue(f["declined"], t)
+            self.assertIn("ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು", reply, t)
+            self.assertNotIn("ಡೆಲಿವರಿ ಸ್ಥಳ", reply, t)
+
+    def test_asking_for_second_hand_is_not_a_refusal(self):
+        f, _ = turn("second hand ideya?")
+        self.assertFalse(f["declined"])
+
+
+class ButAndIfAreNotPrice(unittest.TestCase):
+    """ದರ (rate) was matched inside ಆದರೆ (but) / ಎಂದರೆ (if) / ಇದ್ದರೆ — any such message got the price list."""
+
+    def test_conditionals_are_not_price(self):
+        for t in ("ಆದರೆ ನಮಗೆ ಇನ್ನೂ ಸಮಯ ಇದೆ", "ಏನು ಎಂದರೆ ನಮ್ಮ ಊರು ದೂರ", "ಇದ್ದರೆ ಕಳಿಸಿ"):
+            self.assertFalse(b.parse_followup(t, (), K)["asked_price"], t)
+
+    def test_the_rate_word_still_is(self):
+        for t in ("ದರ ಎಷ್ಟು", "ದರವು ಎಷ್ಟು", "100 kva ದರಕ್ಕೆ ಬರುತ್ತದೆ"):
+            self.assertTrue(b.parse_followup(t, (), K)["asked_price"], t)

@@ -1129,6 +1129,12 @@ def _mentions(low: str, words) -> bool:
         if w.isascii():
             if re.search(rf"(?<![a-z]){re.escape(w)}(?:e?s)?(?![a-z])", low):
                 return True
+        elif w == "ದರ":
+            # "ದರ" (rate) sits inside the commonest conditionals, ಆದರೆ (but) / ಎಂದರೆ (if) / ಇದ್ದರೆ —
+            # found 2026-10-25 when "dry type ನಿರ್ಮಿಸುವಿರಿ ಎಂದರೆ?" got the price list. The rate word
+            # itself inflects ದರವು / ದರದ / ದರಕ್ಕೆ, never ದರೆ.
+            if re.search("ದರ(?![ೆೇ])", low):
+                return True
         elif w in low:
             return True
     return False
@@ -1282,6 +1288,10 @@ def with_gst(amount: int) -> int:
 # question again (live ...0033, 2026-10-02). A short "why" is about the
 # question we just asked; the answer says what it is for.
 QUESTION_WHY = "why_asked"
+# "Dry type ideya?" (2026-10-25 stress test) got the 25 kVA price. Owner 2026-10-05: "we dont have dry
+# type now" — say so plainly and name what we do make; never offer it.
+QUESTION_DRY_TYPE = "dry_type"
+_ASK_DRY_TYPE = ("dry type", "dry-type", "drytype", "dry transformer", "ಡ್ರೈ ಟೈಪ್", "ಡ್ರೈ-ಟೈಪ್", "ಡ್ರೈ ಟ್ರಾನ್ಸ್")
 _WHY_WORDS = ("yake", "yaake", "yak", "ಯಾಕೆ", "ಯಾಕ್", "why")
 _WHY_ANSWER_KN = {
     "delivery": "ಡೆಲಿವರಿ ಸ್ಥಳ ತಿಳಿದರೆ ಸಾಗಣೆ (transport) ಮತ್ತು ಡೆಲಿವರಿ ಸಮಯವನ್ನು "
@@ -1342,7 +1352,10 @@ _ASK_WHO = ("who are you", "who is this", "your company", "about your company",
             # (live ...8578: "Location" got the call-time menu).
             "nimma location", "nim location", "nimma address", "nim address", "your location",
             "factory elli", "office elli", "location elli", "location kalisi", "address kalisi",
-            "location send", "send location", "location heli", "address heli", "ನಿಮ್ಮ ಲೊಕೇಶನ್")
+            "location send", "send location", "location heli", "address heli", "ನಿಮ್ಮ ಲೊಕೇಶನ್",
+            # Kannada letters (2026-10-25 stress test: "ಸ್ಥಳ ಹೇಳಿ", "address ಹೇಳಿ" went to the engineer)
+            "address ಹೇಳಿ", "location ಹೇಳಿ", "ಸ್ಥಳ ಹೇಳಿ", "ನಿಮ್ಮ ಸ್ಥಳ", "ವಿಳಾಸ ಹೇಳಿ", "ಅಡ್ರೆಸ್ ಹೇಳಿ",
+            "ಎಲ್ಲಿ ಇದ್ದೀರಿ", "ಎಲ್ಲಿದ್ದೀರಿ", "address kodi", "address please", "address pls")
 # The same question as ONE bare word. Whole message only: "location" inside a
 # longer message is usually the customer giving theirs.
 _ASK_WHERE_BARE = ("location", "loction", "locatin", "lokation", "address", "adress", "addres",
@@ -1389,6 +1402,8 @@ def customer_question(text: str):
     if (0 < len(_short) <= 3 and any(w in _ASK_WHERE_BARE for w in _short)
             and all(w in _ASK_WHERE_BARE or w in _ASK_WHERE_FILLER for w in _short)):
         return QUESTION_WHO
+    if any(w in low for w in _ASK_DRY_TYPE):
+        return QUESTION_DRY_TYPE
     for tag, vocabulary in ((QUESTION_NAME, _ASK_NAME),
                             (QUESTION_DELIVERY_AREA, _ASK_DELIVERY_AREA),
                             (QUESTION_RANGE, _ASK_RANGE),
@@ -1428,6 +1443,9 @@ def answer_question_kn(tag, known: dict = None) -> str:
                 + _range_line_kn() + "\n" + value_line_kn((known or {}).get("capacity_kva")))
     if tag == QUESTION_RANGE:
         return _range_line_kn()
+    if tag == QUESTION_DRY_TYPE:
+        return ("ಈಗ ನಾವು *oil-immersed (ONAN)* distribution transformer ಮಾತ್ರ ತಯಾರಿಸುತ್ತೇವೆ — "
+                "dry-type ಸದ್ಯ ಲಭ್ಯವಿಲ್ಲ.\n" + _range_line_kn())
     if tag == QUESTION_DELIVERY_TIME:
         return _DELIVERY_TIME_KN
     if tag == QUESTION_GST:
@@ -1528,6 +1546,9 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
         return False
     # The owner's ruling is the answer; a model paraphrase could add a number.
     if followup.get("customer_question") == QUESTION_DELIVERY_TIME:
+        return False
+    # "No dry-type" is the owner's fact (2026-10-05); a model could offer one.
+    if followup.get("customer_question") == QUESTION_DRY_TYPE:
         return False
     # THE OTHER QUESTIONS GO TO THE MODEL FIRST, and their evidenced answers
     # become the fallback rather than the first responder. A keyword match is
@@ -2465,11 +2486,21 @@ _BEDA_RE = re.compile(
     r"(?:\s*(?:ಸರ್|sir|sar|ರಿ|ri|ಬಿಡಿ|bidi|bidri))?")
 
 
+# "We found a second hand 50kVA ... cheaper", "already bought" (2026-10-25 stress test): they are not
+# buying from us, yet the bot asked for the delivery place. Searched anywhere in the message, but only
+# past-tense "bought / found cheaper" — "second hand ideya?" ASKS for one and is not a refusal.
+_BOUGHT_ELSEWHERE_RE = re.compile(
+    r"already\s*(?:bought|purchased|got|took|ordered|fixed)|bought\s*(?:it\s*|one\s*)?(?:from|elsewhere)"
+    r"|found\s*(?:a|one|another)?\b[^.?!]{0,50}cheaper|got\s*(?:it|one)?\s*(?:from\s*)?(?:another|other|elsewhere)"
+    r"|went\s*(?:with|elsewhere)|ಬೇರೆ\s*ಕಡೆ\s*(?:ತಗೊಂಡ|ತೆಗೆದುಕೊಂಡ|ಖರೀದಿ)|bere\s*kade\s*(?:tagond|thagond|kharidi)"
+    r"|(?:tagondidivi|thagondidivi|tagondaytu|thagondaytu|ತಗೊಂಡಿದ್ದೀವಿ|ತಗೊಂಡಾಯ್ತು)")
+
+
 def is_decline(text: str) -> bool:
     bare = re.sub(r"[^\w\s\u0C80-\u0CFF]", " ", (text or "").lower())
     bare = " ".join(bare.split())
     return (bare in _DECLINES or bool(_PRICE_DECLINE_RE.fullmatch(bare))
-            or bool(_BEDA_RE.fullmatch(bare)))
+            or bool(_BEDA_RE.fullmatch(bare)) or bool(_BOUGHT_ELSEWHERE_RE.search((text or "").lower())))
 
 
 # ── A SHARED WHATSAPP LOCATION ────────────────────────────────────────────
@@ -2836,6 +2867,8 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "asks_photo": asks_photo(text),
             "asks_documents": asks_documents(text),
             "declined": is_decline(text),
+            # The size they bought ELSEWHERE is not their requirement from us: close, do not qualify.
+            "bought_elsewhere": bool(_BOUGHT_ELSEWHERE_RE.search((text or "").lower())),
             "escom_area": None,
             "commercial_intent": commercial_intent(text),
             # None when no approval question was asked, which leaves every
@@ -4015,7 +4048,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         got.append("ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳಕ್ಕೆ")
 
     _state_now = merged_state(known, followup)
-    if followup.get("declined") and not got and not followup.get("asked_discount"):
+    if followup.get("declined") and (not got or followup.get("bought_elsewhere")) and not followup.get("asked_discount"):
         # A courteous close, once. No more questions; the owner is told why.
         _who = display_name(_state_now.get("name"))
         return (("ಸರಿ " + _who + " ಅವರೇ 🙏" if _who else "ಸರಿ 🙏")

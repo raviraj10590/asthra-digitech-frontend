@@ -180,10 +180,11 @@ class Versions(unittest.TestCase):
     def test_validator_version_is_an_explicit_constant(self):
         # v4 (2026-10-03): call_missed, asks_info, asks_scope/photo/documents
         # passed through, Brain-owned. v5 (2026-10-24): wants_number,
-        # digit_unclear, forwarded passed through, Brain-owned.
-        self.assertEqual(I.VALIDATOR_VERSION, "v5")
+        # digit_unclear, forwarded passed through, Brain-owned. v6 (2026-10-25):
+        # bought_elsewhere passed through, Brain-owned.
+        self.assertEqual(I.VALIDATOR_VERSION, "v6")
         src = open(os.path.join(ROOT, "interpretation.py")).read()
-        self.assertIn('VALIDATOR_VERSION = "v5"', src)
+        self.assertIn('VALIDATOR_VERSION = "v6"', src)
 
     def test_prompt_version_is_the_template_not_the_context(self):
         self.assertRegex(I.prompt_version(), r"^[0-9a-f]{12}$")
