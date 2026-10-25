@@ -1106,10 +1106,21 @@ _PRICE_ASK = _PRICE_WORDS + _QUOTATION_WORDS
 # so "bele" counts only next to a how-much word, a "tell me" or a "?", and a bare how-much word only
 # when it ENDS a message that names a kVA size.
 _HOW_MUCH = r"(?:y?e+s+h?tu|yeshtu|eet+h?a?u?|en+t+h?a)"
+# 2026-10-26, the 1,224-message stress test (price asks failed 40% of the time) widened this, still
+# anchored to money or to a named kVA size so "eshtu dina" (how many days) and "ಎಷ್ಟು units" stay out:
+#   "25 kva ... ಎಷ್ಟು bele" — the how-much word in Kannada letters next to Latin "bele";
+#   "25kva bele", "65 kva bele" — "bele" right after a size is the price, not ಬೆಳೆ (crop);
+#   "estu agutte", "yestagutte", "yestu kodbeku" — "how much will it come to / must I pay";
+#   "25kva ಎಷ್ಟು", "25kva transformer eshtu beku?" — a size, then how-much ending the message.
+_HOW_MUCH_KN = r"(?:ಎಷ್ಟು|ಯೆಷ್ಟು|ಯಷ್ಟು)"
+_SIZE = r"\d+\s*(?:k\.?v\.?a|kv\b|ಕೆವಿಎ)"
 _LATIN_PRICE_RE = re.compile(
-    rf"(?<![a-z])be+l[ae]+(?![a-z])\s*(?:{_HOW_MUCH}(?![a-z])|heli|helu|hel[ia]|kodi|ye\b|\?)"
-    rf"|(?<![a-z]){_HOW_MUCH}(?![a-z])\s*be+l[ae]+(?![a-z])"
-    rf"|\d+\s*k\.?v\.?a[^\n]{{0,30}}(?<![a-z]){_HOW_MUCH}\s*\??\s*$")
+    rf"(?<![a-z])be+l[ae]+(?![a-z])\s*(?:{_HOW_MUCH}(?![a-z])|{_HOW_MUCH_KN}|heli|helu|hel[ia]|kodi|ye\b|\?)"
+    rf"|(?:(?<![a-z]){_HOW_MUCH}(?![a-z])|{_HOW_MUCH_KN})\s*be+l[ae]+(?![a-z])"
+    rf"|(?<![a-z]){_HOW_MUCH}\s*a+gu?t+[ae]+(?:de)?(?![a-z])|(?<![a-z])y?e+s+h?ta+gu?t+[ae]+"
+    rf"|(?<![a-z]){_HOW_MUCH}\s*kod(?:a?bek|beku|bekaagutt)[a-z]*"
+    rf"|{_SIZE}[^\n]{{0,30}}(?<![a-z])be+l[ae]+(?![a-z])"
+    rf"|{_SIZE}[^\n]{{0,30}}(?:(?<![a-z]){_HOW_MUCH}|{_HOW_MUCH_KN})\s*(?:beku\s*)?\??\s*(?:sir|sar|ಸರ್)?\s*\??\s*$")
 
 
 def _asks_price_latin(low: str) -> bool:
@@ -2432,6 +2443,9 @@ _THANKS_FILLER = {"sir", "sar", "madam", "mam", "system", "ಸಿಸ್ಟಮ್
                   "ಅಣ್ಣ", "all", "for", "info", "information", "ಮಾಹಿತಿಗೆ", "🙏"}
 # "No thanks" / "not interested": a close, answered once, and flagged.
 _DECLINES = ("no thanks", "no thanx", "no thank you", "no thanku", "not interested",
+             # 2026-10-26 stress test
+             "interest illa", "intrest illa", "interest illa sir", "ಇಂಟರೆಸ್ಟ್ ಇಲ್ಲ", "avashyakate illa",
+             "ಅವಶ್ಯಕತೆ ಇಲ್ಲ", "agatya illa", "agathya illa", "ಅಗತ್ಯ ಇಲ್ಲ",
              "not intrested", "no need", "not needed", "beda", "ಬೇಡ", "nange beda",
              "ನಮಗೆ ಬೇಡ", "ಬೇಡ ಸರ್", "beda sir",
              # The opt-out the Meta-lead template offers ("ಬೇಡವಾದರೆ STOP ಎಂದು
@@ -2493,7 +2507,11 @@ _BOUGHT_ELSEWHERE_RE = re.compile(
     r"already\s*(?:bought|purchased|got|took|ordered|fixed)|bought\s*(?:it\s*|one\s*)?(?:from|elsewhere)"
     r"|found\s*(?:a|one|another)?\b[^.?!]{0,50}cheaper|got\s*(?:it|one)?\s*(?:from\s*)?(?:another|other|elsewhere)"
     r"|went\s*(?:with|elsewhere)|ಬೇರೆ\s*ಕಡೆ\s*(?:ತಗೊಂಡ|ತೆಗೆದುಕೊಂಡ|ಖರೀದಿ)|bere\s*kade\s*(?:tagond|thagond|kharidi)"
-    r"|(?:tagondidivi|thagondidivi|tagondaytu|thagondaytu|ತಗೊಂಡಿದ್ದೀವಿ|ತಗೊಂಡಾಯ್ತು)")
+    r"|(?:tagondidivi|thagondidivi|tagondaytu|thagondaytu|ತಗೊಂಡಿದ್ದೀವಿ|ತಗೊಂಡಾಯ್ತು)"
+    # 2026-10-26 stress test: the "o" spellings and "purchase madidivi" (we have bought), past tense only —
+    # "togondu bartini" (I will take it) is a yes and must not match.
+    r"|(?<![a-z])th?[ao]g?o?nd(?:id+ivi|id+ini|id+eve|a?y?i?tu|vi|ivi)(?![a-z])"
+    r"|bere\s*kade\s*th?ogond|purchase\s*mad(?:idivi|idini|idvi|idivu)")
 
 
 def is_decline(text: str) -> bool:

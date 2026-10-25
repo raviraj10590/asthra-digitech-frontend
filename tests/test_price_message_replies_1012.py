@@ -328,3 +328,34 @@ class ButAndIfAreNotPrice(unittest.TestCase):
     def test_the_rate_word_still_is(self):
         for t in ("ದರ ಎಷ್ಟು", "ದರವು ಎಷ್ಟು", "100 kva ದರಕ್ಕೆ ಬರುತ್ತದೆ"):
             self.assertTrue(b.parse_followup(t, (), K)["asked_price"], t)
+
+
+class StressTestFindings1026(unittest.TestCase):
+    """2026-10-26 NaraRouter stress test, 1,224 messages: price asks still failed ~40% of the time, and three
+    ways of saying "not interested / already bought" were missed (owner: "brain upgrade aagbeku fix maadu")."""
+
+    def test_more_ways_of_asking_the_price(self):
+        for t, kva, price in (("25kva bele", 25, "₹85,000"), ("65 kva bele", 63, "₹1,90,000"),
+                              ("25 kva estu agutte", 25, "₹85,000"), ("25 kva yestagutte sir", 25, "₹85,000"),
+                              ("63 kva ge eshtu aagutte", 63, "₹1,90,000"), ("25 kva ge yestu kodbeku", 25, "₹85,000"),
+                              ("25kva ಎಷ್ಟು", 25, "₹85,000"), ("25kva transformer eshtu beku?", 25, "₹85,000"),
+                              ("25 kva ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ಇನ್ನು ಎಷ್ಟು bele", 25, "₹85,000")):
+            f, reply = turn(t)
+            self.assertTrue(f["asked_price"], t)
+            self.assertEqual(f["capacity_kva"], kva, t)
+            self.assertIn(price, reply, t)
+
+    def test_counting_days_and_crops_still_are_not_price(self):
+        for t in ("eshtu dina aagutte delivery ge", "ಎಷ್ಟು units beku", "namma bele chennagide", "site ge eshtu dura",
+                  "eshtu varsha warranty", "63 kva transformer beku sir"):
+            self.assertFalse(b.parse_followup(t, (), K)["asked_price"], t)
+
+    def test_more_ways_of_saying_no(self):
+        for t in ("togondidivi", "bere kade togondvi", "purchase madidivi bere company inda", "interest illa"):
+            f, reply = turn(t)
+            self.assertTrue(f["declined"], t)
+            self.assertNotIn("ಡೆಲಿವರಿ ಸ್ಥಳ", reply, t)
+
+    def test_taking_it_later_is_not_a_no(self):
+        for t in ("togondu bartini", "nale togondu hogtini"):
+            self.assertFalse(b.parse_followup(t, (), K)["declined"], t)
