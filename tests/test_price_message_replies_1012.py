@@ -262,3 +262,26 @@ class SolarIsTransformerBusiness(unittest.TestCase):
 
     def test_no_solar_line_without_solar(self):
         self.assertNotIn(b.SOLAR_LINE_KN, b.compose_reply(b.parse("63 kva beku")))
+
+
+class PriceAskedInEnglishLetters(unittest.TestCase):
+    """2026-10-25 free-model stress test: Kannada price questions typed in English letters went to
+    the engineer instead of getting the list price."""
+
+    def test_bele_and_eshtu_get_the_price(self):
+        for t, kva, price in (("25 kva transformer eshtu?", 25, "₹85,000"), ("25 kva bele ye?", 25, "₹85,000"),
+                              ("100 kVA bele eshtu helu", 100, "₹2,50,000"),
+                              ("250 kVA transformer eetu bele?", 250, "₹4,95,000"),
+                              ("250kva transformer nu bele eetta?", 250, "₹4,95,000"),
+                              ("25kVA enta eshtu?", 25, "₹85,000")):
+            f, reply = turn(t)
+            self.assertTrue(f["asked_price"], t)
+            self.assertEqual(f["capacity_kva"], kva, t)
+            self.assertIn(price, reply, t)
+
+    def test_crop_and_days_are_not_price(self):
+        """Latin "bele" is also ಬೆಳೆ (crop); "eshtu dina" asks how many days."""
+        for t in ("bele ge transformer beku", "delivery eshtu dina", "63 kva eshtu dina beku", "100 kva transformer beku"):
+            f, reply = turn(t)
+            self.assertFalse(f["asked_price"], t)
+            self.assertNotIn("₹", reply, t)

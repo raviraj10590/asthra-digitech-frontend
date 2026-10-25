@@ -1099,6 +1099,22 @@ _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
 # meaning ("did they ask about money at all") is unchanged.
 _PRICE_ASK = _PRICE_WORDS + _QUOTATION_WORDS
 
+# PRICE ASKED IN KANNADA TYPED WITH ENGLISH LETTERS (2026-10-25, the free-model stress test:
+# "25 kva transformer eshtu?", "100 kVA bele eshtu helu", "250 kVA transformer eetu bele?" all went to
+# the engineer instead of getting the price; "ಬೆಲೆ ಎಷ್ಟು" in Kannada letters already worked).
+# Narrow on purpose: Latin "bele" alone is also ಬೆಳೆ (crop), and "eshtu dina" asks how many DAYS —
+# so "bele" counts only next to a how-much word, a "tell me" or a "?", and a bare how-much word only
+# when it ENDS a message that names a kVA size.
+_HOW_MUCH = r"(?:y?e+s+h?tu|yeshtu|eet+h?a?u?|en+t+h?a)"
+_LATIN_PRICE_RE = re.compile(
+    rf"(?<![a-z])be+l[ae]+(?![a-z])\s*(?:{_HOW_MUCH}(?![a-z])|heli|helu|hel[ia]|kodi|ye\b|\?)"
+    rf"|(?<![a-z]){_HOW_MUCH}(?![a-z])\s*be+l[ae]+(?![a-z])"
+    rf"|\d+\s*k\.?v\.?a[^\n]{{0,30}}(?<![a-z]){_HOW_MUCH}\s*\??\s*$")
+
+
+def _asks_price_latin(low: str) -> bool:
+    return bool(_LATIN_PRICE_RE.search(low or ""))
+
 
 def _mentions(low: str, words) -> bool:
     """Does the text contain one of these words?
@@ -1891,7 +1907,7 @@ def commercial_intent(text: str):
     low = (text or "").lower()
     if _mentions(low, _QUOTATION_WORDS):
         return QUOTATION_REQUEST
-    if _mentions(low, _PRICE_WORDS):
+    if _mentions(low, _PRICE_WORDS) or _asks_price_latin(low):
         return PRICE_REQUEST
     return None
 
@@ -2239,7 +2255,7 @@ def _is_place_like(raw: str) -> bool:
     # A question is not an answer — "Gujarat price?" asks something else.
     if "?" in raw:
         return False
-    if _mentions(low, _PRICE_ASK):
+    if _mentions(low, _PRICE_ASK) or _asks_price_latin(low):
         return False
     # An acknowledgement, a yes/no, or "same place" — the last of which is
     # already recorded as a confirmation rather than an address.
@@ -2810,7 +2826,7 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "is_greeting": is_greeting,
             # Unchanged meaning and unchanged readers: "did they raise money
             # at all". commercial_intent says WHICH ask it was.
-            "asked_price": _mentions(low, _PRICE_ASK),
+            "asked_price": _mentions(low, _PRICE_ASK) or _asks_price_latin(low),
             "asked_discount": asked_discount(text),
             "asks_call": asks_about_call(text),
             "asks_call_when": asks_call_time(text),
