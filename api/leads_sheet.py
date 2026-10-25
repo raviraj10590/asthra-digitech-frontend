@@ -12,7 +12,13 @@ Script (sheet/leads_sheet.gs) POSTs {id, note, by} here when someone types in
 the "Team note" column; the note is appended to that lead's CRM notes as
 "📝 06 Oct 15:40 Sheet (by): …" and comes back in the "Call notes" column on
 the next refresh. Only a lead of this source and owner can be written, and
-only its notes field.
+only its notes, pipeline stage and last-contacted time.
+
+STAGE FROM THE NOTE (owner, 2026-10-25: 308 of 318 leads still sat at "Lead"
+because nobody moved them after calling). A note is written after a call, so
+it means at least "Contacted"; clear words move it further (stage_from_note).
+The stage only moves forward, "Lost" needs explicit words, a "Won" lead is
+never touched, and a "Lost" lead comes back only when a note shows interest.
 
 The key (LEADS_SHEET_KEY) is the only gate, so it is long, random and compared
 in constant time; without it set the endpoint answers 503 rather than serving
@@ -137,22 +143,66 @@ def valid_note(body: dict):
     return lead_id, note, str(body.get("by") or "")
 
 
-def save_note(lead_id: str, line: str) -> bool:
-    """Append to THIS owner's lead of THIS source; False if there is no such lead."""
+# Order is the sales progression (CRM src/lib/leadStage.ts LEAD_STAGES); Lost is apart.
+STAGES = ("Lead", "Contacted", "Interested", "Site Visit", "Negotiation", "Won")
+# Checked top to bottom; the team writes fast Kanglish with typos ("not intrested", "cl back").
+_STAGE_RULES = (
+    ("Lost", re.compile(r"not\s*int\w*rest|no\s*interest|interest\s*illa|\bbeda\b|ಬೇಡ|no\s*need|not\s*requir|"
+                        r"cancel|already\s*(bought|purchas|took)|wrong\s*number", re.I)),
+    ("Won", re.compile(r"order\s*(confirm|placed|aay|done|final)|advance\s*(paid|receiv|band)|po\s*receiv|"
+                       r"payment\s*receiv", re.I)),
+    ("Negotiation", re.compile(r"quot\w*\s*(sent|kals|shared)|sent\s*(the\s*)?quot|negotiat|discount|"
+                               r"rate\s*kam|price\s*(less|kam|high|jasti)|final\s*price", re.I)),
+    ("Site Visit", re.compile(r"site\s*visit|visit\s*(madid|done|plan|fix|on|tomorrow|monday|next)|site\s*ge\s*hog", re.I)),
+    ("Interested", re.compile(r"interest|ಆಸಕ್ತಿ|estimat|quot|share\s*(the\s*)?(price|rate|details)|"
+                              r"send\s*(the\s*)?(price|rate|details)|need\s*\d+\s*kva", re.I)),
+)
+
+
+def stage_from_note(note: str) -> str:
+    """The stage a team note points to; any note at all means "Contacted"."""
+    for stage, rx in _STAGE_RULES:
+        if rx.search(note or ""):
+            return stage
+    return "Contacted"
+
+
+def next_stage(current: str, target: str):
+    """The stage to store, or None to leave it: forward only, never touch Won."""
+    current = current or "Lead"
+    if current == "Won" or target == current:
+        return None
+    rank = {s: i for i, s in enumerate(STAGES)}
+    if target == "Lost":
+        return target                       # explicit "not interested"
+    if current == "Lost":                   # only real interest brings a lost lead back
+        return target if rank[target] >= rank["Interested"] else None
+    return target if rank.get(target, 0) > rank.get(current, 0) else None
+
+
+def save_note(lead_id: str, line: str, note: str = ""):
+    """Append to THIS owner's lead of THIS source and move its stage if the note says so.
+
+    Returns None if there is no such lead, else the new stage (or "" when it stayed)."""
     headers = {"apikey": CRM_SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {CRM_SUPABASE_SERVICE_KEY}",
                "Content-Type": "application/json"}
     where = {"id": f"eq.{lead_id}", "user_id": f"eq.{CRM_OWNER_USER_ID}", "source": f"eq.{SOURCE}"}
     r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=headers, timeout=10,
-                     params=dict(where, select="notes"))
+                     params=dict(where, select="notes,pipeline_stage"))
     r.raise_for_status()
     rows = r.json()
     if not rows:
-        return False
+        return None
+    now = datetime.now(timezone.utc).isoformat()
     notes = ((rows[0].get("notes") or "").rstrip() + "\n" + line).strip()
+    patch = {"notes": notes, "updated_at": now, "last_contacted_at": now}
+    stage = next_stage(rows[0].get("pipeline_stage"), stage_from_note(note))
+    if stage:
+        patch["pipeline_stage"] = stage
     r = requests.patch(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=headers, timeout=10,
-                       params=where, json={"notes": notes, "updated_at": datetime.now(timezone.utc).isoformat()})
+                       params=where, json=patch)
     r.raise_for_status()
-    return True
+    return stage or ""
 
 
 def authorised(query: str) -> bool:
@@ -192,11 +242,12 @@ class handler(BaseHTTPRequestHandler):
             return self._send(400, "need id and note\n")
         lead_id, note, by = parsed
         try:
-            ok = save_note(lead_id, note_line(note, by, datetime.now(timezone.utc)))
+            result = save_note(lead_id, note_line(note, by, datetime.now(timezone.utc)), note)
         except Exception as e:
             print(f"LEADS_SHEET_NOTE_FAILED type={type(e).__name__}")
             return self._send(502, "CRM unreachable\n")
-        print(f"LEADS_SHEET_NOTE {'saved' if ok else 'no-such-lead'}")
+        ok = result is not None
+        print(f"LEADS_SHEET_NOTE {'saved' if ok else 'no-such-lead'}{f' stage={result}' if result else ''}")
         return self._send(200 if ok else 404, "saved\n" if ok else "no such lead\n")
 
     def _send(self, code: int, body: str, ctype: str = "text/plain; charset=utf-8"):

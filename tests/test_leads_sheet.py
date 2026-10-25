@@ -69,3 +69,38 @@ class TeamNotes(unittest.TestCase):
         out = list(csv.reader(io.StringIO(ls.to_csv([dict(Csv.ROW, id=self.ID)]))))
         self.assertEqual(out[0][-1], "CRM id")
         self.assertEqual(out[1][-1], self.ID)
+
+
+class StageFromNote(unittest.TestCase):
+    """Real team notes from the sheet (2026-10-06..24), typos and all."""
+    CASES = [
+        ("Did not anser the call", "Contacted"),
+        ("waiting for his cl back", "Contacted"),
+        ("bescom limit", "Contacted"),
+        ("estimation , cl back", "Interested"),
+        ("called customer he asked to share the quote for 250kva and 500kva", "Interested"),
+        ("not intrested", "Lost"),
+        ("Not interested, already bought", "Lost"),
+        ("interest illa", "Lost"),
+        ("quotation sent on whatsapp", "Negotiation"),
+        ("asking discount, rate kammi madi", "Negotiation"),
+        ("site visit monday", "Site Visit"),
+        ("order confirmed, advance paid", "Won"),
+    ]
+
+    def test_real_notes(self):
+        for note, want in self.CASES:
+            self.assertEqual(ls.stage_from_note(note), want, note)
+
+    def test_forward_only_and_won_is_final(self):
+        self.assertEqual(ls.next_stage("Lead", "Contacted"), "Contacted")
+        self.assertEqual(ls.next_stage(None, "Interested"), "Interested")
+        self.assertIsNone(ls.next_stage("Negotiation", "Contacted"))      # a later call never demotes
+        self.assertIsNone(ls.next_stage("Interested", "Interested"))
+        self.assertIsNone(ls.next_stage("Won", "Lost"))
+        self.assertIsNone(ls.next_stage("Won", "Contacted"))
+
+    def test_lost_needs_words_and_can_come_back(self):
+        self.assertEqual(ls.next_stage("Negotiation", "Lost"), "Lost")
+        self.assertEqual(ls.next_stage("Lost", "Interested"), "Interested")
+        self.assertIsNone(ls.next_stage("Lost", "Contacted"))           # "called again, no answer" keeps it lost
