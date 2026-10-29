@@ -874,7 +874,12 @@ def bairavi_arrived_meanwhile(phone: str) -> bool:
         return False
     for m in ctx.get("history") or []:
         c = m.get("content") or ""
-        if ((m.get("role") == "user" and bairavi.is_lead_form(c))
+        # A BAIRAVI form, not any form. The turn's own message is saved before
+        # this re-read, so "any lead form" matched the message being answered:
+        # every Asthra ad lead (2026-10-26..28, 7 of 8) was taken for a
+        # parallel Bairavi reply and got silence.
+        if ((m.get("role") == "user" and bairavi.is_lead_form(c)
+                and bairavi.looks_like_transformer_enquiry(c))
                 or (m.get("role") == "assistant" and c.startswith(bairavi.FLOW_MARKER))):
             return True
     return False
@@ -6530,6 +6535,20 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         save_message(sender, "user", user_text)  # keep the record
         print(f"⏸️ bot paused for {sender} — staying silent")
         return
+
+    # AN ASTHRA LEAD FORM IS A CONVERSATION, NOT A NEW CONTACT. It already says
+    # who they are, where, what business and what budget, and the ad promised a
+    # call — the services menu would ignore all of that (and the owner wants
+    # the customer side to stay a plain chat). So the form goes to the AI
+    # reply, which answers from its fields, as it did for the one Asthra lead
+    # who typed "Ok" after it. A transformer form is Bairavi's: it is routed
+    # further down and must not be claimed as an Asthra first contact.
+    if (is_new_contact and bairavi.is_lead_form(user_text)
+            and not bairavi.looks_like_transformer_enquiry(user_text)):
+        is_new_contact = False
+        # Still their first contact: claim it here, as the menu branch would
+        # have. Never raises, and it declines a second claim on its own.
+        record_first_seen(sender, datetime.now(timezone.utc), message_id)
 
     # ── Bairavi transformer enquiry ────────────────────────────────
     #
