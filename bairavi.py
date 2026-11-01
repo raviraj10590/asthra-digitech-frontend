@@ -522,9 +522,13 @@ def parse(text: str) -> dict:
 
 
 def _name_words(text) -> set:
-    """Lower-case words of 3+ letters, invisible characters removed."""
+    """Lower-case words of 3+ letters, invisible characters removed.
+
+    Kannada vowel signs and the virama are not \\w, so they are named
+    explicitly: without them "ರವಿಕುಮಾರ್" fell apart into one-letter pieces and
+    no Kannada name ever matched (live ...0143, 2026-10-30)."""
     clean = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", str(text or "")).lower()
-    return {w for w in re.findall(r"[^\W\d_]+", clean) if len(w) >= 3}
+    return {w for w in re.findall(r"(?:[^\W\d_]|[\u0C80-\u0CE3])+", clean) if len(w) >= 3}
 
 
 def _is_the_name(location, name) -> bool:
@@ -534,7 +538,11 @@ def _is_the_name(location, name) -> bool:
     shared = loc_w & name_w
     # Or it IS the whole name: "Jagadish" for "Jagadish R" (live ...0962).
     # One shared word of a longer name stays a place ("Shivakumar").
+    # Or the same name with different initials: "ರವಿಕುಮಾರ್. ಜಿ. ಎಮ್" for
+    # "ರವಿಕುಮಾರ್ ಜಿ. ಎಂ" — the long words agree, only the initials differ.
+    loc_long = {w for w in loc_w if len(w) > 3}
     return bool(loc_w) and (loc_w == name_w
+                            or (loc_long and loc_long == {w for w in name_w if len(w) > 3})
                             or (len(shared) >= 2 and 2 * len(shared) >= len(loc_w)))
 
 
@@ -576,6 +584,11 @@ def _form_location(value):
     if not value:
         return None, None
     low = value.lower()
+    # KEYBOARD NOISE. "Bkbb" (live ...6541, 2026-10-31) was offered back as
+    # "ಡೆಲಿವರಿ ಸ್ಥಳ: Bkbb — ಇದು ಸರಿಯೇ?". A short Latin answer with no vowel at
+    # all is not a word; Kannada and any word with a vowel are untouched.
+    if re.fullmatch(r"[b-df-hj-np-tv-z]{2,6}", low.strip(_TRIM)):
+        return None, None
     app = _application_of(low)
     if app and not _is_place_like(value.strip(_TRIM)):
         # "Agriculture Kanakagiri" (live ...2829): the purpose AND the place.
@@ -1012,7 +1025,7 @@ _SAME_PLACE = ("same place", "same address", "same location", "same",
 # "this/that same place|village|address" in either script — a pointer at the
 # place already held, never a place itself (see parse_followup).
 _SAME_PLACE_RE = re.compile(
-    r"(?:ಇದೇ|ಅದೇ)\s*(?:ಸ್ಥಳ|ಊರು|ಜಾಗ|ವಿಳಾಸ|ಅಡ್ರೆಸ್|ಲೊಕೇಶನ್)"
+    r"(?:ಇದೇ|ಇದೆ|ಅದೇ|ಅದೆ)\s*(?:ಸ್ಥಳ|ಊರು|ಜಾಗ|ವಿಳಾಸ|ಅಡ್ರೆಸ್|ಲೊಕೇಶನ್)"
     r"|(?<![a-z])(?:ide|idhe|ade|adhe|same)\s*(?:sthala|place|uru|ooru|jaga|address|location)(?![a-z])")
 # A message that OPENS with a taluk or district label: "ತಾಲೂಕ. ಮೂಡಲಗಿ",
 # "Tq Tikota", "dist vijayapura".
@@ -1026,7 +1039,17 @@ _PLACE_LABEL_RE = re.compile(
     r"|(?:uru|ooru|village|gram|place)\s*[.:\-–—]+\s*)(?=\S)", re.IGNORECASE)
 
 
+_TRAILING_FILLER_RE = re.compile(
+    r"(?:[\s,.]+(?:sir|sar|saar|ji|only|matra|maatra|ಸರ್|ಮಾತ್ರ))+[\s.!]*$", re.I)
+
+
 def _without_place_label(place):
+    # "Gadag distic sir" / "Shivamogga only" (live 2026-10-31) were stored
+    # with the courtesy word. It goes only when something is left.
+    if place:
+        trimmed = _TRAILING_FILLER_RE.sub("", place).strip()
+        if trimmed:
+            place = trimmed
     if not place:
         return place
     return _PLACE_LABEL_RE.sub("", place, count=1).strip() or place
@@ -1078,6 +1101,8 @@ _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
                 # "ರೇಟ್" was not read as a price question, and the model then
                 # told the customer it could not say the rate).
                 "ರೇಟ್", "ರೇಟು", "ಪ್ರೈಸ್",
+                # "ಇದೆ ಸ್ಥಳ ಅಮೌಂಟ್ ಎಷ್ಟು" (live ...1191, 2026-10-30) got no price.
+                "ಅಮೌಂಟ್", "ಅಮೌಂಟು",
                 # "ಹಣ" alone (live ...4599, 2026-10-01) got "the engineer will
                 # tell you about money" instead of the price.
                 "ಹಣ", "ದುಡ್ಡು", "duddu", "hana",
@@ -2160,6 +2185,15 @@ _NOT_A_PLACE_EXACT = (
     # still reads, because the comparison is exact.
     "layout", "site", "plot", "farm", "land", "village", "city", "town",
     "home", "house",
+    # "Formland" answering "where?" (live ...9663, 2026-10-31) and "ಹೊಲದಲ್ಲಿ"
+    # (in the field) in the form's place answer (...8092) — the field, not
+    # where it is.
+    "farmland", "farm land", "formland", "form land", "field", "garden",
+    "thota", "tota", "hola", "ಹೊಲ", "ಹೊಲದಲ್ಲಿ", "ಹೊಲಕ್ಕೆ", "ತೋಟ", "ತೋಟದಲ್ಲಿ",
+    "ತೋಟಕ್ಕೆ", "ಜಮೀನಿನಲ್ಲಿ", "ಜಮೀನಿಗೆ",
+    # The form's place answer "Details required" (...6214, 2026-10-31).
+    "details", "details required", "detail required", "details needed",
+    "info", "information", "ಮಾಹಿತಿ", "na", "n/a", "nil", "none",
     # ABUSE IS NOT AN ADDRESS — the same reasoning as a refusal to answer.
     "huccha", "huchcha", "ಹುಚ್ಚ", "mad", "stupid", "idiot", "waste",
     "fraud", "fake",
@@ -2460,7 +2494,9 @@ _AFFIRMATIONS = ("ok", "okay", "ok sir", "k", "kk", "okk", "okey", "oky", "okie"
                  "sare",
                  # "Hu" / "ಹೂಂ" — the spoken yes. "Hu sari" answering "is
                  # Shivamogga right?" was stored as the place (...5094, 2026-10-29).
-                 "hu", "huu", "hum", "ಹೂ", "ಹೂಂ", "ಹುಂ")
+                 "hu", "huu", "hum", "ಹೂ", "ಹೂಂ", "ಹುಂ",
+                 # Typed yes: "Ys" was stored as the place (stress test 2026-11-01).
+                 "ys", "yess", "yes yes", "ya", "yaa", "yah", "yea")
 
 
 # THANKS, WITH A WORD OR TWO AROUND IT. "ಧನ್ಯವಾದಗಳು ಸಿಸ್ಟಮ್" (live ...3554)
@@ -2495,7 +2531,7 @@ _PRICE_DECLINE_RE = re.compile(
 _AFFIRMATION_WORDS = {"ಸರಿ", "ಇದೆ", "ಇದಿ", "ಹೌದು", "ಅದೇ", "ಸರಿಯಾಗಿದೆ", "ok", "okay",
                       "yes", "sari", "idi", "ide", "houdu", "haudu", "howdu", "correct",
                       "right", "same", "sir", "sar", "ಸರ್", "ji", "adhe", "ade",
-                      "hu", "huu", "hum", "ಹೂ", "ಹೂಂ", "ಹುಂ"}
+                      "hu", "huu", "hum", "ಹೂ", "ಹೂಂ", "ಹುಂ", "ys", "yess", "ya", "yaa"}
 
 
 def _all_affirmation_words(bare: str) -> bool:
@@ -2895,7 +2931,13 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
         qty = None  # "2" / "2️⃣" answering "when should we call?" is option two, not two units
     # THE ANSWER TO "WHAT TIME SHALL WE CALL?" "11" is eleven o'clock, not 11
     # units; "ಸಂಜೆ" is a time, not a new choice of "this evening".
-    call_time = parse_call_time(text) if AWAITING_CALL_TIME in (awaiting or ()) else None
+    # A CLOCK TIME GIVEN AT THE 1/2/3 QUESTION. "4 gantege call madi" was
+    # read as 4 units and "ಒಂದು ಗಂಟೆಗೆ ಫೋನ್ ಮಾಡಿ" re-asked the menu (live
+    # 2026-10-31). Only an explicit time counts there: a bare "2" is option 2.
+    call_time = (parse_call_time(text)
+                 if AWAITING_CALL_TIME in (awaiting or ())
+                 or (AWAITING_CALLBACK in (awaiting or ()) and names_a_clock_time(text))
+                 else None)
     if call_time:
         qty, cap, callback = None, None, None
     return {"quantity": qty, "application": app, "capacity_kva": cap,
@@ -3309,12 +3351,41 @@ def _part_kn(hour: int) -> str:
     return "ಬೆಳಿಗ್ಗೆ" if hour < 12 else "ಮಧ್ಯಾಹ್ನ" if hour < 16 else "ಸಂಜೆ" if hour < 19 else "ರಾತ್ರಿ"
 
 
+# Hours said as words: "ಒಂದು ಗಂಟೆಗೆ ಫೋನ್ ಮಾಡಿ" (call at one o'clock, live
+# ...6541, 2026-10-31) was not read, and the 1/2/3 menu was asked again.
+_HOUR_WORDS = (
+    ("ಹನ್ನೆರಡು", 12), ("ಹನ್ನೊಂದು", 11), ("ಹತ್ತು", 10), ("ಒಂಬತ್ತು", 9), ("ಎಂಟು", 8),
+    ("ಏಳು", 7), ("ಆರು", 6), ("ಐದು", 5), ("ನಾಲ್ಕು", 4), ("ಮೂರು", 3), ("ಎರಡು", 2),
+    ("ಒಂದು", 1), ("hanneradu", 12), ("hannondu", 11), ("hattu", 10), ("ombattu", 9),
+    ("entu", 8), ("elu", 7), ("aaru", 6), ("aidu", 5), ("nalku", 4), ("mooru", 3),
+    ("eradu", 2), ("ondu", 1))
+_HOUR_WORD_RE = re.compile(
+    r"(?<![\w\u0C80-\u0CFF])(" + "|".join(w for w, _n in _HOUR_WORDS) + r")\s*(?=ಗಂಟೆ|gante|ghante)", re.I)
+# An explicit clock time: a figure with an hour word or am/pm, or a figure
+# next to a part of the day ("evening 5", "ಸಂಜೆ 4"). Used to read a time given
+# at the 1/2/3 question, where a bare "2" is still the menu choice.
+_EXPLICIT_CLOCK_RE = re.compile(
+    r"\d{1,2}(?:[:.]\d{2})?\s*(?:a\.?m|p\.?m|ಗಂಟೆ|gante|ghante|o'?clock)"
+    r"|(?:ಬೆಳಿಗ್ಗೆ|ಬೆಳಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ|ಸಂಜೆ|ರಾತ್ರಿ|morning|afternoon|evening|night|sanje|beligge|madhyahna)"
+    r"\s*\d{1,2}|\d{1,2}\s*(?:ಕ್ಕೆ\s*)?(?:ಬೆಳಿಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ|ಸಂಜೆ|morning|evening|afternoon)", re.I)
+
+
+def _hour_words_as_figures(text: str) -> str:
+    words = dict(_HOUR_WORDS)
+    return _HOUR_WORD_RE.sub(lambda m: str(words.get(m.group(1).lower(), words.get(m.group(1), ""))) + " ",
+                             text or "")
+
+
+def names_a_clock_time(text: str) -> bool:
+    return bool(_EXPLICIT_CLOCK_RE.search(_hour_words_as_figures(text).lower()))
+
+
 def parse_call_time(text: str):
     """The time a customer names for our call: {"hour", "label_kn",
     "label_en"}, or None. Read only as the answer to "what time shall we
     call?", and only from a short message, so a kVA or a quantity in a longer
     sentence is never taken for a time. Always inside call hours (9-21)."""
-    raw = (text or "").strip()
+    raw = _hour_words_as_figures(text).strip()
     low = raw.lower()
     if not raw or len(low.split()) > 6 or "kva" in low or "kv" in low.split():
         return None
@@ -4267,10 +4338,10 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         # when this one is answered; the marker still records every field
         # outstanding, so an answer to either is read.
         lines.append("\n" + missing[0])
-    elif (not _callback and not merged_state(known, followup).get("callback")
+    elif (not _callback and not call_settled(followup, known)
           and followup.get("callback_offered")):
         lines.append("\n" + CALLBACK_REMINDER)
-    elif not _callback and not merged_state(known, followup).get("callback"):
+    elif not _callback and not call_settled(followup, known):
         # EVERYTHING IS ANSWERED: the two terms that close a sale, once, and
         # the call — instead of "we will contact you", which asked nothing.
         _qty_known = merged_state(known, followup).get("quantity") is not None
@@ -4582,10 +4653,17 @@ def is_silent_ack(followup: dict, awaiting=()) -> bool:
     return not read_something
 
 
+def call_settled(followup: dict, known: dict = None) -> bool:
+    """A call slot (1/2/3) or a clock time is on record. A clock time given
+    instead of the menu ("4 gantege call madi") answers the menu too — it was
+    confirmed and then the 1/2/3 question asked again (stress test 2026-11-01)."""
+    state = merged_state(known, followup)
+    return bool(followup.get("callback") or state.get("callback") or state.get("call_time"))
+
+
 def offers_call_time(followup: dict, known: dict = None) -> bool:
     """A "when will you call?" with no call time chosen yet."""
-    return bool(followup.get("asks_call") and not followup.get("callback")
-                and not merged_state(known, followup).get("callback"))
+    return bool(followup.get("asks_call") and not call_settled(followup, known))
 
 
 def awaiting_after(followup: dict, known: dict = None) -> tuple:
@@ -4607,7 +4685,7 @@ def awaiting_after(followup: dict, known: dict = None) -> tuple:
         return (AWAITING_CALL_TIME,)
     if offers_call_time(followup, known):
         return (AWAITING_CALLBACK,)
-    if not out and not merged_state(known, followup).get("callback"):
+    if not out and not call_settled(followup, known):
         return (AWAITING_CALLBACK,)
     # ONLY THE QUESTION THAT WAS ASKED. One question per message (owner,
     # 2026-09-25), so the marker names that one — the hourly nudge must never
