@@ -64,7 +64,9 @@ class TheOwnMessageIsNotAParallelBairaviReply(unittest.TestCase):
 class AnAsthraFormGetsAnAnswer(unittest.TestCase):
     def check(self, form):
         t = Conversation(phone="918496046148").send(form)
-        self.assertEqual(t["sent"], ["ASTHRA_AI_REPLY"])
+        # Outside office hours the reply carries a working-hours line too.
+        self.assertEqual(len(t["sent"]), 1)
+        self.assertTrue(t["sent"][0].startswith("ASTHRA_AI_REPLY"))
         self.assertEqual(t["menu"], [])
         self.assertEqual([p for p, *_ in t["first_seen"]], ["918496046148"])
         return t

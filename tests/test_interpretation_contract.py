@@ -35,6 +35,7 @@ DOCUMENTED_DIVERGENCE = {
     ("quantity", "1"): "a bare number answering WHERE is ambiguous, not a quantity",
     ("quantity", "2"): "a bare number answering WHERE is ambiguous, not a quantity",
     ("quantity", "25"): "a bare number answering WHERE is ambiguous, not a quantity",
+    ("quantity", "10"): "a bare number answering WHERE is ambiguous, not a quantity",
     # ("delivery_location", "…delivery yavaga…") was documented here until
     # 2026-09-27, when the LIVE parser got the same rule (a delivery-time
     # question is not a place) — the two now agree, so it is no divergence.

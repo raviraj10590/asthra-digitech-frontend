@@ -1540,6 +1540,10 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
     if followup.get("declined"):
         return False
     # A call time is on record: confirming it is the answer, not a paraphrase.
+    # "10" answering "what time today?" was replaced by a MESCOM paragraph
+    # (...2302, 2026-10-27), so the customer never saw the time confirmed.
+    if followup.get("call_time"):
+        return False
     if followup.get("asks_call"):
         # Chosen: the time is restated. Not chosen: the times are offered.
         return False
@@ -2368,6 +2372,28 @@ def _is_place_like(raw: str) -> bool:
 _LIST_MARKER = re.compile(r"^\s*\(?\d{1,2}\s*[.)\]:-]\s*")
 
 
+def _address_up_to_marker(text: str):
+    """The address when the sentence goes on past it, or None.
+
+    "ಭದ್ರಾವತಿ ತಾಲೂಕಿನ ಅನವೇರಿ ಗ್ರಾಮ ತೋಟ ಕೆ ಬೇಕು" (Anaveri village, Bhadravati
+    taluk — needed for the farm; live ...7215, 2026-10-28) is one sentence, so
+    _bare_delivery_answer rejected it whole over "ತೋಟ ಕೆ ಬೇಕು" and the next
+    reply asked where to deliver. The address is everything up to the LAST
+    taluk / district / village word; what follows is kept only if nothing
+    follows at all.
+    """
+    words = (text or "").strip(_TRIM).split()
+    last = None
+    for i, word in enumerate(words):
+        low = word.lower().strip(",.")
+        if any(_label_matches(low, m) if m.isascii() else m in low for m in _ADMIN_MARKER):
+            last = i
+    if last is None or last == len(words) - 1:
+        return None
+    head = " ".join(words[:last + 1]).strip(_TRIM)
+    return head if _is_place_like(head) else None
+
+
 def _bare_delivery_answer(text: str):
     """The customer's own words as the delivery place, or None.
 
@@ -2431,7 +2457,10 @@ _AFFIRMATIONS = ("ok", "okay", "ok sir", "k", "kk", "okk", "okey", "oky", "okie"
                  "adhe", "ade", "ಅದೇ",
                  # "Sare" — ಸರಿ typed as it is said (live ...3188, 2026-10-02,
                  # recorded as the delivery place "Sare").
-                 "sare")
+                 "sare",
+                 # "Hu" / "ಹೂಂ" — the spoken yes. "Hu sari" answering "is
+                 # Shivamogga right?" was stored as the place (...5094, 2026-10-29).
+                 "hu", "huu", "hum", "ಹೂ", "ಹೂಂ", "ಹುಂ")
 
 
 # THANKS, WITH A WORD OR TWO AROUND IT. "ಧನ್ಯವಾದಗಳು ಸಿಸ್ಟಮ್" (live ...3554)
@@ -2465,7 +2494,8 @@ _PRICE_DECLINE_RE = re.compile(
 # A reply made only of yes-words is a yes, however they are combined.
 _AFFIRMATION_WORDS = {"ಸರಿ", "ಇದೆ", "ಇದಿ", "ಹೌದು", "ಅದೇ", "ಸರಿಯಾಗಿದೆ", "ok", "okay",
                       "yes", "sari", "idi", "ide", "houdu", "haudu", "howdu", "correct",
-                      "right", "same", "sir", "sar", "ಸರ್", "ji", "adhe", "ade"}
+                      "right", "same", "sir", "sar", "ಸರ್", "ji", "adhe", "ade",
+                      "hu", "huu", "hum", "ಹೂ", "ಹೂಂ", "ಹುಂ"}
 
 
 def _all_affirmation_words(bare: str) -> bool:
@@ -2478,7 +2508,11 @@ def _all_affirmation_words(bare: str) -> bool:
 # ("Kadur?") are deliberately absent.
 _QUESTION_WORD_RE = re.compile(
     r"(?<![a-z])(?:yesta|yestu|eshtu|estu|yestagutt|eshtagutt|estagutt)[a-z]*(?![a-z])"
-    r"|(?<![a-z])(?:yenu|enu|hege|yake|yavaga|yavag)(?![a-z])|ಎಷ್ಟು|ಏನು|ಹೇಗೆ|ಯಾಕೆ|ಯಾವಾಗ")
+    r"|(?<![a-z])(?:yenu|enu|hege|yake|yavaga|yavag)(?![a-z])|ಎಷ್ಟು|ಏನು|ಹೇಗೆ|ಯಾಕೆ|ಯಾವಾಗ"
+    # "-bahuda" — "may/can ...?" at the END of a word: "Ritaru karidisabahuda"
+    # (can farmers buy it?) was stored as the delivery place (...2302,
+    # 2026-10-27). Word-final only, so a place like "Bahudapura" still reads.
+    r"|(?<=[a-z])(?:bahuda|bahudha|bahudaa|bahude)(?![a-z])|ಬಹುದಾ|ಬಹುದೇ")
 
 
 def _is_thanks(bare: str) -> bool:
@@ -2826,7 +2860,7 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     if dl is None and not said_same and any(
             _label_matches(low, m) if m.isascii() else m in low
             for m in _ADMIN_MARKER):
-        dl = _bare_delivery_answer(text)
+        dl = _bare_delivery_answer(text) or _address_up_to_marker(text)
     # THE TALUK, ADDED TO THE VILLAGE. "ಊರು. ಬೀಸನಕೊಪ್ಪಾ" then "ತಾಲೂಕ. ಮೂಡಲಗಿ"
     # (live ...2096, 2026-10-05) — the second message is the rest of the same
     # address. It used to go to the model, and "taluk X" alone REPLACED the
