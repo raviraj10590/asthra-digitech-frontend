@@ -202,3 +202,22 @@ class OnlyTheBotsOwnBusinesses(unittest.TestCase):
         n = self._api()
         with mock.patch.object(n.requests, "get", side_effect=RuntimeError("down")):
             self.assertIsNone(n._business_of("91x", "https://crm", {}))
+
+
+class TheRealSchedulerRunsThem(unittest.TestCase):
+    """/api/nudge has no caller (no pg_cron on the Brain DB); the GitHub-driven
+    /api/recovery is what runs, so the deal sweeps ride there."""
+
+    def test_recovery_runs_both_sweeps_and_never_raises(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "recovery_api", os.path.join(os.path.dirname(__file__), "..", "api", "recovery.py"))
+        rec = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rec)
+        import requests
+        with mock.patch.object(requests, "get", side_effect=RuntimeError("offline")):
+            out = rec.deal_sweeps()
+        self.assertIn("asthra", out)
+        self.assertIn("learn", out)
+        with mock.patch("importlib.util.spec_from_file_location", side_effect=RuntimeError("x")):
+            self.assertEqual(rec.deal_sweeps(), {"error": "deal_sweeps_failed"})

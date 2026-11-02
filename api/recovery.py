@@ -83,6 +83,28 @@ def call_reminders(now=None) -> dict:
         return {"error": "call_reminders_failed"}
 
 
+def deal_sweeps(now=None) -> dict:
+    """The Asthra deal follow-ups and the auto-suggest offers (2026-11-02).
+
+    They live in api/nudge.py, built for an hourly pg_cron call that was never
+    created (the Brain database has no pg_cron), so nothing ran them. This is
+    the scheduler that really runs, so they ride here, as meta_leads does.
+    Both are idempotent (a follow-up's day marker, a suggestion's CRM message
+    id), so a run every few minutes sends nothing twice. Never raises."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "nudge_api", os.path.join(os.path.dirname(os.path.abspath(__file__)), "nudge.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        staff = mod.staff_numbers()
+        return {"asthra": mod.run_asthra_followups(now, staff=staff),
+                "learn": mod.run_learn_suggestions(now, staff=staff, notify=mod._notify_owner)}
+    except Exception as e:
+        print(f"RECOVERY_ENDPOINT deal_sweeps=failed type={type(e).__name__}")
+        return {"error": "deal_sweeps_failed"}
+
+
 def publish_health(counts) -> str:
     """After the sweep, push the Brain's aggregate health to the CRM's Brain
     Health page (brain_health.py). Best-effort: 'ok' / 'failed', never raises,
@@ -111,10 +133,12 @@ class handler(BaseHTTPRequestHandler):
         results = {str(k): int(v) for k, v in (counts or {}).items()}
         leads = meta_leads()
         reminders = call_reminders()
+        deals = deal_sweeps()
         health = publish_health(results)
         print("RECOVERY_ENDPOINT result=ok health=" + health + " " + json.dumps(results, sort_keys=True))
         return self._json(200, {"ok": True, "results": results, "health_snapshot": health,
-                                "meta_leads": leads, "call_reminders": reminders})
+                                "meta_leads": leads, "call_reminders": reminders,
+                                "deal_sweeps": deals})
 
     def _method_not_allowed(self):
         self._json(405, {"ok": False, "error": "method_not_allowed"}, allow="POST")
