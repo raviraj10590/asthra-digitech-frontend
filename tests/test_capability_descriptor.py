@@ -99,7 +99,10 @@ class ExistingToolsUnaffected(unittest.TestCase):
         # -> 27 with the owner CRM views (2026-10-04): `crm_owner_view`
         # (#today #followups #chats #pipeline #week, read-only) and
         # `crm_money_due` (#due, OWNER, read-only).
-        self.assertEqual(len(tools._HANDLERS), 27)
+        # -> 29 with the Asthra deal pair (2026-11-02): `asthra_send_price`
+        # (#price, OWNER, sends the owner's quotation) and
+        # `asthra_mark_advance` (#advance, OWNER, ends the follow-ups).
+        self.assertEqual(len(tools._HANDLERS), 29)
 
     def test_legacy_act_tool_validates_without_2G_fields(self):
         """A Phase-1 row carries no freshness/degradation and must stay valid."""

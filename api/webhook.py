@@ -93,6 +93,7 @@ SUPABASE_KEY    = (os.environ.get("SUPABASE_ANON_KEY")
 # Bearer header — the same normalisation bic/config.py already applies.
 import bairavi
 import call_log
+import asthra_deal
 import customer_brief
 import owner_crm
 import geo_escom
@@ -396,7 +397,15 @@ SYSTEM_PROMPT = """ನೀವು "ಆಸ್ತ್ರ AI" — Asthra DigiTech ಕ�
 ಭಾಷಾ ನಿಯಮ: ಕನ್ನಡ→ಕನ್ನಡ | English→English | ಹಿಂದಿ→ಹಿಂದಿ | Kanglish ("website beku", "price eshtu")→ಕನ್ನಡ ಲಿಪಿಯಲ್ಲಿ ಉತ್ತರ | Tech terms English ನಲ್ಲೇ ಇರಲಿ.
 ಎಲ್ಲಾ ಉಪಭಾಷೆ ಅರ್ಥಮಾಡಿ — ಬೆಂಗಳೂರು ("ಏನ್ ಬೇಕಿತ್ತು?"), ಮೈಸೂರು, ಉತ್ತರ ಕರ್ನಾಟಕ ("ಏನ್ ಬೇಕ್ರಿ?"), ಕರಾವಳಿ — Standard ಕನ್ನಡದಲ್ಲಿ ಉತ್ತರಿಸಿ.
 
-ಬೆಲೆ (PRICING): ಎಂದಿಗೂ fixed price ಕೊಡಬೇಡಿ. ಮೊದಲು ಕೇಳಿ: ಯಾವ ಸೇವೆ? ಎಷ್ಟು ಪುಟ/features? ಯಾವ ಭಾಷೆ? timeline? budget? — ಉತ್ತರ ಬಂದ ಮೇಲೆ ಅಂದಾಜು estimate.
+ಬೆಲೆ (PRICING) — owner's rules, exactly (2026-11-02):
+• Website Design: "₹3,000 ರಿಂದ ಶುರು" — final price depends on their requirement.
+• Social Media Management: basic package "ತಿಂಗಳಿಗೆ ₹30,000 ರಿಂದ ಶುರು".
+• Meta (Facebook/Instagram) ads: our management charge is 20% of the ad amount the customer gives (ಉದಾ: ₹10,000 ad budget → ₹2,000 charge). Minimum ad budget is ₹5,000 per month — NEVER say this on your own; ONLY if the customer says their budget is below ₹5,000, reply politely: "ಕ್ಷಮಿಸಿ sir, ನಮ್ಮ minimum budget ತಿಂಗಳಿಗೆ ₹5,000 ಇದೆ" and ask if they can start from ₹5,000.
+• GST/tax: NEVER mention GST or tax yourself. If asked: "ನಿಮ್ಮ requirement ಪ್ರಕಾರ official quotation ಕಳಿಸುತ್ತೇವೆ sir, ಅದರಲ್ಲಿ total amount ಸ್ಪಷ್ಟವಾಗಿ ಇರುತ್ತದೆ."
+• EVERY OTHER service (app, chatbot, WhatsApp automation, political campaign, branding, video, Google ads, etc.): NEVER give or guess a price. Learn their requirement in depth, ONE question per message: what work and for whom (business/political/shop) → size (pages, posts/videos per month, users, features) → what they already have (website/page/logo link) → when they need it (deadline/election date) → rough budget → who decides. When you know enough (or they stop answering), tell them: "ಧನ್ಯವಾದಗಳು sir 🙏 ನಿಮ್ಮ requirement ನಮ್ಮ team ಗೆ ಕಳಿಸಿದ್ದೇನೆ. ನಿಮಗೆ ಸರಿಯಾಗಿ ಹೊಂದುವ official quotation ರೆಡಿ ಮಾಡಿ ಬೇಗ ಕಳಿಸುತ್ತೇವೆ." and END that reply with this hidden line for the team (the customer never sees it), ONCE per requirement:
+[[QUOTE_READY]] Service: … | Kelasa: … | Hinde ide: … | Deadline: … | Budget: … | Nirdhaara: …
+(write what you learned; "—" for anything unknown). Do NOT say "MD will send the quote" — say "official quotation".
+• GOAL: the deal is done only when the customer pays the ADVANCE. Keep the chat moving toward that, politely: once a price is agreed, ask when they can pay the advance so work can start. Portfolio/past work → www.asthradigitech.com
 
 SALES INTELLIGENCE (strict):
 • Learn these naturally across the chat: ಹೆಸರು | ಕಂಪನಿ/ಸಂಸ್ಥೆ | ಬೇಕಾದ ಸೇವೆ + requirements | budget ಅಂದಾಜು | timeline. ONE question per message maximum. NEVER re-ask anything already answered in this chat.
@@ -2177,9 +2186,37 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
     messages.extend(_as_ai_messages(history[-keep:]))
     messages.append({"role": "user", "content": user_message})
 
-    return _generate_ai_reply(messages,
+    reply = _generate_ai_reply(messages,
         "ನಮಸ್ಕಾರ 🙏 ಸ್ವಲ್ಪ ತಾಂತ್ರಿಕ ಸಮಸ್ಯೆ ಆಗಿದೆ. "
         "ತುರ್ತಿಗಾಗಿ ಕರೆ ಮಾಡಿ: +91 88844 48141")
+    # THE VARADI (owner, 2026-11-02). The prompt has the model end its reply
+    # with QUOTE_MARKER + a requirement summary once it has learned what an
+    # unpriced service needs. The summary is the owner's; the customer gets
+    # only the text before it, on every path that sends this reply.
+    reply, summary = asthra_deal.split_quote_marker(reply)
+    if summary:
+        report_quote_request(phone, summary)
+    return reply
+
+
+def report_quote_request(phone: str, summary: str) -> None:
+    """Send the owner the requirement summary, once per customer per day.
+    Best-effort: a failed alert must never cost the customer their reply."""
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+            headers=_supa_headers(),
+            params={"select": "created_at", "phone": f"eq.{phone}", "role": "eq.system",
+                    "content": f"eq.{asthra_deal.QUOTE_REQUESTED}",
+                    "order": "created_at.desc", "limit": "1"},
+            timeout=5)
+        rows = r.json() if r.ok else []
+        if rows and _within_hours(rows[0].get("created_at", ""), 24):
+            return
+        save_message(phone, "system", asthra_deal.QUOTE_REQUESTED)
+        notify_owner(asthra_deal.quote_report(phone, summary))
+    except Exception as e:
+        print(f"QUOTE_REPORT_FAILED type={type(e).__name__} phone=...{phone[-4:]}")
 
 
 def _to_gemini_payload(messages: list, max_tokens: int = None) -> dict:
@@ -4891,6 +4928,8 @@ OWNER_COMMANDS_HELP = (
     "#pipeline — leads in each stage · #week — the last 7 days\n"
     "#due — unpaid invoices (owner only)\n"
     "#calls — Bairavi leads still to call; mark one with e.g. 5711 called interested\n"
+    "#price 4521 75000 tingaLige — send that customer your quotation\n"
+    "#advance 4521 — advance received: deal done, follow-ups stop\n"
     "#voicetest — voice-reply status (off: no free text-to-speech)\n"
     "5711 or #who <name> — everything the CRM knows about one customer\n"
     "#roles — list OWNER/STAFF numbers\n"
@@ -5766,6 +5805,76 @@ def tool_calls_to_make(sender: str, **_) -> str:
     return "\n".join(lines)
 
 
+def _deal_phone(digits: str):
+    """(phone, None) for the one customer whose number ends in `digits` and
+    who wrote in the last 30 days, else (None, the owner's error text)."""
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/whatsapp_messages", headers=_supa_headers(),
+                         params={"select": "phone", "role": "eq.user",
+                                 "phone": f"like.*{digits}", "created_at": f"gte.{since}",
+                                 "order": "created_at.desc", "limit": "200"},
+                         timeout=5)
+        r.raise_for_status()
+        staff = {p[-10:] for p in staff_and_owner_numbers()}
+        phones = list(dict.fromkeys(x["phone"] for x in r.json()
+                                    if x.get("phone") and x["phone"][-10:] not in staff))
+    except Exception as e:
+        print(f"DEAL_PHONE_FAILED type={type(e).__name__}")
+        return None, "⚠️ Could not read the chats. Try again shortly."
+    if not phones:
+        return None, f"❓ {digits} — kaLeda 30 dinadalli ee number-inda message illa."
+    if len(phones) > 1:
+        return None, ("❓ " + digits + " — ondakkintha hechchu customer: "
+                      + ", ".join(phones[:5]) + ". Innu hechchu digits kodi.")
+    return phones[0], None
+
+
+def _deal_rows(phone: str) -> list:
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/whatsapp_messages", headers=_supa_headers(),
+                     params={"select": "role,content,created_at", "phone": f"eq.{phone}",
+                             "order": "created_at.desc,id.desc", "limit": "60"},
+                     timeout=5)
+    r.raise_for_status()
+    return r.json()
+
+
+def tool_send_price(sender: str, digits: str = "", amount: int = 0, note: str = "", **_) -> str:
+    """#price 4521 75000 tingaLige — the owner's quotation, sent to the customer."""
+    phone, err = _deal_phone(digits)
+    if err:
+        return err
+    try:
+        rows = _deal_rows(phone)
+    except Exception as e:
+        print(f"DEAL_ROWS_FAILED type={type(e).__name__}")
+        return "⚠️ Could not read that chat. Try again shortly."
+    now = datetime.now(timezone.utc)
+    open_window = asthra_deal.window_open(rows, now)
+    delivered = False
+    if open_window:
+        body = asthra_deal.price_message(int(amount), note)
+        try:
+            res = send_text(phone, body)
+            delivered = res is None or getattr(res, "ok", False)
+        except Exception as e:
+            print(f"PRICE_SEND_FAILED type={type(e).__name__} phone=...{phone[-4:]}")
+        if delivered:
+            save_messages([(phone, "assistant", body),
+                           (phone, "system", asthra_deal.PRICE_SENT)])
+    return asthra_deal.owner_price_receipt(phone, int(amount), delivered, open_window)
+
+
+def tool_mark_advance(sender: str, digits: str = "", **_) -> str:
+    """#advance 4521 — the advance came: the deal is done, follow-ups stop."""
+    phone, err = _deal_phone(digits)
+    if err:
+        return err
+    if save_message(phone, "system", asthra_deal.ADVANCE_PAID) != SAVE_OK:
+        return "⚠️ Could not save it. Try again shortly."
+    return asthra_deal.advance_receipt(phone)
+
+
 def _crm_rows(table: str, params: dict) -> list:
     r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/{table}", headers=_crm_headers(), params=params, timeout=5)
     r.raise_for_status()
@@ -5917,6 +6026,20 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
     named = named_call_note(sender, stripped, ctx.get("history"))
     if named is not None:
         return named
+    # THE ASTHRA DEAL (owner, 2026-11-02): the owner's quotation for a
+    # requirement the bot reported, and the advance that ends the deal.
+    priced = asthra_deal.parse_price(stripped)
+    if priced:
+        return run_tool(sender, "asthra_send_price", _fallback=tool_send_price,
+                        digits=priced[0], amount=priced[1], note=priced[2])
+    if low.startswith("#price"):
+        return "❓ Usage: #price <last 4+ digits> <amount> [note]\nex: #price 4521 75000 tingaLige"
+    paid_digits = asthra_deal.parse_advance(stripped)
+    if paid_digits:
+        return run_tool(sender, "asthra_mark_advance", _fallback=tool_mark_advance,
+                        digits=paid_digits)
+    if low.startswith("#advance"):
+        return "❓ Usage: #advance <last 4+ digits>"
     if low in ("#calls", "#call", "#tocall"):
         return run_tool(sender, "crm_calls_to_make", _fallback=tool_calls_to_make)
     view = owner_crm.command(low)
@@ -7711,6 +7834,14 @@ if BIC_AVAILABLE:
     @bic_tools.register("crm_owner_view")
     def _tool_h_crm_owner_view(principal, view="today", **_):
         return tool_owner_view(principal.sender_id, view=view)
+
+    @bic_tools.register("asthra_send_price")
+    def _tool_h_asthra_send_price(principal, digits="", amount=0, note="", **_):
+        return tool_send_price(principal.sender_id, digits=digits, amount=amount, note=note)
+
+    @bic_tools.register("asthra_mark_advance")
+    def _tool_h_asthra_mark_advance(principal, digits="", **_):
+        return tool_mark_advance(principal.sender_id, digits=digits)
 
     @bic_tools.register("crm_money_due")
     def _tool_h_crm_money_due(principal, **_):

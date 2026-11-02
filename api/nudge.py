@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import asthra_deal
 import bairavi
 import nudge as nudge_rules
 
@@ -102,7 +103,7 @@ def conversation(phone):
             f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
             headers=_headers(),
             params={"select": "role,content,created_at", "phone": f"eq.{phone}",
-                    "order": "created_at.desc", "limit": "40"},
+                    "order": "created_at.desc,id.desc", "limit": "60"},
             timeout=10,
         )
         if not r.ok:
@@ -246,6 +247,147 @@ def run_sweep(now=None):
     return counts
 
 
+# ── Asthra deal follow-ups (owner, 2026-11-02) ─────────────────────────────
+# Rides on this hourly job rather than a cron of its own (Hobby's two are
+# taken). Every rule is in asthra_deal.py; this is only reads and sends.
+ASTHRA_MAX_SENDS_PER_RUN = 15
+ASTHRA_LOOKBACK_DAYS = 60
+GRAPH = "https://graph.facebook.com/v19.0"
+
+
+def asthra_candidates(now):
+    """Phones whose chat carries a deal sign (a lead alerted, a quotation
+    asked for, a price sent) in the lookback."""
+    since = (now - timedelta(days=ASTHRA_LOOKBACK_DAYS)).isoformat()
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/whatsapp_messages", headers=_headers(),
+            params={"select": "phone", "role": "eq.system",
+                    "content": f"in.({','.join(asthra_deal.DEAL_SIGNS)})",
+                    "created_at": f"gte.{since}",
+                    "order": "created_at.desc", "limit": "1000"},
+            timeout=10)
+        if not r.ok:
+            print(f"ASTHRA_FOLLOWUP_CANDIDATES_FAILED status={r.status_code}")
+            return []
+        return list(dict.fromkeys(x["phone"] for x in r.json() if x.get("phone")))
+    except Exception as e:
+        print(f"ASTHRA_FOLLOWUP_CANDIDATES_FAILED type={type(e).__name__}")
+        return []
+
+
+def asthra_template_approved() -> bool:
+    """Is the follow-up template APPROVED in the account that owns the bot's
+    number? Checked from the sender's side, as meta_leads_sync does."""
+    auth = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    try:
+        phone = requests.get(f"{GRAPH}/{PHONE_NUMBER_ID}", headers=auth,
+                             params={"fields": "health_status"}, timeout=10).json()
+        waba = next((e.get("id") for e in (phone.get("health_status") or {}).get("entities") or []
+                     if e.get("entity_type") == "WABA"), None)
+        if not waba:
+            return False
+        rows = requests.get(f"{GRAPH}/{waba}/message_templates", headers=auth,
+                            params={"name": asthra_deal.TEMPLATE_NAME,
+                                    "fields": "name,status,language"}, timeout=10).json().get("data") or []
+        return any(r.get("name") == asthra_deal.TEMPLATE_NAME
+                   and r.get("language") == asthra_deal.TEMPLATE_LANGUAGE
+                   and r.get("status") == "APPROVED" for r in rows)
+    except Exception as e:
+        print(f"ASTHRA_TEMPLATE_CHECK_FAILED type={type(e).__name__}")
+        return False
+
+
+def send_template(phone):
+    try:
+        r = requests.post(
+            f"{GRAPH}/{PHONE_NUMBER_ID}/messages",
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                     "Content-Type": "application/json"},
+            json={"messaging_product": "whatsapp", "to": phone, "type": "template",
+                  "template": {"name": asthra_deal.TEMPLATE_NAME,
+                               "language": {"code": asthra_deal.TEMPLATE_LANGUAGE}}},
+            timeout=10)
+        if not r.ok:
+            print(f"ASTHRA_FOLLOWUP_SEND_FAILED status={r.status_code} phone=...{phone[-4:]}")
+        return r.ok
+    except Exception as e:
+        print(f"ASTHRA_FOLLOWUP_SEND_FAILED type={type(e).__name__} phone=...{phone[-4:]}")
+        return False
+
+
+def save_assistant(phone, content):
+    """The follow-up into the transcript, so the next run knows the day."""
+    try:
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+                          headers={**_headers(), "Prefer": "return=minimal"},
+                          json=[{"phone": phone, "role": "assistant", "content": content}],
+                          timeout=10)
+        if not r.ok:
+            print(f"ASTHRA_FOLLOWUP_RECORD_FAILED status={r.status_code} "
+                  f"phone=...{phone[-4:]} — this follow-up may repeat")
+        return r.ok
+    except Exception as e:
+        print(f"ASTHRA_FOLLOWUP_RECORD_FAILED type={type(e).__name__} "
+              f"phone=...{phone[-4:]} — this follow-up may repeat")
+        return False
+
+
+def run_asthra_followups(now=None, staff=()):
+    now = now or datetime.now(timezone.utc)
+    counts = {"considered": 0, "sent": 0, "send_failed": 0}
+    staff = {p[-10:] for p in staff if p}
+    template_ok = None
+    for phone in asthra_candidates(now):
+        if phone[-10:] in staff:
+            continue
+        if counts["sent"] >= ASTHRA_MAX_SENDS_PER_RUN:
+            counts["capped"] = counts.get("capped", 0) + 1
+            continue
+        rows = conversation(phone)
+        if rows is None:
+            counts["fetch_failed"] = counts.get("fetch_failed", 0) + 1
+            continue
+        counts["considered"] += 1
+        verdict, day = asthra_deal.decide(rows, now)
+        if verdict != asthra_deal.SEND:
+            counts[verdict] = counts.get(verdict, 0) + 1
+            continue
+        if asthra_deal.window_open(rows, now):
+            text = asthra_deal.followup_text(day)
+            ok = send(phone, text)
+        else:
+            if template_ok is None:
+                template_ok = asthra_template_approved()
+            if not template_ok:
+                counts["template_not_approved"] = counts.get("template_not_approved", 0) + 1
+                continue
+            text = asthra_deal.TEMPLATE_BODY
+            ok = send_template(phone)
+        if ok:
+            save_assistant(phone, f"{text}\n{asthra_deal.marker(day)}")
+            counts["sent"] += 1
+            print(f"ASTHRA_FOLLOWUP_SENT phone=...{phone[-4:]} day={day}")
+        else:
+            counts["send_failed"] += 1
+    print(asthra_deal.summarise(counts))
+    return counts
+
+
+def staff_numbers():
+    """OWNER/STAFF numbers, never followed up. Bootstrap env list + bot_roles."""
+    nums = [p.strip() for p in os.environ.get("OWNER_PHONE", "918861369951").split(",") if p.strip()]
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/bot_roles", headers=_headers(),
+                         params={"select": "phone", "active": "eq.true",
+                                 "role": "in.(OWNER,STAFF)"}, timeout=10)
+        if r.ok:
+            nums += [x.get("phone") or "" for x in r.json()]
+    except Exception as e:
+        print(f"ASTHRA_STAFF_READ_FAILED type={type(e).__name__}")
+    return nums
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         # THE SAME GATE digest.py and evaluate.py use — one cron-auth
@@ -259,6 +401,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         result = run_sweep()
+        result["asthra"] = run_asthra_followups(staff=staff_numbers())
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()

@@ -274,10 +274,13 @@ class TestHandlerRegistration(unittest.TestCase):
         requester only, 2026-10-01). → 25 with `crm_customer_brief` ("5711" /
         "#who <name>": one lead from the CRM, STAFF, read-only). → 27 with the
         owner CRM views (2026-10-04): `crm_owner_view` (STAFF) and
-        `crm_money_due` (OWNER), both read-only."""
+        `crm_money_due` (OWNER), both read-only. → 29 with the Asthra deal
+        pair (2026-11-02): `asthra_send_price` (#price) and
+        `asthra_mark_advance` (#advance), both OWNER."""
         self.assertEqual(
             sorted(tools._HANDLERS),
-            ["add_role", "aitest", "business_new_enquiries",
+            ["add_role", "aitest", "asthra_mark_advance", "asthra_send_price",
+             "business_new_enquiries",
              "business_reasoning", "business_status",
              "chat_pause",
              "chat_resume", "commitment_resolve", "commitments_list",
