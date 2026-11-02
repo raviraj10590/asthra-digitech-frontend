@@ -1026,7 +1026,14 @@ _SAME_PLACE = ("same place", "same address", "same location", "same",
 # place already held, never a place itself (see parse_followup).
 _SAME_PLACE_RE = re.compile(
     r"(?:ಇದೇ|ಇದೆ|ಅದೇ|ಅದೆ)\s*(?:ಸ್ಥಳ|ಊರು|ಜಾಗ|ವಿಳಾಸ|ಅಡ್ರೆಸ್|ಲೊಕೇಶನ್)"
-    r"|(?<![a-z])(?:ide|idhe|ade|adhe|same)\s*(?:sthala|place|uru|ooru|jaga|address|location)(?![a-z])")
+    r"|(?<![a-z])(?:ide|idhe|ade|adhe|same)\s*(?:sthala|place|uru|ooru|jaga|address|location)(?![a-z])"
+    # 2026-11-02 fake-customer test: "ok deliver there", "ok form address alli".
+    r"|(?<![a-z])deliver\s*(?:it\s*)?there(?![a-z])|(?<![a-z])form\s*(?:address|nalli|alli|place|location)(?![a-z])"
+    r"|ಫಾರ್ಮ್\s*(?:ನಲ್ಲಿ|ಅಲ್ಲಿ|ಅಡ್ರೆಸ್)"
+    # second batch: "yes ade town", "sari adey place", "delivr thre pls", "yeah go ahead", "fine send it"
+    r"|(?<![a-z])(?:adey|adhey)\s*(?:place|uru|ooru|town|village|jaga)(?![a-z])"
+    r"|(?<![a-z])(?:ide|idhe|ade|adhe|same)\s*(?:town|village)(?![a-z])"
+    r"|(?<![a-z])deli?ve?r\s*th?e?re(?![a-z])|(?<![a-z])go\s*ahead(?![a-z])|^(?:fine|ok|okay)?\s*send\s*it$")
 # A message that OPENS with a taluk or district label: "ತಾಲೂಕ. ಮೂಡಲಗಿ",
 # "Tq Tikota", "dist vijayapura".
 _TALUK_LEAD_RE = re.compile(
@@ -1040,14 +1047,29 @@ _PLACE_LABEL_RE = re.compile(
 
 
 _TRAILING_FILLER_RE = re.compile(
-    r"(?:[\s,.]+(?:sir|sar|saar|ji|only|matra|maatra|ಸರ್|ಮಾತ್ರ))+[\s.!]*$", re.I)
+    r"(?:[\s,.]+(?:sir|sar|saar|ji|only|matra|maatra|ಸರ್|ಮಾತ್ರ"
+    # "ok kadur ge", "ಕದೂರ್ ಗೆ ಕಳಿಸಿ", "kadur bidu" (2026-11-02 fake-customer test): the
+    # "to" ending and "send it / that's it" are not part of the place.
+    r"|ge|ಗೆ|kke|ಕ್ಕೆ|kalisi|kalsi|ಕಳಿಸಿ|ಕಳುಹಿಸಿ|bidu|bidi|ಬಿಡಿ|thagi|tagi|thagoli|itself|send|maadi|madi|please|pls))+[\s.!]*$", re.I)
+# "ಸರಿ ಕದೂರ್‌ಗೆ ಬಿಡಿ": the "to" ending joined by a zero-width non-joiner.
+_JOINED_ENDING_RE = re.compile(r"\u200c(?:ಗೆ|ಕ್ಕೆ)$")
+# "yes kadur", "ok aythu kadur ge", "deliver madthini kadur", "ಸರಿ ಕದೂರ್": a yes or
+# "deliver" in front of the place. Each word goes only when a further word follows.
+# Not "anna" (brother): Anna Nagar is a place.
+_LEADING_FILLER_RE = re.compile(
+    r"^(?:(?:ok+|okay|yes+|ya+|yeah|hau|hmm+|fine|sari|ಸರಿ|ಹೌದು|houdu|haudu|aythu|ayitu|aytu|ಆಯ್ತು|ಹಾಗೆ|hage|"
+    r"thammi|sir|sar|ಸರ್|deliver|delivery|send|to|madthini|madtini|madi)[\s,.!:-]+)+(?=\S)", re.I)
 
 
 def _without_place_label(place):
     # "Gadag distic sir" / "Shivamogga only" (live 2026-10-31) were stored
     # with the courtesy word. It goes only when something is left.
     if place:
-        trimmed = _TRAILING_FILLER_RE.sub("", place).strip()
+        trimmed = _TRAILING_FILLER_RE.sub("", _LEADING_FILLER_RE.sub("", place)).strip()
+        trimmed = _JOINED_ENDING_RE.sub("", trimmed).strip()
+        # "hmm ok": what is left after the filler is itself a yes, not a place.
+        if trimmed.lower() in _AFFIRMATION_WORDS or trimmed.lower() in _ACKNOWLEDGEMENTS:
+            return None
         if trimmed:
             place = trimmed
     if not place:
@@ -1114,7 +1136,11 @@ _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
                 "dar", "dara",
                 # "ಯಷ್ಟು ಖರ್ಚಾಗಬಹುದು" (what will it cost, live ...3294,
                 # 2026-10-03) — the stem covers ಖರ್ಚು / ಖರ್ಚಾಗುತ್ತೆ / ಖರ್ಚಾಗಬಹುದು.
-                "ಖರ್ಚ", "kharchu", "karchu", "kharch")
+                "ಖರ್ಚ", "kharchu", "karchu", "kharch",
+                # 2026-11-02 fake-customer test: "raet kudivo", "prise tell me",
+                # "transformer kitti yestu paisa". Whole words only.
+                "raet", "prise", "paisa", "paise", "ಪೈಸೆ", "ರೇಟ",
+                "rupayi", "rupai", "rupees", "ರೂಪಾಯಿ", "hw much", "how mch")
 # Already the bot's own words for this: the follow-up button is titled
 # "📋 ಕೋಟೇಶನ್" and its id is "quotation".
 _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
@@ -1137,10 +1163,12 @@ _HOW_MUCH = r"(?:y?e+s+h?tu|yeshtu|eet+h?a?u?|en+t+h?a)"
 #   "25kva bele", "65 kva bele" — "bele" right after a size is the price, not ಬೆಳೆ (crop);
 #   "estu agutte", "yestagutte", "yestu kodbeku" — "how much will it come to / must I pay";
 #   "25kva ಎಷ್ಟು", "25kva transformer eshtu beku?" — a size, then how-much ending the message.
-_HOW_MUCH_KN = r"(?:ಎಷ್ಟು|ಯೆಷ್ಟು|ಯಷ್ಟು)"
+_HOW_MUCH_KN = r"(?:ಎಷ್ಟು|ಯೆಷ್ಟು|ಯಷ್ಟು|ಯೆಸ್ಟು|ಎಸ್ಟು)"
 _SIZE = r"\d+\s*(?:k\.?v\.?a|kv\b|ಕೆವಿಎ)"
 _LATIN_PRICE_RE = re.compile(
-    rf"(?<![a-z])be+l[ae]+(?![a-z])\s*(?:{_HOW_MUCH}(?![a-z])|{_HOW_MUCH_KN}|heli|helu|hel[ia]|kodi|ye\b|\?)"
+    rf"(?<![a-z])be+l[aei]+(?![a-z])\s*(?:{_HOW_MUCH}(?![a-z])|{_HOW_MUCH_KN}|heli|helu|hel[ia]|kodi|y?enu\b|ye\b|\?)"
+    # "transformer ಕಿಟ್ಟಿ ಯೆಸ್ಟು" (2026-11-02): how-much ending a message about the transformer
+    rf"|transformer[^\n]{{0,30}}(?:(?<![a-z]){_HOW_MUCH}|{_HOW_MUCH_KN})\s*\??\s*$"
     rf"|(?:(?<![a-z]){_HOW_MUCH}(?![a-z])|{_HOW_MUCH_KN})\s*be+l[ae]+(?![a-z])"
     rf"|(?<![a-z]){_HOW_MUCH}\s*a+gu?t+[ae]+(?:de)?(?![a-z])|(?<![a-z])y?e+s+h?ta+gu?t+[ae]+"
     rf"|(?<![a-z]){_HOW_MUCH}\s*kod(?:a?bek|beku|bekaagutt)[a-z]*"
@@ -2219,6 +2247,20 @@ _NOT_A_PLACE_PHRASE = (
 )
 
 
+# A SUBJECT, NOT A SITE (2026-11-02 fake-customer test, 51 of 250 failed): "subsidy ideya sir",
+# "ಎಮ್ಐ ಮಾಡ್ತೀರಾ", "warrenty years hegidhe", "mescom la sanction agtha", "fitting charga separate aa",
+# "ಇಲ್ಲ ಈಗ ಬೇಕಿಲ್ಲ", "keli bidi later", "kadur alli nan transformer idhe" were each stored as the
+# delivery place. Word stems that start no Karnataka place name, matched at a word start, misspelt
+# the ways the test wrote them.
+_NOT_A_PLACE_TOPIC_RE = re.compile(
+    r"(?<![a-z])(?:subs?i?d|subdy|sabsid|loan|warr?[ae]n|guar|garant|[mbhg]escom|cesc|discom|"
+    r"approv|sanction|liaison|fitting|install|charg|transformer|second\s*hand|already|bekilla|bekagilla)"
+    r"|(?<![a-z])(?:emi|later|maybe|naybe|illa|needed|no\s*need|beda|bardilla|month\s*end|free|fittin)(?![a-z])"
+    r"|(?<![a-z])(?:taruvaa?y|nantara|amele|aamele)"
+    r"|ಸಬ್ಸಿಡಿ|ಎಮ್ಐ|ಇಎಂಐ|ಲೋನ್|ಸಾಲ|ಗ್ಯಾರಂಟಿ|ವಾರಂಟಿ|ಮೆಸ್ಕಾ|ಬೆಸ್ಕಾ|ಹೆಸ್ಕಾ|ಚಾರ್ಜ್|ಟ್ರಾನ್ಸ್|ಬೇಕಿಲ್ಲ|ಬೇಕಾಗಿಲ್ಲ|ಆಮೇಲೆ"
+    r"|(?<![\u0C80-\u0CFF])ಇಲ್ಲ(?![\u0C80-\u0CFF])", re.I)
+
+
 _TRIM = " \t\n.,!:-"
 
 # HOW LONG AN ANSWER MAY BE WITHOUT LOOKING LIKE AN ADDRESS.
@@ -2384,6 +2426,8 @@ def _is_place_like(raw: str) -> bool:
     # The classes with no existing table: a whole-answer comparison for the
     # single words, and an anywhere match for the phrases.
     if low in _NOT_A_PLACE_EXACT:
+        return False
+    if _NOT_A_PLACE_TOPIC_RE.search(low):
         return False
     if _is_greeting(low):
         return False
@@ -2581,7 +2625,10 @@ _BOUGHT_ELSEWHERE_RE = re.compile(
     # 2026-10-26 stress test: the "o" spellings and "purchase madidivi" (we have bought), past tense only —
     # "togondu bartini" (I will take it) is a yes and must not match.
     r"|(?<![a-z])th?[ao]g?o?nd(?:id+ivi|id+ini|id+eve|a?y?i?tu|vi|ivi)(?![a-z])"
-    r"|bere\s*kade\s*th?ogond|purchase\s*mad(?:idivi|idini|idvi|idivu)")
+    r"|bere\s*kade\s*th?ogond|purchase\s*mad(?:idivi|idini|idvi|idivu)"
+    # 2026-11-02 fake-customer test: "transformer bekagilla", "ಇಲ್ಲ ಈಗ ಬೇಕಿಲ್ಲ", "already installed".
+    r"|(?<![a-z])(?:bekilla|bekagilla|beekilla)(?![a-z])|ಬೇಕಿಲ್ಲ|ಬೇಕಾಗಿಲ್ಲ"
+    r"|already\s*(?:installed|install\s*mad|use\s*mad|have)")
 
 
 def is_decline(text: str) -> bool:
@@ -2909,6 +2956,7 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
         if _addition and _addition.lower() not in _held.lower():
             dl = f"{_held}, {_addition}"
 
+    dl = _without_place_label(dl)
     mentioned = bool(_DELIVERY_MENTION_RE.search(text or ""))
 
     # "Same place" answers the question without naming anywhere: it points at
@@ -3334,9 +3382,10 @@ def call_day_kn(hour) -> str:
 
 _PART_OF_DAY = (
     ("morning", ("ಬೆಳಿಗ್ಗೆ", "ಬೆಳಗ್ಗೆ", "ಬೆಳಗ್ಗೆ", "beligge", "belige", "bellige", "belagge",
-                 "morning", "mrng", "morng")),
-    ("afternoon", ("ಮಧ್ಯಾಹ್ನ", "madhyahna", "madyahna", "madyana", "afternoon", "noon", "lunch")),
-    ("evening", ("ಸಂಜೆ", "sanje", "sanjhe", "evening", "evng", "eve")),
+                 "morning", "mrng", "morng", "moring", "belgil", "ಮಾರ್ನಿಂಗ್")),
+    ("afternoon", ("ಮಧ್ಯಾಹ್ನ", "ಮಧ್ಯಾನ್ಹ", "ಮಧ್ಯಾನ", "madhyahna", "madyahna", "madyana", "afternoon", "noon", "lunch",
+                   "aftrnoon", "afternon", "aftrnon")),
+    ("evening", ("ಸಂಜೆ", "sanje", "sanjhe", "evening", "evng", "eve", "evning", "ಈವ್ನಿಂಗ್")),
     ("night", ("ರಾತ್ರಿ", "ratri", "rathri", "raatri", "night")),
     ("any", ("ಯಾವಾಗಾದರೂ", "ಯಾವಾಗಲಾದರೂ", "ಯಾವಾಗ ಬೇಕಾದರೂ", "yavaglu", "yavagadru", "yavagadaru",
              "any time", "anytime", "eppo", "whenever", "free time")),
@@ -3358,7 +3407,10 @@ _HOUR_WORDS = (
     ("ಏಳು", 7), ("ಆರು", 6), ("ಐದು", 5), ("ನಾಲ್ಕು", 4), ("ಮೂರು", 3), ("ಎರಡು", 2),
     ("ಒಂದು", 1), ("hanneradu", 12), ("hannondu", 11), ("hattu", 10), ("ombattu", 9),
     ("entu", 8), ("elu", 7), ("aaru", 6), ("aidu", 5), ("nalku", 4), ("mooru", 3),
-    ("eradu", 2), ("ondu", 1))
+    ("eradu", 2), ("ondu", 1),
+    # 2026-11-02 fake-customer test: "yeradu gante barli"
+    ("yeradu", 2), ("muru", 3), ("naalku", 4), ("aidhu", 5), ("yelu", 7), ("yentu", 8),
+    ("ombathu", 9), ("hathu", 10))
 _HOUR_WORD_RE = re.compile(
     r"(?<![\w\u0C80-\u0CFF])(" + "|".join(w for w, _n in _HOUR_WORDS) + r")\s*(?=ಗಂಟೆ|gante|ghante)", re.I)
 # An explicit clock time: a figure with an hour word or am/pm, or a figure
@@ -3367,7 +3419,14 @@ _HOUR_WORD_RE = re.compile(
 _EXPLICIT_CLOCK_RE = re.compile(
     r"\d{1,2}(?:[:.]\d{2})?\s*(?:a\.?m|p\.?m|ಗಂಟೆ|gante|ghante|o'?clock)"
     r"|(?:ಬೆಳಿಗ್ಗೆ|ಬೆಳಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ|ಸಂಜೆ|ರಾತ್ರಿ|morning|afternoon|evening|night|sanje|beligge|madhyahna)"
-    r"\s*\d{1,2}|\d{1,2}\s*(?:ಕ್ಕೆ\s*)?(?:ಬೆಳಿಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ|ಸಂಜೆ|morning|evening|afternoon)", re.I)
+    r"\s*\d{1,2}|\d{1,2}\s*(?:ಕ್ಕೆ\s*)?(?:ಬೆಳಿಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ|ಸಂಜೆ|morning|evening|afternoon)"
+    # 2026-11-02 fake-customer test: "evning 6 kke call", "aftrnoon 3 ge engineer call",
+    # "belgil 8 ge", "tomorow 11 kke" were read as 6 / 3 / 8 / 11 UNITS and the menu came back.
+    # A figure up to 12 with the "at" ending, or after a misspelt part of the day.
+    r"|(?<![\d.])(?:[1-9]|1[0-2])\s*(?:kke|ಕ್ಕೆ|ge|ಗೆ|baje|baji)(?![a-z])"
+    r"|(?:evn?ing|evng|aft[e]?r?no+n|morn?ing|mrng|belgil|ಮಾರ್ನಿಂಗ್|ಈವ್ನಿಂಗ್|tomorr?ow|nale|naale|ನಾಳೆ"
+    r"|ratri|raatri|rathri|ಮಧ್ಯಾನ್ಹ|ಮಧ್ಯಾನ|madhyana)"
+    r"\s*\d{1,2}", re.I)
 
 
 def _hour_words_as_figures(text: str) -> str:
