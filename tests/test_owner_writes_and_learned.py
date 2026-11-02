@@ -159,3 +159,46 @@ class AsthraPromptUsesThem(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OnlyTheBotsOwnBusinesses(unittest.TestCase):
+    """Owner 2026-11-02: another client's chats are never learned from."""
+
+    def _api(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "nudge_api", os.path.join(os.path.dirname(__file__), "..", "api", "nudge.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _resp(self, data):
+        r = mock.Mock(ok=True)
+        r.json.return_value = data
+        r.raise_for_status.return_value = None
+        return r
+
+    def run_with(self, clients, slugs, flow=False):
+        n = self._api()
+        def get(url, **k):
+            if url.endswith("/clients"):
+                return self._resp(clients)
+            if url.endswith("/businesses"):
+                return self._resp([{"slug": s} for s in slugs])
+            return self._resp([{"id": 1}] if flow else [])
+        with mock.patch.object(n.requests, "get", side_effect=get):
+            return n._business_of("919876544779", "https://crm", {})
+
+    def test_another_client_is_skipped(self):
+        self.assertIsNone(self.run_with([{"business_id": "x", "source": None}], ["sgr-navanagara"]))
+
+    def test_bairavi_and_asthra(self):
+        self.assertEqual(self.run_with([{"business_id": "b", "source": "bairavi-transformer"}],
+                                       ["bairavi-trans-solutions"]), L.BAIRAVI)
+        self.assertEqual(self.run_with([], []), L.ASTHRA)
+        self.assertEqual(self.run_with([], [], flow=True), L.BAIRAVI)
+
+    def test_unreadable_is_skipped(self):
+        n = self._api()
+        with mock.patch.object(n.requests, "get", side_effect=RuntimeError("down")):
+            self.assertIsNone(n._business_of("91x", "https://crm", {}))

@@ -402,16 +402,42 @@ def _crm():
     return url, {"apikey": key, "Authorization": f"Bearer {key}"}
 
 
-def _business_of(phone):
-    """Bairavi when the Brain's transcript holds a Bairavi flow reply."""
+# Only the bot's own two businesses learn (owner, 2026-11-02): a chat whose
+# CRM lead belongs to any OTHER business (a client's leads) is never offered,
+# so another client's answers cannot reach Asthra's or Bairavi's customers.
+CRM_SLUG_TO_BUSINESS = {"bairavi-trans-solutions": learned.BAIRAVI,
+                        "asthra-digitech": learned.ASTHRA}
+
+
+def _business_of(phone, crm_url, crm_headers):
+    """learned.BAIRAVI / learned.ASTHRA, or None for another business's chat
+    (or one that cannot be read — skipping is the safe direction)."""
     try:
-        r = requests.get(f"{SUPABASE_URL}/rest/v1/whatsapp_messages", headers=_headers(),
+        r = requests.get(f"{crm_url}/rest/v1/clients", headers=crm_headers,
+                         params={"select": "business_id,source", "phone": f"eq.{phone}"}, timeout=10)
+        r.raise_for_status()
+        clients = r.json()
+        biz_ids = {c["business_id"] for c in clients if c.get("business_id")}
+        slugs = set()
+        if biz_ids:
+            b = requests.get(f"{crm_url}/rest/v1/businesses", headers=crm_headers,
+                             params={"select": "slug", "id": f"in.({','.join(biz_ids)})"}, timeout=10)
+            b.raise_for_status()
+            slugs = {x.get("slug") for x in b.json()}
+        if any(s not in CRM_SLUG_TO_BUSINESS for s in slugs):
+            return None
+        if learned.BAIRAVI in {CRM_SLUG_TO_BUSINESS[s] for s in slugs} or any(
+                c.get("source") == "bairavi-transformer" for c in clients):
+            return learned.BAIRAVI
+        t = requests.get(f"{SUPABASE_URL}/rest/v1/whatsapp_messages", headers=_headers(),
                          params={"select": "id", "phone": f"eq.{phone}", "role": "eq.assistant",
                                  "content": f"like.*{bairavi.FLOW_MARKER}*", "limit": "1"},
                          timeout=10)
-        return learned.BAIRAVI if r.ok and r.json() else learned.ASTHRA
-    except Exception:
-        return learned.ASTHRA
+        t.raise_for_status()
+        return learned.BAIRAVI if t.json() else learned.ASTHRA
+    except Exception as e:
+        print(f"LEARN_BUSINESS_UNKNOWN type={type(e).__name__} phone=...{phone[-4:]}")
+        return None
 
 
 def run_learn_suggestions(now=None, staff=(), notify=None):
@@ -455,7 +481,10 @@ def run_learn_suggestions(now=None, staff=(), notify=None):
         counts["pairs"] += len(found)
         if not found:
             continue
-        biz = _business_of(phone)
+        biz = _business_of(phone, url, headers)
+        if biz is None:
+            counts["other_business"] = counts.get("other_business", 0) + 1
+            continue
         rows = [{"business": biz, "question": q["body"].strip()[:1000],
                  "answer": a["body"].strip()[:1000], "source_ref": str(a["id"])} for q, a in found]
         try:
