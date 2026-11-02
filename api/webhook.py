@@ -95,6 +95,8 @@ import bairavi
 import call_log
 import asthra_deal
 import customer_brief
+import learned
+import owner_writes
 import owner_crm
 import geo_escom
 import interpretation  # Step 2: shadow mode only — see shadow_interpret()
@@ -2158,6 +2160,30 @@ def _as_ai_messages(rows) -> list:
     return out
 
 
+# AUTO-SUGGEST (owner, 2026-11-02). The owner's approved answers, read at
+# most every LEARNED_CACHE_S per warm instance: an approval reaches customers
+# within minutes, and a busy hour does not read the table on every message.
+LEARNED_CACHE_S = 300
+_LEARNED_CACHE = {"at": 0.0, "rows": []}
+
+
+def approved_answers() -> list:
+    """Approved learned_answers rows, [] when unreadable (never blocks a reply)."""
+    if time.time() - _LEARNED_CACHE["at"] < LEARNED_CACHE_S:
+        return _LEARNED_CACHE["rows"]
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/learned_answers", headers=_supa_headers(),
+                         params={"status": f"eq.{learned.APPROVED}",
+                                 "select": "id,business,question,answer",
+                                 "order": "id.desc", "limit": "200"}, timeout=3)
+        rows = r.json() if r.ok else []
+    except Exception as e:
+        print(f"LEARNED_READ_FAILED type={type(e).__name__}")
+        rows = []
+    _LEARNED_CACHE.update(at=time.time(), rows=rows if isinstance(rows, list) else [])
+    return _LEARNED_CACHE["rows"]
+
+
 def generate_reply(phone: str, user_message: str, history: list = None, memory: dict = None) -> str:
     if history is None:  # rare path (unknown button) — fetch on demand
         history = fetch_context(phone)["history"]
@@ -2169,6 +2195,10 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
     mem_ctx = build_memory_context(memory) if memory else ""
     if mem_ctx:
         messages.append({"role": "system", "content": mem_ctx})
+
+    taught = learned.prompt_block(approved_answers())
+    if taught:
+        messages.append({"role": "system", "content": taught})
 
     # Political intelligence: constituency facts + live headlines when relevant.
     # Injected AFTER the static prompt so OpenAI's automatic prefix caching
@@ -4904,6 +4934,9 @@ def tool_chat_resume(sender: str, target: str = "", **_) -> str:
 # other tool — which is also what re-checks authorization at CONFIRM time
 # rather than trusting the check made when the action was staged (C2).
 OWNER_TOOLS = {
+    # Phase 2 of the owner CRM (2026-11-02): staged by _stage_owner_write.
+    "crm_owner_write": lambda sender, **a: run_tool(sender, "crm_owner_write",
+                                                    _fallback=tool_crm_owner_write, **a),
     "add_role":    lambda sender, **a: run_tool(sender, "add_role",
                                                 _fallback=_tool_add_role, **a),
     "remove_role": lambda sender, **a: run_tool(sender, "remove_role",
@@ -4930,6 +4963,9 @@ OWNER_COMMANDS_HELP = (
     "#calls — Bairavi leads still to call; mark one with e.g. 5711 called interested\n"
     "#price 4521 75000 tingaLige — send that customer your quotation\n"
     "#advance 4521 — advance received: deal done, follow-ups stop\n"
+    "#fu 4521 naale [note] / #fu 4521 15 nov — add a CRM follow-up (asks #confirm)\n"
+    "#done 4521 — that lead's open follow-ups done · #note 4521 <text> · #stage 4521 won\n"
+    "#learn 12 [better answer] / #skip 12 — teach the bot your answer · #learned · #unlearn 12\n"
     "#voicetest — voice-reply status (off: no free text-to-speech)\n"
     "5711 or #who <name> — everything the CRM knows about one customer\n"
     "#roles — list OWNER/STAFF numbers\n"
@@ -5875,6 +5911,119 @@ def tool_mark_advance(sender: str, digits: str = "", **_) -> str:
     return asthra_deal.advance_receipt(phone)
 
 
+def _crm_open_followups(lead_id: str) -> list:
+    r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/follow_ups", headers=_crm_headers(),
+                     params={"client_id": f"eq.{lead_id}", "user_id": f"eq.{CRM_OWNER_USER_ID}",
+                             "is_done": "eq.false", "select": "id"}, timeout=5)
+    r.raise_for_status()
+    return r.json()
+
+
+def _stage_owner_write(sender: str, role: str, kind: str, digits: str, details: dict) -> str:
+    """Phase 2: find the lead, then stage the write for #confirm. Nothing is
+    written here."""
+    if role != CONFIRM_REQUIRED_ROLE:
+        return "🚫 Only OWNER numbers can change the CRM from WhatsApp."
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        return "⚠️ CRM is not connected."
+    try:
+        rows = _crm_leads_ending(digits)
+        open_fu = _crm_open_followups(rows[0]["id"]) if kind == owner_writes.DONE and len(rows) == 1 else []
+    except Exception as e:
+        print(f"OWNER_WRITE_LOOKUP_FAILED type={type(e).__name__}")
+        return "⚠️ Could not reach the CRM. Please send it again in a minute."
+    if not rows:
+        return call_log.not_found_reply(digits)
+    if len(rows) > 1:
+        return call_log.ambiguous_reply(digits, rows)
+    if kind == owner_writes.DONE and not open_fu:
+        return f"✅ {rows[0].get('name') or '—'} (…{rows[0]['phone'][-4:]}) has no open follow-ups."
+    prompt = owner_writes.confirm_prompt(kind, rows[0], details, len(open_fu))
+    return _stage_confirm(sender, "crm_owner_write",
+                          {"kind": kind, "lead_id": rows[0]["id"], "details": details}, prompt)
+
+
+def tool_crm_owner_write(sender: str, kind: str = "", lead_id: str = "", details=None, **_) -> str:
+    """The confirmed phase-2 write onto the CRM's existing fields."""
+    details = details or {}
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY and CRM_OWNER_USER_ID):
+        return "⚠️ CRM is not connected, so nothing was saved."
+    try:
+        rows = _crm_lead_by_id(lead_id)
+        if not rows:
+            return "⚠️ That lead is no longer in the CRM. Nothing was saved."
+        lead = rows[0]
+        now = datetime.now(timezone.utc)
+        count = 0
+        if kind == owner_writes.FOLLOWUP:
+            r = requests.post(f"{CRM_SUPABASE_URL}/rest/v1/follow_ups",
+                              headers={**_crm_headers(), "Prefer": "return=minimal"},
+                              json={"user_id": CRM_OWNER_USER_ID, "client_id": lead["id"],
+                                    "note": (details.get("note") or "Follow up")[:300],
+                                    "due_date": details["due"], "platform": "Call",
+                                    **({"business_id": lead["business_id"]}
+                                       if lead.get("business_id") else {})},
+                              timeout=5)
+        elif kind == owner_writes.DONE:
+            r = requests.patch(f"{CRM_SUPABASE_URL}/rest/v1/follow_ups",
+                               headers={**_crm_headers(), "Prefer": "return=representation"},
+                               params={"client_id": f"eq.{lead['id']}", "is_done": "eq.false",
+                                       "user_id": f"eq.{CRM_OWNER_USER_ID}"},
+                               json={"is_done": True}, timeout=5)
+            if r.ok:
+                count = len(r.json() or [])
+        elif kind == owner_writes.NOTE:
+            line = owner_writes.note_line(details.get("note", ""), now)
+            r = requests.patch(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=_crm_headers(),
+                               params={"id": f"eq.{lead['id']}"},
+                               json={"notes": ((lead.get("notes") or "").rstrip() + "\n" + line).strip()},
+                               timeout=5)
+        elif kind == owner_writes.STAGE and details.get("stage") in owner_writes.STAGES:
+            r = requests.patch(f"{CRM_SUPABASE_URL}/rest/v1/clients", headers=_crm_headers(),
+                               params={"id": f"eq.{lead['id']}"},
+                               json={"pipeline_stage": details["stage"]}, timeout=5)
+        else:
+            return "⚠️ Unknown change. Nothing was saved."
+        r.raise_for_status()
+    except Exception as e:
+        print(f"OWNER_WRITE_FAILED kind={kind} type={type(e).__name__}")
+        return "⚠️ Could not save to the CRM. Please send it again in a minute."
+    print(f"OWNER_WRITE_SAVED kind={kind} phone=...{lead['phone'][-4:]}")
+    return owner_writes.done_reply(kind, lead, details, count)
+
+
+def tool_learned_answers(sender: str, action: str = "list", answer_id: int = 0,
+                         new_answer: str = "", **_) -> str:
+    """#learn / #skip / #unlearn / #learned on the Brain's learned_answers."""
+    base = f"{SUPABASE_URL}/rest/v1/learned_answers"
+    try:
+        if action == "list":
+            r = requests.get(base, headers=_supa_headers(),
+                             params={"status": f"eq.{learned.APPROVED}",
+                                     "select": "id,business,question,answer", "order": "id.desc"},
+                             timeout=5)
+            r.raise_for_status()
+            return learned.list_text(r.json())
+        status = {"learn": learned.APPROVED, "skip": learned.SKIPPED,
+                  "unlearn": learned.REMOVED}[action]
+        patch = {"status": status, "decided_at": datetime.now(timezone.utc).isoformat()}
+        if action == "learn" and new_answer:
+            patch["answer"] = new_answer[:1000]
+        r = requests.patch(base, headers=_supa_headers("return=representation"),
+                           params={"id": f"eq.{int(answer_id)}"}, json=patch, timeout=5)
+        r.raise_for_status()
+        rows = r.json()
+    except Exception as e:
+        print(f"LEARNED_WRITE_FAILED action={action} type={type(e).__name__}")
+        return "⚠️ Could not save that. Try again shortly."
+    if not rows:
+        return f"❓ #{answer_id} illa. #learned kaLisi list nodi."
+    _LEARNED_CACHE["at"] = 0.0
+    return {"learn": f"✅ #{answer_id} kalite. Mundina sala ide prashne bandre bot ee uttara heLutte.",
+            "skip": f"👍 #{answer_id} bitte.",
+            "unlearn": f"🗑️ #{answer_id} tegede. Bot idannu innu heLalla."}[action]
+
+
 def _crm_rows(table: str, params: dict) -> list:
     r = requests.get(f"{CRM_SUPABASE_URL}/rest/v1/{table}", headers=_crm_headers(), params=params, timeout=5)
     r.raise_for_status()
@@ -6014,6 +6163,24 @@ def handle_owner_text(sender: str, role: str, label: str, user_text: str, ctx: d
         save_message(sender, "system", "PENDING_CLEARED")
         return "❌ Cancelled."
 
+    # AUTO-SUGGEST (owner, 2026-11-02): approve or drop what the bot offers
+    # to learn from the owner's own replies.
+    taught_cmd = learned.parse_command(stripped)
+    if taught_cmd:
+        if taught_cmd[0] == "usage":
+            return learned.USAGE
+        if role != CONFIRM_REQUIRED_ROLE:
+            return "🚫 Only OWNER numbers can teach the bot."
+        return run_tool(sender, "learned_answers", _fallback=tool_learned_answers,
+                        action=taught_cmd[0], answer_id=taught_cmd[1] or 0,
+                        new_answer=taught_cmd[2])
+    # PHASE 2 (owner, 2026-11-02): #fu / #done / #note / #stage, each staged
+    # for #confirm before anything is written.
+    write = owner_writes.parse(stripped, datetime.now(owner_writes.IST).date())
+    if write:
+        if write[0] == "usage":
+            return owner_writes.USAGE
+        return _stage_owner_write(sender, role, *write)
     # A CALL OUTCOME ("5711 called interested"): written to the CRM lead.
     # Checked before # commands and the AI, and only when the message starts
     # with digits AND names an outcome — anything else falls through as before.
@@ -6785,9 +6952,19 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             if _human:
                 _reply = _what             # the owner is talking: that answer, nothing more
             else:
-                _model = bairavi_model_reply(sender, user_text, ctx["history"],
-                                             followup, known)
-                if _model:
+                # AUTO-SUGGEST: a question the evidence cannot answer that the
+                # owner has already answered and approved gets HIS words.
+                _taught = (learned.best_match(user_text, [r for r in approved_answers()
+                                                          if r.get("business") == learned.BAIRAVI])
+                           if bairavi.unanswered_question(followup) else None)
+                _model = "" if _taught else bairavi_model_reply(sender, user_text, ctx["history"],
+                                                                followup, known)
+                if _taught:
+                    _left = bairavi.outstanding(followup, known)
+                    _reply = _taught["answer"].strip() + (
+                        "\n\n" + bairavi.question_for(_left[0], known) if _left else "")
+                    print(f"LEARNED_ANSWER_USED id={_taught['id']} phone=...{sender[-4:]}")
+                elif _model:
                     _reply = _model
             # THE RESULT IS CHECKED (Phase 2A). The marker below claims the
             # customer was asked something; for a reply that did not go out
@@ -7842,6 +8019,15 @@ if BIC_AVAILABLE:
     @bic_tools.register("asthra_mark_advance")
     def _tool_h_asthra_mark_advance(principal, digits="", **_):
         return tool_mark_advance(principal.sender_id, digits=digits)
+
+    @bic_tools.register("crm_owner_write")
+    def _tool_h_crm_owner_write(principal, kind="", lead_id="", details=None, **_):
+        return tool_crm_owner_write(principal.sender_id, kind=kind, lead_id=lead_id, details=details)
+
+    @bic_tools.register("learned_answers")
+    def _tool_h_learned_answers(principal, action="list", answer_id=0, new_answer="", **_):
+        return tool_learned_answers(principal.sender_id, action=action,
+                                    answer_id=answer_id, new_answer=new_answer)
 
     @bic_tools.register("crm_money_due")
     def _tool_h_crm_money_due(principal, **_):

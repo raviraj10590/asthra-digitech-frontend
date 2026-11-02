@@ -32,6 +32,7 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asthra_deal
 import bairavi
+import learned
 import nudge as nudge_rules
 
 VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN", "asthra_secret_2024")
@@ -388,6 +389,97 @@ def staff_numbers():
     return nums
 
 
+# ── Auto-suggest (owner, 2026-11-02) ──────────────────────────────────────
+# The owner's hand-written CRM replies of the last few hours, paired with the
+# customer question they answered, offered to the owner to learn. Rules in
+# learned.py; dedupe by the CRM message id (learned_answers.source_ref).
+LEARN_LOOKBACK_HOURS = 3
+
+
+def _crm():
+    url = os.environ.get("CRM_SUPABASE_URL", "")
+    key = os.environ.get("CRM_SUPABASE_SERVICE_KEY", "")
+    return url, {"apikey": key, "Authorization": f"Bearer {key}"}
+
+
+def _business_of(phone):
+    """Bairavi when the Brain's transcript holds a Bairavi flow reply."""
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/whatsapp_messages", headers=_headers(),
+                         params={"select": "id", "phone": f"eq.{phone}", "role": "eq.assistant",
+                                 "content": f"like.*{bairavi.FLOW_MARKER}*", "limit": "1"},
+                         timeout=10)
+        return learned.BAIRAVI if r.ok and r.json() else learned.ASTHRA
+    except Exception:
+        return learned.ASTHRA
+
+
+def run_learn_suggestions(now=None, staff=(), notify=None):
+    now = now or datetime.now(timezone.utc)
+    counts = {"pairs": 0, "suggested": 0}
+    url, headers = _crm()
+    owner_id = os.environ.get("CRM_OWNER_USER_ID", "")
+    if not (url and owner_id):
+        counts["crm_not_configured"] = 1
+        return counts
+    staff10 = {p[-10:] for p in staff if p}
+    since = (now - timedelta(hours=LEARN_LOOKBACK_HOURS)).isoformat()
+    try:
+        r = requests.get(f"{url}/rest/v1/whatsapp_messages", headers=headers,
+                         params={"select": "phone", "direction": "eq.outbound",
+                                 "message_type": "eq.text", "metadata->>source": "is.null",
+                                 "user_id": f"eq.{owner_id}", "created_at": f"gte.{since}",
+                                 "limit": "200"}, timeout=10)
+        r.raise_for_status()
+        phones = list(dict.fromkeys(x["phone"] for x in r.json()
+                                    if x.get("phone") and x["phone"][-10:] not in staff10))
+    except Exception as e:
+        print(f"LEARN_CANDIDATES_FAILED type={type(e).__name__}")
+        return counts
+    fresh = []
+    for phone in phones:
+        try:
+            r = requests.get(f"{url}/rest/v1/whatsapp_messages", headers=headers,
+                             params={"select": "id,phone,direction,message_type,body,created_at,metadata",
+                                     "phone": f"eq.{phone}", "user_id": f"eq.{owner_id}",
+                                     "created_at": f"gte.{(now - timedelta(hours=LEARN_LOOKBACK_HOURS + learned.PAIR_WINDOW_HOURS)).isoformat()}",
+                                     "order": "created_at.asc", "limit": "200"}, timeout=10)
+            r.raise_for_status()
+            msgs = [dict(m, created_at=_parse_ts(m.get("created_at")),
+                         source=(m.get("metadata") or {}).get("source"))
+                    for m in r.json() if _parse_ts(m.get("created_at"))]
+        except Exception as e:
+            print(f"LEARN_FETCH_FAILED type={type(e).__name__} phone=...{phone[-4:]}")
+            continue
+        found = learned.pairs(msgs)
+        counts["pairs"] += len(found)
+        if not found:
+            continue
+        biz = _business_of(phone)
+        rows = [{"business": biz, "question": q["body"].strip()[:1000],
+                 "answer": a["body"].strip()[:1000], "source_ref": str(a["id"])} for q, a in found]
+        try:
+            ins = requests.post(f"{SUPABASE_URL}/rest/v1/learned_answers",
+                                headers={**_headers(),
+                                         "Prefer": "resolution=ignore-duplicates,return=representation"},
+                                params={"on_conflict": "source_ref"}, json=rows, timeout=10)
+            ins.raise_for_status()
+            fresh += ins.json()
+        except Exception as e:
+            print(f"LEARN_SAVE_FAILED type={type(e).__name__}")
+    for row in fresh[:learned.MAX_SUGGESTIONS_PER_RUN]:
+        if notify:
+            notify(learned.suggestion_text(row))
+        counts["suggested"] += 1
+    print("LEARN_SUGGEST_RUN " + " ".join(f"{k}={v}" for k, v in counts.items()))
+    return counts
+
+
+def _notify_owner(text):
+    import webhook as w          # heavy; only when there is something to say
+    w.notify_owner(text)
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         # THE SAME GATE digest.py and evaluate.py use — one cron-auth
@@ -401,7 +493,9 @@ class handler(BaseHTTPRequestHandler):
             return
 
         result = run_sweep()
-        result["asthra"] = run_asthra_followups(staff=staff_numbers())
+        staff = staff_numbers()
+        result["asthra"] = run_asthra_followups(staff=staff)
+        result["learn"] = run_learn_suggestions(staff=staff, notify=_notify_owner)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()

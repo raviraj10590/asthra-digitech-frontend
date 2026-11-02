@@ -286,8 +286,8 @@ class TestHandlerRegistration(unittest.TestCase):
              "chat_resume", "commitment_resolve", "commitments_list",
              "crm_call_outcome", "crm_calls_to_make",
              "crm_capture_self", "crm_customer_brief", "crm_list_clients", "crm_money_due",
-             "crm_owner_view", "crm_sync_lead",
-             "knowledge_suffice", "knowledge_why", "leads_today",
+             "crm_owner_view", "crm_owner_write", "crm_sync_lead",
+             "knowledge_suffice", "knowledge_why", "leads_today", "learned_answers",
              "memory_clear", "memory_show", "remove_role", "roles_list",
              "send_brochure", "service_interest", "voice_test"])
 
