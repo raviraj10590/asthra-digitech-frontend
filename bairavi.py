@@ -1046,11 +1046,17 @@ _PLACE_LABEL_RE = re.compile(
     r"|(?:uru|ooru|village|gram|place)\s*[.:\-–—]+\s*)(?=\S)", re.IGNORECASE)
 
 
+# A request about the order, not a place: no Karnataka place is called "confirm" or "stock".
+_REQUEST_NOT_PLACE_RE = re.compile(
+    r"(?<![a-z])(?:confirm|availab\w*|stock|quantity|qty|increase|decrease|cancel|busy|"
+    r"specs?|specification|details?)(?![a-z])")
 _TRAILING_FILLER_RE = re.compile(
     r"(?:[\s,.]+(?:sir|sar|saar|ji|only|matra|maatra|ಸರ್|ಮಾತ್ರ"
     # "ok kadur ge", "ಕದೂರ್ ಗೆ ಕಳಿಸಿ", "kadur bidu" (2026-11-02 fake-customer test): the
     # "to" ending and "send it / that's it" are not part of the place.
-    r"|ge|ಗೆ|kke|ಕ್ಕೆ|kalisi|kalsi|ಕಳಿಸಿ|ಕಳುಹಿಸಿ|bidu|bidi|ಬಿಡಿ|thagi|tagi|thagoli|itself|send|maadi|madi|please|pls))+[\s.!]*$", re.I)
+    r"|ge|ಗೆ|kke|ಕ್ಕೆ|kalisi|kalsi|ಕಳಿಸಿ|ಕಳುಹಿಸಿ|bidu|bidi|ಬಿಡಿ|thagi|tagi|thagoli|itself|send|maadi|madi|please|pls"
+    # 2026-11-03 Groq test: "Kadur nalli" (in Kadur), "Kadur thik aagide" (Kadur is fine)
+    r"|nalli|alli|ನಲ್ಲಿ|ಅಲ್ಲಿ|thik|theek|tik|aagide|agide|ide|ಆಗಿದೆ|ಇದೆ))+[\s.!]*$", re.I)
 # "ಸರಿ ಕದೂರ್‌ಗೆ ಬಿಡಿ": the "to" ending joined by a zero-width non-joiner.
 _JOINED_ENDING_RE = re.compile(r"\u200c(?:ಗೆ|ಕ್ಕೆ)$")
 # "yes kadur", "ok aythu kadur ge", "deliver madthini kadur", "ಸರಿ ಕದೂರ್": a yes or
@@ -1140,7 +1146,9 @@ _PRICE_WORDS = ("rate", "price", "cost", "ದರ", "ಬೆಲೆ",
                 # 2026-11-02 fake-customer test: "raet kudivo", "prise tell me",
                 # "transformer kitti yestu paisa". Whole words only.
                 "raet", "prise", "paisa", "paise", "ಪೈಸೆ", "ರೇಟ",
-                "rupayi", "rupai", "rupees", "ರೂಪಾಯಿ", "hw much", "how mch")
+                "rupayi", "rupai", "rupees", "ರೂಪಾಯಿ", "hw much", "how mch",
+                # 2026-11-03 Groq test: "kaasu yestu?" (how much money) got the engineer hand-off.
+                "kaasu", "kasu", "ಕಾಸು")
 # Already the bot's own words for this: the follow-up button is titled
 # "📋 ಕೋಟೇಶನ್" and its id is "quotation".
 _QUOTATION_WORDS = ("quotation", "quote", "ಕೋಟೇಶನ್")
@@ -1173,7 +1181,11 @@ _LATIN_PRICE_RE = re.compile(
     rf"|(?<![a-z]){_HOW_MUCH}\s*a+gu?t+[ae]+(?:de)?(?![a-z])|(?<![a-z])y?e+s+h?ta+gu?t+[ae]+"
     rf"|(?<![a-z]){_HOW_MUCH}\s*kod(?:a?bek|beku|bekaagutt)[a-z]*"
     rf"|{_SIZE}[^\n]{{0,30}}(?<![a-z])be+l[ae]+(?![a-z])"
-    rf"|{_SIZE}[^\n]{{0,30}}(?:(?<![a-z]){_HOW_MUCH}|{_HOW_MUCH_KN})\s*(?:beku\s*)?\??\s*(?:sir|sar|ಸರ್)?\s*\??\s*$")
+    rf"|{_SIZE}[^\n]{{0,30}}(?:(?<![a-z]){_HOW_MUCH}|{_HOW_MUCH_KN})\s*(?:beku\s*)?\??\s*(?:sir|sar|ಸರ್)?\s*\??\s*$"
+    # 2026-11-03 Groq test: "ಅದಕ್ಕೆ ಎಷ್ಟು? again" (how much for that?) and "₹?? quick reply"
+    # got the engineer hand-off instead of the price.
+    rf"|(?:ಅದಕ್ಕೆ|ಇದಕ್ಕೆ|(?<![a-z])(?:adakke|idakke|adake|idake))\s*(?:(?<![a-z]){_HOW_MUCH}(?![a-z])|{_HOW_MUCH_KN})"
+    rf"|(?:₹|(?<![a-z])rs\.?)\s*\?")
 
 
 def _asks_price_latin(low: str) -> bool:
@@ -2631,11 +2643,28 @@ _BOUGHT_ELSEWHERE_RE = re.compile(
     r"|already\s*(?:installed|install\s*mad|use\s*mad|have)")
 
 
+# 2026-11-03 Groq fake-customer test: "not interested, sorry", "not now, busy", "no thanks, i have my
+# own", "maybe later, after harvest" answering "deliver where?" were stored as the delivery PLACE
+# ("sorry", "busy", "after harvest") and the bot asked what the transformer was for. The whole-message
+# list above missed them because of the words around. Searched, but only in a short reply, and only
+# unmistakable English: "later" must open the reply or follow "maybe", so "deliver later" is not one.
+_NOT_NOW_RE = re.compile(
+    r"(?<![a-z])(?:not\s*(?:interested|now|needed|required|today)|no\s*(?:thanks?|thanx|thank\s*you|need)"
+    r"|don'?t\s*(?:need|want)|i\s*have\s*(?:my\s*own|one\s*already)|maybe\s*later)(?![a-z])"
+    r"|^\s*later(?![a-z])")
+
+
+# "not now, call in the evening" is a later call, not a no.
+_CALL_LATER_RE = re.compile(r"call|phone|coll|ಕಾಲ್|ಕರೆ|ಫೋನ್|evening|tomorrow|naale|nale|sanje|ಸಂಜೆ|ನಾಳೆ|week|month")
+
+
 def is_decline(text: str) -> bool:
     bare = re.sub(r"[^\w\s\u0C80-\u0CFF]", " ", (text or "").lower())
     bare = " ".join(bare.split())
     return (bare in _DECLINES or bool(_PRICE_DECLINE_RE.fullmatch(bare))
-            or bool(_BEDA_RE.fullmatch(bare)) or bool(_BOUGHT_ELSEWHERE_RE.search((text or "").lower())))
+            or bool(_BEDA_RE.fullmatch(bare)) or bool(_BOUGHT_ELSEWHERE_RE.search((text or "").lower()))
+            or (len(bare.split()) <= 8 and bool(_NOT_NOW_RE.search(bare))
+                and not _CALL_LATER_RE.search(bare)))
 
 
 # ── A SHARED WHATSAPP LOCATION ────────────────────────────────────────────
@@ -2921,7 +2950,10 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
               or asks_for_info(text) or _mentions(low, _INFO_NOT)
               # "Kamba yalla bantha" / "DP structure" answering "deliver
               # where?" were stored as the place (2026-10-03).
-              or asks_scope(text))
+              or asks_scope(text)
+              # 2026-11-03 Groq test: "stock availability confirm maadi", "order quantity increase
+              # madbeku", "shipping address confirm maadi" were stored as the place.
+              or bool(_REQUEST_NOT_PLACE_RE.search(low)))
     # "THIS SAME PLACE" IS A CONFIRMATION, NOT A PLACE. "ಇಲ್ಲ ಇದೇ ಸ್ಥಳವಿದೇ"
     # (no — it is this same place) answering "is X right?" was stored as the
     # delivery place "ಇಲ್ಲ ಇದೇ ಸ್ಥಳವಿದೇ" (live ...3294, 2026-10-03), and that
@@ -3385,7 +3417,9 @@ _PART_OF_DAY = (
                  "morning", "mrng", "morng", "moring", "belgil", "ಮಾರ್ನಿಂಗ್")),
     ("afternoon", ("ಮಧ್ಯಾಹ್ನ", "ಮಧ್ಯಾನ್ಹ", "ಮಧ್ಯಾನ", "madhyahna", "madyahna", "madyana", "afternoon", "noon", "lunch",
                    "aftrnoon", "afternon", "aftrnon")),
-    ("evening", ("ಸಂಜೆ", "sanje", "sanjhe", "evening", "evng", "eve", "evning", "ಈವ್ನಿಂಗ್")),
+    ("evening", ("ಸಂಜೆ", "sanje", "sanjhe", "evening", "evng", "eve", "evning", "ಈವ್ನಿಂಗ್",
+                 # 2026-11-03 Groq test: "ಸಾಯಂಕಾಲ 4 call maadi" was read as 4 units
+                 "ಸಾಯಂಕಾಲ", "sayankala", "saayankaala", "sayankaala", "saayankala")),
     ("night", ("ರಾತ್ರಿ", "ratri", "rathri", "raatri", "night")),
     ("any", ("ಯಾವಾಗಾದರೂ", "ಯಾವಾಗಲಾದರೂ", "ಯಾವಾಗ ಬೇಕಾದರೂ", "yavaglu", "yavagadru", "yavagadaru",
              "any time", "anytime", "eppo", "whenever", "free time")),
@@ -3410,9 +3444,14 @@ _HOUR_WORDS = (
     ("eradu", 2), ("ondu", 1),
     # 2026-11-02 fake-customer test: "yeradu gante barli"
     ("yeradu", 2), ("muru", 3), ("naalku", 4), ("aidhu", 5), ("yelu", 7), ("yentu", 8),
-    ("ombathu", 9), ("hathu", 10))
+    ("ombathu", 9), ("hathu", 10),
+    # 2026-11-03 Groq fake-customer test: "six pm", "ten am", "seven o'clock" were answered
+    # "engineer will call *now*". English hour words, only before am/pm/o'clock/gante.
+    ("twelve", 12), ("eleven", 11), ("ten", 10), ("nine", 9), ("eight", 8), ("seven", 7),
+    ("six", 6), ("five", 5), ("four", 4), ("three", 3), ("two", 2), ("one", 1))
 _HOUR_WORD_RE = re.compile(
-    r"(?<![\w\u0C80-\u0CFF])(" + "|".join(w for w, _n in _HOUR_WORDS) + r")\s*(?=ಗಂಟೆ|gante|ghante)", re.I)
+    r"(?<![\w\u0C80-\u0CFF])(" + "|".join(w for w, _n in _HOUR_WORDS) + r")\s*"
+    r"(?=ಗಂಟೆ|gante|ghante|a\.?m\b|p\.?m\b|o'?clock)", re.I)
 # An explicit clock time: a figure with an hour word or am/pm, or a figure
 # next to a part of the day ("evening 5", "ಸಂಜೆ 4"). Used to read a time given
 # at the 1/2/3 question, where a bare "2" is still the menu choice.
@@ -3425,7 +3464,7 @@ _EXPLICIT_CLOCK_RE = re.compile(
     # A figure up to 12 with the "at" ending, or after a misspelt part of the day.
     r"|(?<![\d.])(?:[1-9]|1[0-2])\s*(?:kke|ಕ್ಕೆ|ge|ಗೆ|baje|baji)(?![a-z])"
     r"|(?:evn?ing|evng|aft[e]?r?no+n|morn?ing|mrng|belgil|ಮಾರ್ನಿಂಗ್|ಈವ್ನಿಂಗ್|tomorr?ow|nale|naale|ನಾಳೆ"
-    r"|ratri|raatri|rathri|ಮಧ್ಯಾನ್ಹ|ಮಧ್ಯಾನ|madhyana)"
+    r"|ratri|raatri|rathri|ಮಧ್ಯಾನ್ಹ|ಮಧ್ಯಾನ|madhyana|ಸಾಯಂಕಾಲ|saa?yankaa?la)"
     r"\s*\d{1,2}", re.I)
 
 
