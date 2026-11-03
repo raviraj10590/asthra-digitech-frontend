@@ -21,7 +21,7 @@ WHO OWNS WHAT
   whatever an interpreter says):
     delivery_same, delivery_mentioned, discom_approval_ask, callback_offered,
     asked_discount, asks_call, asks_call_when, call_missed, asks_info, asks_scope, asks_photo,
-    asks_documents, declined, escom_area (sales alerts and a
+    asks_documents, asks_bot, declined, escom_area (sales alerts and a
     location pin's supply area: never an interpreter's guess)
 
 Pure module: imports only json, re and bairavi. Never produces customer-facing text.
@@ -224,6 +224,7 @@ def validate(interp, text: str, awaiting=(), known: dict = None) -> dict:
            "asks_scope": brain["asks_scope"],
            "asks_photo": brain["asks_photo"],
            "asks_documents": brain["asks_documents"],
+           "asks_bot": brain["asks_bot"],
            "declined": brain["declined"],
            "escom_area": brain["escom_area"],
            # The answer to "what time shall we call?" (2026-10-04): read by the

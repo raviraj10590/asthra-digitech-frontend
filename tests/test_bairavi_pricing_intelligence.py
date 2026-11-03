@@ -768,5 +768,6 @@ class TheVocabularyCoversHowPeopleAsk(unittest.TestCase):
         # The upside of the same rule: plurals and inflections come free.
         self.assertTrue(b.parse_followup("prices")["asked_price"])
         self.assertTrue(b.parse_followup("rates")["asked_price"])
-        # And the limit of it: "pricing" does NOT contain "price".
-        self.assertFalse(b.parse_followup("pricing")["asked_price"])
+        # "pricing" does not contain "price" as a word, so it was missed until it was listed itself
+        # (2026-11-03 modern-chat test: "complete pricing for the 25 kVA" got the hand-off).
+        self.assertTrue(b.parse_followup("pricing")["asked_price"])
