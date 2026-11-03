@@ -134,7 +134,7 @@ class NoLoneThanks(unittest.TestCase):
         k = {"capacity_kva": 25, "location": "x", "delivery_same": True,
              "application": "AGRICULTURE", "callback": "now"}
         self.assertEqual(b.compose_followup_reply(b.parse_followup("25", (), known=k), k),
-                         "ಧನ್ಯವಾದಗಳು 🙏 ನಮ್ಮ engineer *ಈಗಲೇ* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
+                         "ಸರಿ 🙏 ನಮ್ಮ engineer ಈಗಲೇ call ಮಾಡ್ತಾರೆ.")
 
     def test_installation_amount_is_the_engineers(self):
         k = {"capacity_kva": 25}

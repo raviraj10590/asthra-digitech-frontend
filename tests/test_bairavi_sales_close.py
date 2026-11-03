@@ -78,7 +78,7 @@ class ThePriceList(unittest.TestCase):
 
     def test_the_customer_is_addressed_by_name(self):
         r = b.compose_reply(b.parse(FORM.format(cap="A. 25 kVA").replace("Test", "PUNITH SINCHANA 2024")))
-        self.assertTrue(r.startswith("ನಮಸ್ಕಾರ Punith Sinchana ಅವರೇ"), r)
+        self.assertTrue(r.startswith("ನಮಸ್ಕಾರ Punith Sinchana 🙏"), r)
         self.assertEqual(b.display_name("  "), "")
 
 
@@ -179,7 +179,8 @@ class NoRepeatedCourtesy(unittest.TestCase):
     def test_thanks_is_said_once_per_message(self):
         f = b.parse_followup("agriculture", (b.AWAITING_PURPOSE,), {**DONE, "application": None})
         r = b.compose_followup_reply(f, {**DONE, "application": None})
-        self.assertEqual(r.count("ಧನ್ಯವಾದಗಳು"), 1, r)
+        # Owner 2026-11-04: a plain "ಸರಿ", not a thank-you on every message.
+        self.assertLessEqual(r.count("ಧನ್ಯವಾದಗಳು"), 1, r)
 
 
 class TheCloseUsesWhatTheFormSaid(unittest.TestCase):
@@ -190,7 +191,7 @@ class TheCloseUsesWhatTheFormSaid(unittest.TestCase):
         return b.compose_followup_reply(b.parse_followup("agriculture", (b.AWAITING_PURPOSE,), k), k)
 
     def test_urgent_leads_are_told_we_will_be_quick(self):
-        self.assertIn("ತಕ್ಷಣ ಬೇಕಾಗಿರುವುದರಿಂದ", self._close("IMMEDIATE"))
+        self.assertIn("ತಕ್ಷಣ ಬೇಕು ಅಂದಿದ್ದೀರಿ", self._close("IMMEDIATE"))
 
     def test_price_list_leads_are_offered_guidance(self):
         self.assertIn("ಮಾರ್ಗದರ್ಶನ", self._close("INFORMATION_ONLY"))

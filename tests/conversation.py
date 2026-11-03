@@ -50,7 +50,8 @@ class Turn(dict):
 
     @property
     def reply(self):
-        return self["sent"][0] if self["sent"] else None
+        # The whole reply: a Bairavi reply goes out as short messages (bairavi.bubbles).
+        return "\n\n".join(self["sent"]) if self["sent"] else None
 
     @property
     def silent(self):

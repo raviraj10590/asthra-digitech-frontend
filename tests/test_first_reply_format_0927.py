@@ -28,14 +28,14 @@ class TheRealLead(unittest.TestCase):
         self.r = b.compose_reply(self.p)
 
     def test_address_is_tidy(self):
-        self.assertIn("ಡೆಲಿವರಿ ಸ್ಥಳ: *Toranagatti, Ramdurga, Belgaum* — ಇದು ಸರಿಯೇ?", self.r)
+        self.assertIn("ಡೆಲಿವರಿ Toranagatti, Ramdurga, Belgaum ಗೆ ತಾನೇ?", self.r)
         self.assertNotIn("  ", self.r)
 
     def test_stored_place_is_untouched(self):
         self.assertEqual(self.p["location"], REAL_LOC)
 
     def test_urgency_acknowledged_without_a_date(self):
-        self.assertIn("*ತಕ್ಷಣ* ಬೇಕು ಎಂದು ಗಮನಿಸಿದ್ದೇವೆ — ಆದ್ಯತೆ ಮೇಲೆ ಮುಂದುವರಿಸುತ್ತೇವೆ", self.r)
+        self.assertIn("ತಕ್ಷಣ ಬೇಕು ಅಂತ ನೋಡಿದೆ — ಮೊದಲು ನಿಮ್ಮದೇ ನೋಡ್ತೀವಿ", self.r)
         for w in ("ದಿನ", "ವಾರ", "day", "week", "₹"):
             self.assertNotIn(w, self.r)
 
@@ -47,8 +47,8 @@ class NotUrgent(unittest.TestCase):
     def test_no_priority_promise(self):
         r = b.compose_reply(b.parse(FORM.format(when=LATER, loc="Sira")))
         self.assertNotIn("ಆದ್ಯತೆ", r)
-        self.assertIn("*63 kVA* ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ವಿಚಾರಣೆ ನಮಗೆ ತಲುಪಿದೆ", r)
-        self.assertIn("ಡೆಲಿವರಿ ಸ್ಥಳ: *Sira* — ಇದು ಸರಿಯೇ?", r)
+        self.assertIn("63 kVA transformer ಬಗ್ಗೆ ಕೇಳಿದ್ರಿ ಅಲ್ವಾ", r)
+        self.assertIn("ಡೆಲಿವರಿ Sira ಗೆ ತಾನೇ?", r)
 
 
 class PlaceDisplay(unittest.TestCase):

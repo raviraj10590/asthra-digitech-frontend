@@ -56,6 +56,7 @@ def run_conversation(messages, *, shadow=False, provider=None, clock_left=None):
         return f
 
     for text in messages:
+        turn_start = len(run.sent)
         ctx = {"history": list(history), "recent_sys": [], "paused": False,
                "vip_alerted": False, "lead_alerted": False, "last_user": {}}
         saved = []
@@ -84,6 +85,10 @@ def run_conversation(messages, *, shadow=False, provider=None, clock_left=None):
             else:
                 w.start_turn_clock()
             w.run_client_pipeline("910000000077", text, ctx, message_id=f"wamid.{len(history)}")
+        # One reply per turn: a Bairavi reply's short messages (bairavi.bubbles) joined back.
+        _turn = run.sent[turn_start:]
+        if len(_turn) > 1 and "<MENU>" not in _turn:
+            run.sent[turn_start:] = ["\n\n".join(_turn)]
         for row in saved:
             if len(row) == 3:
                 history.append({"role": row[1], "content": row[2], "created_at": NOW_ISO})

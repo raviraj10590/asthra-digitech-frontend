@@ -724,6 +724,7 @@ _QTY_RE = re.compile(
     r")?", re.IGNORECASE)
 
 
+_CALL_AT_RE = re.compile(r"(?:kke|ಕ್ಕೆ|ge|ಗೆ)\s*(?:call|phone|fone|kaal|coll|ಕಾಲ್|ಫೋನ್|ಕರೆ)", re.I)
 _NOT_TRANSFORMERS = ("ಕಂಬ", "ಕಹಬ", "ಕಂಭ", "kamba", "kamb", "pole", "ಪೋಲ್",
                      "acre", "ekare", "ಎಕರೆ", "gunte", "ಗುಂಟೆ", "wire", "ವೈರ್")
 
@@ -795,6 +796,9 @@ def _read_quantity(low: str, cap=None):
             # OTHER THINGS BEING COUNTED. "32 ಕಹಬ" (32 poles, ಕಂಬ misspelt;
             # live ...4109) was recorded as 32 transformers.
             if any(rest.startswith(u) for u in _NOT_TRANSFORMERS):
+                continue
+            # "30 ge call maadi", "15 ge phone maadri" (2026-11-04 stress test): a time, not units.
+            if _CALL_AT_RE.match(rest):
                 continue
         return n
     # A COUNT IN WORDS. "Agriculture / Single unit" (2026-09-24) was stored as
@@ -1191,7 +1195,10 @@ _LATIN_PRICE_RE = re.compile(
     rf"|(?:ಅದಕ್ಕೆ|ಇದಕ್ಕೆ|(?<![a-z])(?:adakke|idakke|adake|idake))\s*(?:(?<![a-z]){_HOW_MUCH}(?![a-z])|{_HOW_MUCH_KN})"
     rf"|(?:₹|(?<![a-z])rs\.?)\s*\?"
     # 2026-11-03 modern-chat test: "yestu? 25kva" — how-much first, then the size
-    rf"|(?:(?<![a-z]){_HOW_MUCH}(?![a-z])|{_HOW_MUCH_KN})\s*\??\s*{_SIZE}")
+    rf"|(?:(?<![a-z]){_HOW_MUCH}(?![a-z])|{_HOW_MUCH_KN})\s*\??\s*{_SIZE}"
+    # 2026-11-04 stress test: "bhai, 25kva ge yen charge?" — what does a size cost
+    rf"|{_SIZE}[^\n]{{0,15}}(?<![a-z])y?e+n+u?\s*charges?(?![a-z])"
+    r"|^\W*y?e+n+u?\s*charges?\s*\??\s*(?:sir|sar)?\s*\??\s*$")
 
 
 def _asks_price_latin(low: str) -> bool:
@@ -1548,8 +1555,7 @@ def answer_question_kn(tag, known: dict = None) -> str:
     if tag == QUESTION_DELIVERY_AREA:
         return (_DELIVERY_NOW_KN + " ನಿಮ್ಮ ಸ್ಥಳಕ್ಕೆ ಸಾಧ್ಯವೇ ಎಂದು ನಮ್ಮ "
                 "engineer ಖಚಿತವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
-    return ("ಈ ಪ್ರಶ್ನೆಗೆ ನಮ್ಮ engineer ಖಚಿತವಾಗಿ ಉತ್ತರಿಸುತ್ತಾರೆ — "
-            "ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ಅವರಿಗೆ ತಲುಪಿಸಿದ್ದೇವೆ 🙏")
+    return "ಇದನ್ನ ನಮ್ಮ engineer ಹತ್ರ ಕೇಳಿ ಹೇಳ್ತೀವಿ 🙏"
 
 
 def unanswered_question(followup: dict) -> bool:
@@ -1917,7 +1923,9 @@ def model_brief_kn(known: dict = None, english: bool = False) -> str:
            "kVA, MESCOM ತರಹದ ಪದಗಳು English ನಲ್ಲಿ ಇರಬಹುದು. English ಅಕ್ಷರಗಳಲ್ಲಿ "
            "ಕನ್ನಡ ಬರೆಯಬೇಡಿ. ")
         + "ಯಾವಾಗಲೂ ಗೌರವದಿಂದ "
-        "'ನೀವು' ಬಳಸಿ — 'ನೀನು' ಎಂದಿಗೂ ಬೇಡ. ವೃತ್ತಿಪರ ಶೈಲಿ, 1–3 ಚಿಕ್ಕ ವಾಕ್ಯ. "
+        "'ನೀವು' ಬಳಸಿ — 'ನೀನು' ಎಂದಿಗೂ ಬೇಡ. ಒಬ್ಬ ಮನುಷ್ಯ WhatsApp ನಲ್ಲಿ ಬರೆಯುವ ಹಾಗೆ, "
+        "1–2 ಚಿಕ್ಕ ವಾಕ್ಯ, ಮಾತಾಡುವ ಕನ್ನಡ ('ಸರಿ', 'ಹೇಳ್ತೀವಿ', 'ಮಾಡ್ತಾರೆ'); list, menu, "
+        "bold, ಪ್ರತಿ ಸಲ 'ಧನ್ಯವಾದಗಳು' ಬೇಡ. "
         "ಈಗಾಗಲೇ ತಿಳಿದ ವಿವರಗಳನ್ನು ಪುನರಾವರ್ತಿಸಬೇಡಿ.\n"
         "8. Asthra DigiTech ನ ಸೇವೆಗಳ ಬಗ್ಗೆ ಮಾತನಾಡಬೇಡಿ — ಇದು "
         "transformer ವಿಚಾರಣೆ.\n"
@@ -2603,7 +2611,11 @@ _DECLINES = ("no thanks", "no thanx", "no thank you", "no thanku", "not interest
              # "Beda bidi" (no, leave it; live ...6244, 2026-10-05) was stored
              # as the DELIVERY PLACE "Beda bidi".
              "beda bidi", "bidi", "bidi sir", "beda bidi sir", "ಬೇಡ ಬಿಡಿ", "ಬಿಡಿ",
-             "beda bidri", "beda biddi", "beda bidu", "ಬೇಡ ಬಿಡಿ ಸರ್")
+             "beda bidri", "beda biddi", "beda bidu", "ಬೇಡ ಬಿಡಿ ಸರ್",
+             # 2026-11-04 stress test: stored as the delivery place
+             "can't right now", "cant right now", "can t right now", "can't buy now", "cant buy now",
+             "can t buy now", "not now",
+             "not right now")
 # "Dara jasti beda" (too costly, don't want; live ...6244) — a refusal over
 # price: read as BOTH a decline and a price objection.
 _PRICE_DECLINE_RE = re.compile(
@@ -2902,13 +2914,21 @@ _SENTENCE_PLACE_RE = re.compile(
 # "koneya delivery date" (the last delivery date) read as places.
 _PLACE_THEN_SEND_RE = re.compile(
     r"(?<![a-z])([a-z]{4,})\s+(?:alli|nalli|ge|kke)\s+(?:ship|send|deliver\w*|dispatch|kalisi|kalsi|kalisabeku)(?![a-z])")
+# The no-ending form is read only before a "do it / want it" word (2026-11-04 stress test).
+_PLACE_DELIVERY_DO_RE = re.compile(
+    r"(?<![a-z])([a-z]{4,})\s+delivery\s+(?:maadi|madi|maadri|madri|kodi|beku|maadbeku|please|pls)(?![a-z])")
+_PLACE_FILLER = frozenset(("ok", "okay", "ok.", "yep", "yes", "ya", "yeah", "haudu", "houdu", "sari",
+                           "fine", "delivery", "alli", "nalli", "ge", "sir", "only", "matra", "please", "pls"))
 _NOT_A_SENTENCE_PLACE = ("the", "my", "our", "your", "me", "you", "us", "him", "them", "it", "there",
                          "here", "home", "site", "farm", "office", "factory", "owner", "engineer",
                          "same", "this", "that", "any", "all", "earliest", "once", "least",
                          "transformer", "address", "request", "please", "pls", "fast", "quick", "free",
                          "door", "home", "where", "when", "yavaga", "yavag", "nanna", "namma", "nimma",
                          "hello", "boss", "then", "just", "only", "matra", "beku", "maadi", "madi",
-                         "days", "dina", "week", "weeks", "month", "date", "time", "today", "naale", "soon")
+                         "days", "dina", "week", "weeks", "month", "date", "time", "today", "naale", "soon",
+                         "aagidre", "agidre", "aadre", "adre", "aadmele", "admele", "approve", "approval",
+                         "bega", "beega", "fast", "quick", "home", "door", "free", "koneya", "first",
+                         "next", "full", "order", "payment", "advance", "transformer", "sir", "anna")
 
 
 def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
@@ -3015,7 +3035,8 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     said_same = bool(_SAME_PLACE_RE.search(low))
     refused = is_decline(text)
     if dl is None and AWAITING_DELIVERY in (awaiting or ()) and not said_same and not refused:
-        for _at in (*_SENTENCE_PLACE_RE.finditer(low), *_PLACE_THEN_SEND_RE.finditer(low)):
+        for _at in (*_SENTENCE_PLACE_RE.finditer(low), *_PLACE_THEN_SEND_RE.finditer(low),
+                    *_PLACE_DELIVERY_DO_RE.finditer(low)):
             if _at.group(1).split()[0] not in _NOT_A_SENTENCE_PLACE and _is_place_like(_at.group(1)):
                 dl = (text or "")[_at.start(1):_at.end(1)].strip()
                 break
@@ -3048,6 +3069,13 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             dl = f"{_held}, {_addition}"
 
     dl = _without_place_label(dl)
+    # "kadur ok", "yep kadur", "kadur delivery" (2026-11-04 stress test) were stored as the place
+    # "kadur ok". The filler words go; what is left naming the place we hold is a "same".
+    # Short Latin answers only: a full Kannada address is kept word for word.
+    if dl and dl.isascii() and len(dl.split()) <= 4:
+        _core = " ".join(w for w in dl.split() if w.lower().strip(".,!") not in _PLACE_FILLER)
+        if _core:
+            dl = _core
     mentioned = bool(_DELIVERY_MENTION_RE.search(text or ""))
 
     # "Same place" answers the question without naming anywhere: it points at
@@ -3281,8 +3309,8 @@ _BOT_ASK_RE = re.compile(
     r"(?<![a-z])(?:bot|robot|chat\s*bot|chatbot)(?![a-z])\s*(?:aa|a|na|aagiddiya|agiddiya|ideya|idiya|\?|$)"
     r"|(?:are\s*you|r\s*u|is\s*this|you|nivu|neevu|idu|ithu)\s*(?:a\s*)?(?:bot|robot|chatbot|machine)(?![a-z])"
     r"|ಬಾಟ್")
-BOT_KN = ("🤖 ಹೌದು, ಇದು Bairavi Transformers-ನ WhatsApp ಸಹಾಯಕ. ನಮ್ಮ engineer ನಿಮ್ಮ ಜೊತೆ "
-          "ನೇರವಾಗಿ ಮಾತನಾಡುತ್ತಾರೆ — " + "📞 *CALL* ಎಂದು reply ಮಾಡಿ.")
+BOT_KN = ("ಹೌದು, ಇದು Bairavi ಯ WhatsApp ಸಹಾಯಕ 🙂 ನಮ್ಮ engineer ಜೊತೆನೇ ಮಾತಾಡ್ಬೇಕಾದ್ರೆ "
+          "CALL ಅಂತ ಹಾಕಿ, ಅವರು call ಮಾಡ್ತಾರೆ.")
 
 
 def asks_bot(text: str) -> bool:
@@ -3359,8 +3387,7 @@ TERM_LINES = {
     "warranty": "ನಮ್ಮ transformer ಗಳಿಗೆ *1 ವರ್ಷ warranty* ಇದೆ; ಅದರ ನಂತರವೂ service ಲಭ್ಯವಿದೆ.",
     "payment": "Payment: *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ.",
 }
-CLOSING_VALUE = ("ನಿಮ್ಮ requirement ಪ್ರಕಾರ ನಮ್ಮ engineer ನಿಮ್ಮೊಂದಿಗೆ "
-                 "ಮಾತನಾಡಿ ಸಂಪೂರ್ಣ ವಿವರ ತಿಳಿಸುತ್ತಾರೆ.")
+CLOSING_VALUE = "ನಮ್ಮ engineer ನಿಮ್ಮ ಜೊತೆ ಮಾತಾಡಿ ಪೂರ್ತಿ ವಿವರ ಹೇಳ್ತಾರೆ."
 # Quantity, asked ONCE (owner, 2026-09-17: "just ask them, if they don't
 # tell anything assume it as single quantity"). It rides on the closing
 # message as one line instead of being a numbered question of its own.
@@ -3370,12 +3397,11 @@ CLOSING_VALUE = ("ನಿಮ್ಮ requirement ಪ್ರಕಾರ ನಮ್ಮ en
 # Each line states only what the team will do — no delivery promise, no
 # claim beyond the evidence.
 _CLOSE_BY_URGENCY = {
-    "IMMEDIATE": "ನಿಮಗೆ transformer ತಕ್ಷಣ ಬೇಕಾಗಿರುವುದರಿಂದ, ನಮ್ಮ engineer ಆದಷ್ಟು "
-                 "ಬೇಗ ನಿಮ್ಮೊಂದಿಗೆ ಮಾತನಾಡುತ್ತಾರೆ.",
-    "WITHIN_1_MONTH": "ನಿಮಗೆ ಒಂದು ತಿಂಗಳೊಳಗೆ ಬೇಕಾಗಿರುವುದರಿಂದ, ನಿಮ್ಮ ಸಮಯಕ್ಕೆ "
-                      "ಸರಿಯಾಗಿ plan ಮಾಡಲು ನಮ್ಮ engineer ಮಾತನಾಡುತ್ತಾರೆ.",
-    "INFORMATION_ONLY": "ದರದ ಜೊತೆಗೆ, ನಿಮ್ಮ site ಗೆ ಸರಿಯಾದ transformer ಬಗ್ಗೆ ನಮ್ಮ "
-                        "engineer ಮಾರ್ಗದರ್ಶನ ನೀಡುತ್ತಾರೆ.",
+    "IMMEDIATE": "ತಕ್ಷಣ ಬೇಕು ಅಂದಿದ್ದೀರಿ, ನಮ್ಮ engineer ಬೇಗ ಮಾತಾಡ್ತಾರೆ.",
+    "WITHIN_1_MONTH": "ಒಂದು ತಿಂಗಳೊಳಗೆ ಬೇಕು ಅಂದಿದ್ದೀರಿ, ಅದಕ್ಕೆ ತಕ್ಕಂತೆ ನಮ್ಮ engineer "
+                      "plan ಮಾಡಿ ಮಾತಾಡ್ತಾರೆ.",
+    "INFORMATION_ONLY": "ನಿಮ್ಮ site ಗೆ ಯಾವ transformer ಸರಿ ಅಂತ ನಮ್ಮ engineer "
+                        "ಮಾರ್ಗದರ್ಶನ ಮಾಡ್ತಾರೆ.",
 }
 
 
@@ -3386,7 +3412,7 @@ def closing_line(state: dict) -> str:
     return f"{who} ಅವರೇ, {body}" if who else body
 
 
-QUANTITY_NOTE = "(1 ಕ್ಕಿಂತ ಹೆಚ್ಚು *units* ಬೇಕಿದ್ದರೆ ದಯವಿಟ್ಟು ತಿಳಿಸಿ.)"
+QUANTITY_NOTE = "ಒಂದಕ್ಕಿಂತ ಜಾಸ್ತಿ units ಬೇಕಿದ್ರೆ ಹೇಳಿ."
 
 
 # PROFESSIONAL TONE — owner, 2026-09-25: "dont tell price directly, if
@@ -3417,8 +3443,8 @@ def display_name(name) -> str:
 def value_line_kn(kva=None) -> str:
     stars = PRICE_LIST.get(kva, (None, None))[1] if kva in PRICE_LIST else None
     rating = f"*{stars} Star*" if stars else "*Star-rated*"
-    return (f"⭐ {rating} premium transformer — best-grade aluminium winding, "
-            "ಕಡಿಮೆ ನಷ್ಟ (lower losses), ವಿದ್ಯುತ್ ಉಳಿತಾಯ.")
+    return (f"{rating} premium transformer — best-grade aluminium winding, "
+            "lower losses, ಕರೆಂಟ್ ಉಳಿತಾಯ.")
 
 
 def price_short_kn(kva=None) -> str:
@@ -3535,7 +3561,7 @@ _HOUR_WORD_RE = re.compile(
 # next to a part of the day ("evening 5", "ಸಂಜೆ 4"). Used to read a time given
 # at the 1/2/3 question, where a bare "2" is still the menu choice.
 _EXPLICIT_CLOCK_RE = re.compile(
-    r"\d{1,2}(?:[:.]\d{2})?\s*(?:a\.?m|p\.?m|ಗಂಟೆ|gante|ghante|o'?clock)"
+    r"\d{1,2}(?:[:.]\d{2})?\s*(?:a\.?m|p\.?m|ಗಂಟೆ|ಗಂತೆ|gante|ghante|o'?clock|midday)"
     r"|(?:ಬೆಳಿಗ್ಗೆ|ಬೆಳಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ|ಸಂಜೆ|ರಾತ್ರಿ|morning|afternoon|evening|night|sanje|beligge|madhyahna)"
     r"\s*\d{1,2}|\d{1,2}\s*(?:ಕ್ಕೆ\s*)?(?:ಬೆಳಿಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ|ಸಂಜೆ|morning|evening|afternoon)"
     # 2026-11-02 fake-customer test: "evning 6 kke call", "aftrnoon 3 ge engineer call",
@@ -3550,7 +3576,9 @@ _EXPLICIT_CLOCK_RE = re.compile(
     r"|(?<![\d.])(?:[01]?\d|2[0-3])[:.][0-5]\d(?![\d.])(?!\s*(?:lakh|lac|l\b|k\b|kva|kv\b|kw|%))"
     r"|(?<![a-z])(?:after|aftr|before|around|by|at)\s*(?:[1-9]|1[0-2])(?![\d.:])"
     r"(?!\s*(?:day|days|dina|din|week|weeks|month|months|varsha|year|years|units?|kva|nos?)\b)"
-    r"|(?<![a-z])half\s*past\s*\d|\d{1,2}\s*noon|(?<![a-z])noon(?![a-z])", re.I)
+    r"|(?<![a-z])half\s*past\s*\d|\d{1,2}\s*noon|(?<![a-z])noon(?![a-z])"
+    # 2026-11-04 stress test: "15 ge phone maadri" — a 24-hour figure with "at" before call/phone.
+    r"|(?<![\d.])(?:1[3-9]|2[01])\s*(?:kke|ಕ್ಕೆ|ge|ಗೆ)\s*(?:call|phone|fone|kaal|coll|ಕಾಲ್|ಫೋನ್|ಕರೆ)", re.I)
 
 
 def _hour_words_as_figures(text: str) -> str:
@@ -3634,11 +3662,12 @@ def callback_when_en(slot, hour=None) -> str:
     if slot == CALLBACK_EVENING and hour >= end:
         return "tomorrow evening (asked after 9 pm)"
     return label
-CALLBACK_QUESTION = ("ನಿಮಗೆ ಯಾವಾಗ ಕರೆ ಮಾಡುವುದು ಅನುಕೂಲ?\n"
-                     "1️⃣ ಈಗಲೇ\n2️⃣ ಇಂದು ಸಂಜೆ\n3️⃣ ನಾಳೆ")
+# A plain question, no numbered menu (owner 2026-11-04: "simple aagi manushyar tara reply").
+# The digits 1/2/3 are still read, for chats that saw the old menu.
+CALLBACK_QUESTION = "ನಮ್ಮ engineer ನಿಮಗೆ ಯಾವಾಗ call ಮಾಡ್ಲಿ — ಈಗಲೇ, ಇವತ್ತು ಸಂಜೆ, ಅಥವಾ ನಾಳೆ?"
 CALL_HINT = "📞 ನೇರವಾಗಿ ಮಾತನಾಡಲು *CALL* ಎಂದು reply ಮಾಡಿ."
 # The call offer AGAIN, after the full closing was already sent once.
-CALLBACK_REMINDER = "ಕರೆ ಮಾಡಲು ಅನುಕೂಲವಾದ ಸಮಯ: 1️⃣ ಈಗಲೇ · 2️⃣ ಇಂದು ಸಂಜೆ · 3️⃣ ನಾಳೆ"
+CALLBACK_REMINDER = "Call ಯಾವಾಗ ಮಾಡ್ಲಿ — ಈಗಲೇ, ಸಂಜೆ, ಅಥವಾ ನಾಳೆ?"
 
 _CALL_WORDS = ("call", "call me", "phone", "phone me", "ಕಾಲ್", "ಕಾಲ್ ಮಾಡಿ", "ಫೋನ್",
                "ಫೋನ್ ಮಾಡಿ", "ಕರೆ", "ಕರೆ ಮಾಡಿ", "call madi", "call maadi", "phone madi",
@@ -3667,6 +3696,7 @@ _TERM_TOPIC = {
     "install": "transport", "ಇನ್‌ಸ್ಟಾಲೇಶನ್": "transport",
     # "kudur ge shipping charge yen?" got the engineer hand-off (2026-11-03 modern-chat test)
     "shipping": "transport", "freight": "transport", "delivery charge": "transport",
+    "delivery ge extra": "transport", "delivery extra": "transport", "transport charge": "transport",
 }
 
 
@@ -3808,17 +3838,15 @@ def _compose_opening_reply(parsed: dict) -> str:
         )
 
     who = display_name(parsed.get("name"))
-    lines = [f"ನಮಸ್ಕಾರ {who} ಅವರೇ 🙏" if who else "ನಮಸ್ಕಾರ 🙏",
-             "*Bairavi Trans Solutions* (Kadaba) ಅನ್ನು ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು."]
+    lines = [(f"ನಮಸ್ಕಾರ {who} 🙏" if who else "ನಮಸ್ಕಾರ 🙏") + " Bairavi Trans Solutions, Kadaba ಇಂದ."]
 
     kva = parsed["capacity_kva"]
     if parsed["in_catalogue"]:
         if parsed.get("urgency") == "IMMEDIATE":
             # Owner-approved wording (2026-09-27). A priority, never a date.
-            lines.append(f"ನಿಮಗೆ *{kva} kVA* ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ *ತಕ್ಷಣ* ಬೇಕು ಎಂದು "
-                         "ಗಮನಿಸಿದ್ದೇವೆ — ಆದ್ಯತೆ ಮೇಲೆ ಮುಂದುವರಿಸುತ್ತೇವೆ.")
+            lines.append(f"{kva} kVA ತಕ್ಷಣ ಬೇಕು ಅಂತ ನೋಡಿದೆ — ಮೊದಲು ನಿಮ್ಮದೇ ನೋಡ್ತೀವಿ.")
         else:
-            lines.append(f"ನಿಮ್ಮ *{kva} kVA* ಟ್ರಾನ್ಸ್‌ಫಾರ್ಮರ್ ವಿಚಾರಣೆ ನಮಗೆ ತಲುಪಿದೆ.")
+            lines.append(f"{kva} kVA transformer ಬಗ್ಗೆ ಕೇಳಿದ್ರಿ ಅಲ್ವಾ.")
     elif parsed["planned"]:
         # A CAPACITY THE AD OFFERS ON PURPOSE: planned, not made today.
         # Both halves said plainly — see the planned-capacity tests.
@@ -3835,7 +3863,7 @@ def _compose_opening_reply(parsed: dict) -> str:
     # PRICE ONLY WHEN ASKED (owner, 2026-09-25). Choosing "price list / info"
     # on the form IS asking, so that answer carries it.
     if parsed.get("urgency") == "INFORMATION_ONLY":
-        lines.append("\nನೀವು ದರ ಕೇಳಿದ್ದೀರಿ:\n"
+        lines.append("\nದರ:\n"
                      + price_short_kn(kva if parsed["in_catalogue"] else None))
 
     # ONE QUESTION. Delivery first (it decides transport), purpose next;
@@ -4145,19 +4173,17 @@ def question_for(field: str, known: dict = None) -> str:
     known = known or {}
     if field == AWAITING_DELIVERY:
         if known.get("location"):
-            return (f"ಡೆಲಿವರಿ ಸ್ಥಳ: *{place_display(known['location'])}* — ಇದು ಸರಿಯೇ? "
-                    "ಬೇರೆ ಸ್ಥಳವಾದರೆ ದಯವಿಟ್ಟು ತಿಳಿಸಿ.")
-        return "Transformer *ಡೆಲಿವರಿ* ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು? (ಊರು, ತಾಲ್ಲೂಕು)"
+            return f"ಡೆಲಿವರಿ {place_display(known['location'])} ಗೆ ತಾನೇ? ಬೇರೆ ಊರಾದರೆ ಹೇಳಿ."
+        return "ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು? ಊರು, ತಾಲ್ಲೂಕು ಹೇಳಿ."
     if field == AWAITING_PURPOSE:
-        return ("ಈ transformer ಯಾವ *ಉದ್ದೇಶಕ್ಕೆ* ಬೇಕು? "
-                "(ಕೃಷಿ / ಕೈಗಾರಿಕೆ / ಕಟ್ಟಡ ನಿರ್ಮಾಣ / EV charging / solar / tender)")
+        return "ಇದು ಯಾವ ಉದ್ದೇಶಕ್ಕೆ ಬೇಕು — ಹೊಲ/borewell, factory, ಅಥವಾ ಬೇರೆ ಏನಾದರೂ?"
     if field == AWAITING_CAPACITY:
         # The RANGE, not a guess. _RANGE is built from CATALOGUE_KVA, so the
         # list shown can never drift from the list manufactured — and kVA is
         # stated explicitly because customers write "24 kv" for a capacity.
-        return f"ಎಷ್ಟು *kVA* ಬೇಕು? (ನಮ್ಮ range: {_RANGE})"
+        return f"ಎಷ್ಟು kVA ಬೇಕು? ನಮ್ಮಲ್ಲಿ {', '.join(str(k) for k in CATALOGUE_KVA)} kVA ಇದೆ."
     if field == AWAITING_QUANTITY:
-        return "ಎಷ್ಟು *units* ಬೇಕು?"
+        return "ಎಷ್ಟು units ಬೇಕು?"
     if field == AWAITING_CALLBACK:
         return CALLBACK_QUESTION
     raise ValueError(f"no question for {field!r}")
@@ -4296,6 +4322,23 @@ def compose_short_reask(followup: dict, known: dict = None) -> str:
     return "🙏 ಇಷ್ಟು ಮಾತ್ರ ಬೇಕು:\n" + question_for(fields[0], known)
 
 
+MAX_BUBBLES = 3
+
+
+def bubbles(reply: str) -> list:
+    """The reply as a person sends it on WhatsApp: one short message per paragraph,
+    at most MAX_BUBBLES (owner 2026-11-04: "ondonde messages"). Lines inside a
+    paragraph — a price with its terms — stay together."""
+    parts = [p.strip() for p in re.split(r"\n\s*\n", reply or "") if p.strip()]
+    if len(parts) > MAX_BUBBLES:
+        parts = parts[:MAX_BUBBLES - 1] + ["\n\n".join(parts[MAX_BUBBLES - 1:])]
+    return parts or [reply or ""]
+
+
+# The bare acknowledgement — "ok", as a person says it (was "ಧನ್ಯವಾದಗಳು.", owner 2026-11-04).
+ACK_KN = "ಸರಿ 🙏"
+
+
 def compose_followup_reply(followup: dict, known: dict = None, *args, **kwargs) -> str:
     """The reply — and never a bare "ಧನ್ಯವಾದಗಳು." to someone waiting for a
     call. A lone thanks after "25" (live ...1709, 2026-10-01) read as the
@@ -4318,10 +4361,13 @@ def compose_followup_reply(followup: dict, known: dict = None, *args, **kwargs) 
     if followup.get("customer_question") == QUESTION_RANGE and "₹" not in reply and _range_line_kn() in reply:
         reply = reply.replace(_range_line_kn(), _range_line_kn() + "\n"
                               + "\n".join(f"• {price_line(k)}" for k in sorted(PRICE_LIST)), 1)
+    # "ok" in front of a real answer is filler; it stays only when it is the whole reply.
+    if reply.startswith(ACK_KN + "\n") and reply[len(ACK_KN):].strip():
+        reply = reply[len(ACK_KN):].lstrip("\n")
     slot = merged_state(known, followup).get("callback")
-    if reply.strip() == "ಧನ್ಯವಾದಗಳು." and slot in CALLBACK_LABEL_KN:
-        reply = (f"ಧನ್ಯವಾದಗಳು 🙏 ನಮ್ಮ engineer "
-                 f"*{callback_when_kn(slot, followup.get('call_hour'))}* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
+    if reply.strip() == ACK_KN and slot in CALLBACK_LABEL_KN:
+        reply = (f"ಸರಿ 🙏 ನಮ್ಮ engineer "
+                 f"{callback_when_kn(slot, followup.get('call_hour'))} call ಮಾಡ್ತಾರೆ.")
     return reply
 
 
@@ -4366,19 +4412,19 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     if followup["application"]:
         got.append(_PURPOSE_KN.get(followup["application"],
                                    followup["application"].replace("_", " ").lower())
-                   + " ಉದ್ದೇಶ")
+                   + " ಕೆಲಸಕ್ಕೆ")
     if followup.get("delivery_location"):
-        got.append(f"ಡೆಲಿವರಿ: {followup['delivery_location']}")
+        _shown = place_display(followup['delivery_location'])
+        got.append(f"{_shown.title() if _shown.isascii() and _shown.islower() else _shown} ಗೆ ಡೆಲಿವರಿ")
     elif followup.get("delivery_same"):
-        got.append("ಡೆಲಿವರಿ ಇದೇ ಸ್ಥಳಕ್ಕೆ")
+        got.append("ಅದೇ ಊರಿಗೆ ಡೆಲಿವರಿ")
 
     _state_now = merged_state(known, followup)
     if followup.get("declined") and (not got or followup.get("bought_elsewhere")) and not followup.get("asked_discount"):
         # A courteous close, once. No more questions; the owner is told why.
         _who = display_name(_state_now.get("name"))
         return (("ಸರಿ " + _who + " ಅವರೇ 🙏" if _who else "ಸರಿ 🙏")
-                + " ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು. ಮುಂದೆ ಅಗತ್ಯವಿದ್ದರೆ ಯಾವಾಗ "
-                "ಬೇಕಾದರೂ ಈ ನಂಬರ್‌ಗೆ ಸಂದೇಶ ಕಳಿಸಿ.")
+                + " ಮುಂದೆ ಏನಾದ್ರೂ ಬೇಕಿದ್ರೆ ಇದೇ ನಂಬರ್‌ಗೆ message ಮಾಡಿ.")
     if followup.get("is_greeting") and not got:
         # "Hii namaste" is a hello, not an answer. It was met with the
         # call-back close on 2026-09-25; it gets a hello and the one open
@@ -4389,7 +4435,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         return (_hello + "\n" + (question_for(_open[0], known) if _open
                 else "ಹೇಳಿ, ನಿಮ್ಮ transformer ವಿಚಾರದಲ್ಲಿ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?"))
     if got:
-        lines.append("ಧನ್ಯವಾದಗಳು — *" + ", ".join(got) + "* ಗಮನಿಸಿದ್ದೇವೆ.")
+        lines.append("ಸರಿ, " + ", ".join(got) + " 👍")
         # FROM A LOCATION PIN: which supply company serves it, and our
         # approval there — generated from _DISCOM_APPROVAL_STATED only.
         if followup.get("escom_area"):
@@ -4404,7 +4450,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
               or followup.get("customer_question") in (QUESTION_WHY, QUESTION_SIZE_CHANGE, QUESTION_GST)):
         # A price question or a call choice is answered directly below; a
         # "message received" line above it is filler.
-        lines.append("ಧನ್ಯವಾದಗಳು.")
+        lines.append(ACK_KN)
 
     # THE QUESTION THEY ASKED, ANSWERED. A DISCOM approval question used to
     # get "we have received your message" and the form questions again.
@@ -4453,8 +4499,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         # Never a discount and never the same price again: a person calls.
         # The value answer first (owner's selling points), then a person.
         lines.append("\n" + value_line_kn(merged_state(known, followup).get("capacity_kva"))
-                     + "\nದರದ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ ನೇರವಾಗಿ ಕರೆ ಮಾಡಿ "
-                     "ಮಾತನಾಡುತ್ತಾರೆ.")
+                     + "\nರೇಟ್ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ call ಮಾಡಿ ಮಾತಾಡ್ತಾರೆ.")
     elif followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
         # never a number — the evidence for one does not exist.
@@ -4505,8 +4550,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         _who = display_name(merged_state(known, followup).get("name"))
         lines.append(("ಸರಿ " + _who + " ಅವರೇ." if _who else "ಸರಿ.")
                      + f" ನಮ್ಮ engineer *{callback_when_kn(_callback, _hour)}* ನಿಮಗೆ "
-                     "ಕರೆ ಮಾಡಿ, ಡೆಲಿವರಿ ಸಮಯ ಮತ್ತು order ವಿವರಗಳನ್ನು ತಿಳಿಸುತ್ತಾರೆ.\n"
-                     "ಧನ್ಯವಾದಗಳು 🙏")
+                     "ಕರೆ ಮಾಡಿ, ಡೆಲಿವರಿ ಮತ್ತು order ಬಗ್ಗೆ ಮಾತಾಡ್ತಾರೆ 🙏")
     _chosen_time = followup.get("call_time")
     if _chosen_time:
         _who = display_name(merged_state(known, followup).get("name"))
@@ -4536,7 +4580,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         # "WHEN?" BEFORE ANY CALL TIME WAS CHOSEN (replay 2026-10-03). The one
         # thing we do next is call — so say so and let them pick when. It is
         # the only question in this message; the marker awaits the choice.
-        lines.append("ನಮ್ಮ engineer ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏\n" + CALLBACK_QUESTION)
+        lines.append(CALLBACK_QUESTION)
     elif missing:
         # ONE QUESTION PER MESSAGE (owner, 2026-09-25). The next one is asked
         # when this one is answered; the marker still records every field

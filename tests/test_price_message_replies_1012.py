@@ -21,7 +21,7 @@ class ThumbsUpInAnyColour(unittest.TestCase):
         for t in ("👍🏿", "👍🏻", "👍🏽", "👍"):
             f, reply = turn(t, (b.AWAITING_DELIVERY,))
             self.assertTrue(f["delivery_same"], t)
-            self.assertIn("ಇದೇ ಸ್ಥಳಕ್ಕೆ", reply)
+            self.assertIn("ಅದೇ ಊರಿಗೆ ಡೆಲಿವರಿ", reply)
 
 
 class AnotherSizeAsksItsPrice(unittest.TestCase):
@@ -310,7 +310,7 @@ class StressTestFindings1025(unittest.TestCase):
                   "bere kade tagondidivi"):
             f, reply = turn(t)
             self.assertTrue(f["declined"], t)
-            self.assertIn("ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು", reply, t)
+            self.assertIn("ಇದೇ ನಂಬರ್", reply, t)
             self.assertNotIn("ಡೆಲಿವರಿ ಸ್ಥಳ", reply, t)
 
     def test_asking_for_second_hand_is_not_a_refusal(self):

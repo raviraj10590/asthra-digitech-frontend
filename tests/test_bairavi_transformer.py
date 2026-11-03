@@ -469,7 +469,8 @@ class Segregation(unittest.TestCase):
 
     def test_it_replies_as_bairavi(self):
         c = self.drive(form())
-        self.assertEqual(len(c["sent"]), 1)
+        # One reply, as its short messages (2026-11-04).
+        self.assertEqual(len(c["sent"]), len(b.bubbles(b.compose_reply(b.parse(form())))))
         self.assertIn("Bairavi", c["sent"][0])
 
     def test_the_lead_is_still_captured_so_segregation_costs_nothing(self):
@@ -604,6 +605,7 @@ class ConversationContinuity(unittest.TestCase):
         as fetch_context would."""
         history, sent, leads, owner, menu, first_seen = [], [], [], [], [], []
         for text in customer_messages:
+            turn_start = len(sent)
             ctx = {"history": list(history), "recent_sys": [], "paused": False,
                    "vip_alerted": False, "lead_alerted": False, "last_user": {}}
             saved = []
@@ -627,6 +629,9 @@ class ConversationContinuity(unittest.TestCase):
                                    lambda *a, **k: "ASTHRA_AI_REPLY"), \
                  mock.patch.object(w, "BIC_AVAILABLE", False):
                 w.run_client_pipeline("910000000000", text, ctx)
+            # One reply per turn: its short messages (bairavi.bubbles) joined back.
+            if len(sent) > turn_start + 1:
+                sent[turn_start:] = ["\n\n".join(sent[turn_start:])]
             for _p, role, content in saved:
                 history.append({"role": role, "content": content})
         return {"sent": sent, "leads": leads, "owner": owner,
@@ -946,7 +951,7 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
     def test_the_exact_2026_09_17_replies_now_carry_content(self):
         first = b.compose_followup_reply(b.parse_followup("Charging Station ⛽"))
         self.assertIn("EV charging", first)      # confirms what was said
-        self.assertNotIn("*ಉದ್ದೇಶಕ್ಕೆ* ಬೇಕು?", first)   # does not re-ask what it has
+        self.assertNotIn("ಉದ್ದೇಶಕ್ಕೆ ಬೇಕು", first)   # does not re-ask what it has
         # The delivery place is now outstanding and IS asked — quantity is
         # not, because it defaults.
         self.assertIn("ಡೆಲಿವರಿ", first)
@@ -971,7 +976,7 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         self.assertIn("3 units", r)
         self.assertIn("ಕೈಗಾರಿಕೆ", r)
         self.assertNotIn("units* ಬೇಕು", r)
-        self.assertNotIn("*ಉದ್ದೇಶಕ್ಕೆ* ಬೇಕು?", r)
+        self.assertNotIn("ಉದ್ದೇಶಕ್ಕೆ ಬೇಕು", r)
         self.assertIn("ಡೆಲಿವರಿ", r)                # the one thing still open
         known = {"delivery_same": True, "location": "X"}
         done = b.compose_followup_reply(b.parse_followup("3 units for industry", (), known), known)
@@ -991,8 +996,8 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         for numeral in b._NUMERALS:
             self.assertEqual(len(numeral), 3, repr(numeral))
             self.assertTrue(numeral.endswith("\u20e3"), repr(numeral))
-        for numeral in b._NUMERALS[:3]:
-            self.assertIn(numeral, b.CALLBACK_QUESTION)
+        # Owner 2026-11-04: the call question is plain words now, no menu.
+        self.assertNotIn("\u20e3", b.CALLBACK_QUESTION)
 
     def test_a_price_question_gets_only_list_prices(self):
         r = b.compose_followup_reply(b.parse_followup("rate eshtu"))
@@ -1315,13 +1320,13 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
         """One word to answer instead of a sentence — and it captures the
         exception, which is the case worth knowing."""
         r = b.compose_reply(b.parse(form(location="Mangalore")))
-        self.assertIn("ಡೆಲಿವರಿ ಸ್ಥಳ: *Mangalore* — ಇದು ಸರಿಯೇ?", r)
+        self.assertIn("ಡೆಲಿವರಿ Mangalore ಗೆ ತಾನೇ?", r)
 
     def test_it_asks_outright_when_the_form_gave_no_location(self):
         bare = ("Hello! I filled out your form.\n"
                 "ಸಾಮರ್ಥ್ಯ: 100 kVA\nFull name: X\nPhone number: 910000000000")
         r = b.compose_reply(b.parse(bare))
-        self.assertIn("ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು", r)
+        self.assertIn("ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು", r)
 
     def test_a_form_that_asks_delivery_is_confirmed_not_re_asked(self):
         p = b.parse(form() + "\nDelivery location: Puttur")
@@ -1340,7 +1345,7 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
             self.assertNotIn("\u20e3", r)          # no numbered list
             awaited = b.opening_awaiting(p)
             self.assertLessEqual(len(awaited), 1)
-            token = {b.AWAITING_DELIVERY: "ಸ್ಥಳ", b.AWAITING_PURPOSE: "ಉದ್ದೇಶ"}
+            token = {b.AWAITING_DELIVERY: "ಡೆಲಿವರಿ", b.AWAITING_PURPOSE: "ಉದ್ದೇಶ"}
             for field in awaited:
                 self.assertIn(token[field], r)
 

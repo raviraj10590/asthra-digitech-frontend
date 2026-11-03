@@ -27,7 +27,7 @@ class AskingForALowerPrice(unittest.TestCase):
         f = b.parse_followup("ರೇಟ್ ಕಡಿಮೆ madabeku", D, known=K)
         self.assertTrue(f["asked_discount"])
         reply = b.compose_followup_reply(f, K)
-        self.assertIn("ದರದ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ ನೇರವಾಗಿ ಕರೆ ಮಾಡಿ", reply)
+        self.assertIn("ರೇಟ್ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ call ಮಾಡಿ", reply)
         self.assertNotIn("₹", reply)                         # not the same price again
         alert = b.compose_followup_alert("910000000000", f, "ರೇಟ್ ಕಡಿಮೆ madabeku", K)
         self.assertTrue(alert.startswith("💰🔥 *PRICE NEGOTIATION*"))
@@ -64,7 +64,7 @@ class IgnoredTwiceMoveOn(unittest.TestCase):
     def test_the_real_conversation(self):
         run = history_of([FORM.format(loc="land"), "ರೇಟ್ ಹೇಳಿ", "2 units",
                           "ರೇಟ್ ಕಡಿಮೆ madabeku", "No"])
-        where = [s for s in run.sent if "ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು" in s]
+        where = [s for s in run.sent if "ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು" in s]
         self.assertLessEqual(len(where), 3)                  # was 5
         self.assertIn(b.question_for(b.AWAITING_PURPOSE), run.sent[-1])
 
@@ -75,7 +75,7 @@ class IgnoredTwiceMoveOn(unittest.TestCase):
 
     def test_one_ignored_ask_is_asked_again(self):
         run = history_of([FORM.format(loc=""), "ok"])
-        self.assertIn("ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು", run.sent[-1])
+        self.assertIn("ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು", run.sent[-1])
 
     def test_rule(self):
         m = {"role": "assistant", "content": b.flow_marker(D)}
@@ -111,7 +111,7 @@ class PurposeIgnoredTwiceMoveOn(unittest.TestCase):
     def test_the_ravi_replay_ends_with_the_call_question(self):
         run = history_of([FORM.format(loc="land"), "ರೇಟ್ ಹೇಳಿ", "2 units",
                           "ರೇಟ್ ಕಡಿಮೆ madabeku", "No", "No"])
-        self.assertIn("1️⃣ ಈಗಲೇ", run.sent[-1])
+        self.assertIn("ಈಗಲೇ", run.sent[-1])
         purpose = [s for s in run.sent if b.question_for(b.AWAITING_PURPOSE) in s]
         self.assertLessEqual(len(purpose), 2)
 
@@ -135,7 +135,7 @@ class INeedItIsNotAPlace(unittest.TestCase):
     def test_the_real_form(self):
         p = b.parse(FORM.format(loc="ನನಗೆ ಬೇಕಾ ಆಗಿದಿ"))
         self.assertIsNone(p["location"])
-        self.assertIn("ಯಾವ *ಸ್ಥಳಕ್ಕೆ* ಬೇಕು", b.compose_reply(p))
+        self.assertIn("ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು", b.compose_reply(p))
 
     def test_other_need_answers(self):
         for loc in ("ಬೇಕು", "ಬೇಕಾಗಿದೆ", "need", "Required", "i need 25 kva", "ನಮಗೆ ಬೇಕಾಗಿದೆ",

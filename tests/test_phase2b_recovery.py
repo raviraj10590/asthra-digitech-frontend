@@ -624,7 +624,9 @@ class J_BairaviMarker(BairaviWorld):
                                        failure_class=None, updated_at=ago(minutes=15))
         self.assertEqual(self.recover(), redrive.RECONCILED)
         self.assertEqual(len(self.markers()), 1)
-        self.assertEqual(len(self.customer_sends()), 1)
+        # One reply, sent as its short messages (bairavi.bubbles, 2026-11-04) — none twice.
+        self.assertEqual(len(self.customer_sends()),
+                         len(bairavi.bubbles(bairavi.compose_reply(bairavi.parse(lead_form())))))
 
 
 class M_BairaviTruthUnchanged(BairaviWorld):
@@ -635,8 +637,8 @@ class M_BairaviTruthUnchanged(BairaviWorld):
         undelivered = self.customer_sends()[0]
         self.recover()
         self.assertEqual(self.customer_sends()[1], undelivered)
-        self.assertEqual(undelivered,
-                         bairavi.compose_reply(bairavi.parse(lead_form(capacity="B. 63 kVA"))))
+        self.assertEqual(undelivered, bairavi.bubbles(
+            bairavi.compose_reply(bairavi.parse(lead_form(capacity="B. 63 kVA"))))[0])
 
     def test_the_worker_holds_no_product_rules(self):
         import inspect
