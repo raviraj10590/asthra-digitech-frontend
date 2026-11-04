@@ -390,3 +390,57 @@ def knowledge_block(rows: list) -> str:
     return ("OWNER'S LATEST KNOWLEDGE (the owner edits this in the CRM). Where it differs from anything "
             "above — a price, a package, a fact — THIS wins. Never mention GST, and never name a price "
             "that is not here or above.\n" + text)
+
+
+# ── REPLY GUARD (owner 2026-11-05: "astra tappu sari maadu, bot tulu matadalla") ──────────────
+# The 2026-11-05 debate: the model priced a zilla-panchayat campaign and promised "1,000–5,000
+# followers", and twice said the AI bot speaks Tulu. The prompt already forbade the first two;
+# the model did it anyway. So the reply is checked here, after the model, before anyone sees it.
+# Words only an election customer uses. Not "ಪ್ರಚಾರ" / "campaign" (a shop's ad campaign) and not
+# "party" (party halls, event companies).
+_POLITICS_RE = re.compile(r"election|elction|candidate|chunav|ಚುನಾವಣ|ಎಲೆಕ್ಷನ್|ಅಭ್ಯರ್ಥಿ|ರಾಜಕೀಯ|politic|"
+                          r"\bmla\b|\bmlc\b|panchayat|ಪಂಚಾಯ|corporator|ಕಾರ್ಪೊರೇಟರ್|ward member|ವಾರ್ಡ್ ಸದಸ್ಯ", re.I)
+_RUPEE_RE = re.compile(r"₹\s*\d|\brs\.?\s*\d|\d\s*(?:rupees?|lakhs?|ಲಕ್ಷ)", re.I)
+_NEGATED_RE = re.compile(r"ಇಲ್ಲ|ಆಗಲ್ಲ|ಸಾಧ್ಯವಿಲ್ಲ|ಹೇಳಲು ಆಗ|ಮಾಡಲ್ಲ|ಕೊಡಲ್ಲ|\bnot\b|\bno\b|can'?t|cannot|never|"
+                         r"illa|aagalla|guarantee\s*(?:illa|ಇಲ್ಲ)|ಖಾತರಿ", re.I)
+_RESULT_RE = re.compile(r"\d[\d,]*\s*(?:[–\-~]|to|ರಿಂದ)?\s*[\d,]*\s*\+?\s*(?:ಹೊಸ\s*)?(?:followers?|ಫಾಲೋವರ್|"
+                        r"leads?|ಲೀಡ್|views?|ವ್ಯೂ|likes?|ಲೈಕ್|enquir|ಎನ್ಕ್ವೈರಿ|sales|ಮಾರಾಟ)", re.I)
+_TULU_RE = re.compile(r"tulu|ತುಳು", re.I)
+
+POLITICS_REPLY = ("ಸರಿ sir 🙏 ಚುನಾವಣಾ ಪ್ರಚಾರಕ್ಕೆ ಪೇಜ್ ಸೆಟಪ್, posts/reels, Facebook–Instagram ads, WhatsApp "
+                  "ಪ್ರಚಾರ — ಎಲ್ಲಾ ಮಾಡ್ತೀವಿ. ನಿಮ್ಮ ಕ್ಷೇತ್ರ, ಅವಧಿ ಮತ್ತು ಬಜೆಟ್ ನೋಡಿ ಅಧಿಕೃತ quotation ಕಳಿಸ್ತೀವಿ; "
+                  "ರವಿರಾಜ್ ಅವರು ನಿಮ್ಮ ಜೊತೆ ಮಾತಾಡ್ತಾರೆ.")
+RESULT_LINE = "ಎಷ್ಟು followers/leads ಬರುತ್ತೆ ಅಂತ ಮುಂಚೆಯೇ promise ಮಾಡಲ್ಲ sir — ಫಲಿತಾಂಶ ad ಮತ್ತು content ಮೇಲೆ ಹೋಗುತ್ತೆ."
+TULU_LINE = "ನಮ್ಮ AI bot ಕನ್ನಡ ಮತ್ತು English ನಲ್ಲಿ ಮಾತಾಡುತ್ತೆ — ತುಳು ಸದ್ಯ ಇಲ್ಲ."
+
+
+def guard_reply(reply: str, customer_texts=()) -> tuple:
+    """(reply to send, reasons) — the model's Asthra reply with what it may never say removed.
+
+    * a political campaign gets no rupee figure: the whole reply becomes POLITICS_REPLY
+      (the owner's rule: political work is quoted officially, never priced in chat);
+    * a line promising a number of followers / leads / sales goes, replaced once by RESULT_LINE
+      (a line that says such numbers CANNOT be promised stays);
+    * a line saying the bot speaks Tulu becomes TULU_LINE (owner 2026-11-05: it does not).
+    """
+    reasons = []
+    text = reply or ""
+    said = " ".join(t or "" for t in customer_texts)
+    if _POLITICS_RE.search(said) and _RUPEE_RE.search(text):
+        return POLITICS_REPLY, ["political price"]
+    out, result_dropped = [], False
+    for line in text.split("\n"):
+        if _TULU_RE.search(line) and not _NEGATED_RE.search(line):
+            reasons.append("tulu claim")
+            if TULU_LINE not in out:
+                out.append(TULU_LINE)
+            continue
+        if _RESULT_RE.search(line) and not _NEGATED_RE.search(line):
+            reasons.append("result promise")
+            if not result_dropped:
+                out.append(RESULT_LINE)
+                result_dropped = True
+            continue
+        out.append(line)
+    return "\n".join(out).strip(), reasons
+

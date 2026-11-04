@@ -428,6 +428,7 @@ SALES PSYCHOLOGY (owner 2026-11-04: "customer na conversion madoke try maado tar
 • TRUST: only true proof — 80+ clients, KSDC/JDS work, and "ನಾನೇ Asthra ಮಾಡಿದ AI bot". Offer www.asthradigitech.com for past work.
 • BEFORE ASKING THE ADVANCE: sum up in one line what they agreed (service, amount now, start date), then ask when they can pay so work starts.
 • AFTER SILENCE OR "nodona/think maadtini": respect it, ask one gentle question about their goal (not the price), and leave the door open.
+• LANGUAGES: our AI WhatsApp bot speaks Kannada and English only — never say it speaks Tulu or any other language.
 • NEVER: fake urgency or scarcity ("ಇವತ್ತು ಮಾತ್ರ", "last slot"), invented results (lead counts, guaranteed sales/followers), guilt or pressure, or claims about competitors.
 • ADDRESS: "sir"/"madam" or their name + "ಅವರೇ" — never ಅಣ್ಣಾ, ಅಕ್ಕ, ಗುರು, boss, bro.
 
@@ -1510,6 +1511,23 @@ def news_context_if_asked(text: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # BUSINESS HOURS (IST)
 # ══════════════════════════════════════════════════════════════════════════════
+def after_hours_once(history) -> str:
+    """The after-hours line, once a night, not on every reply (2026-11-05 debate: it closed all
+    six replies of one chat). Skipped when the bot already answered this chat in the last 6 h."""
+    note = after_hours_note()
+    if not note:
+        return ""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
+    for m in reversed(history or []):
+        if m.get("role") == "assistant" and m.get("created_at"):
+            try:
+                at = datetime.fromisoformat(str(m["created_at"]).replace("Z", "+00:00"))
+            except ValueError:
+                break
+            return "" if at.tzinfo and at >= cutoff else note
+    return note
+
+
 def after_hours_note() -> str:
     """Outside Mon–Sat 9am–7pm IST, set expectations for a human follow-up."""
     now = datetime.now(IST)
@@ -2305,6 +2323,10 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
     reply, summary = asthra_deal.split_quote_marker(reply)
     if summary:
         report_quote_request(phone, summary)
+    # What the model may never say, removed after it (2026-11-05 debate; see asthra_deal).
+    reply, _guarded = asthra_deal.guard_reply(reply, list(said) + [user_message])
+    if _guarded:
+        print(f"ASTHRA_REPLY_GUARD {','.join(sorted(set(_guarded)))} phone=...{str(phone)[-4:]}")
     return reply
 
 
@@ -7436,7 +7458,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # bic_recovery.MAX_ATTEMPTS. The DECIDE result is NOT recomputed
             # between attempts: the same authorised reply is re-sent, so a
             # retry can never change what the customer is told.
-            _text = reply + after_hours_note()
+            _text = reply + after_hours_once(ctx["history"])
             _attempt = 0
             while True:
                 _attempt += 1
@@ -7561,7 +7583,7 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
             # customer's reply.
             reply = generate_reply(sender, user_text, history=ctx["history"], memory=memory)
             print(f"🤖 {reply[:80]}")
-            send_text(sender, reply + after_hours_note())
+            send_text(sender, reply + after_hours_once(ctx["history"]))
             save_messages([(sender, "user", user_text),
                            (sender, "assistant", reply)])
 
