@@ -317,9 +317,14 @@ class WorkflowDefinition(unittest.TestCase):
         self.assertIn("${{ secrets.CRON_SECRET }}", self.text)
 
     # N
-    def test_N_manual_dispatch_and_a_five_minute_schedule(self):
+    def test_N_manual_dispatch_only_the_schedule_is_pg_cron(self):
+        # 2026-11-04 (c177347): the five-minute schedule moved to Supabase
+        # pg_cron; this workflow stays for a manual run.
         self.assertIn("workflow_dispatch", self.wf["on"])
-        self.assertEqual(self.wf["on"]["schedule"], [{"cron": "*/5 * * * *"}])
+        self.assertNotIn("schedule", self.wf["on"])
+        sql = open(os.path.join(os.path.dirname(__file__), "..", "supabase", "migrations",
+                                "20261104000001_recovery_pg_cron.sql")).read()
+        self.assertIn("'brain-recovery', '*/5 * * * *'", sql)
 
     def test_one_sweep_at_a_time(self):
         self.assertEqual(self.wf["concurrency"],

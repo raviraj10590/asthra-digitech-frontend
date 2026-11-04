@@ -255,3 +255,98 @@ def marker(day: int) -> str:
 def summarise(counts: dict) -> str:
     parts = [f"{k.lower()}={v}" for k, v in sorted(counts.items()) if v]
     return "ASTHRA_FOLLOWUP_RUN " + (" ".join(parts) or "considered=0")
+
+
+# ── What the customer already told us (owner 2026-11-04, "sari madu") ───────
+# A 45-message chat (…3602, SM Events, 2026-11-04) outgrew the ten turns the
+# reply prompt sees: the bot called an events business "photography" twice,
+# asked for the page it had been told was new, and asked for the name and the
+# business a third time right after "Kk I will pay". The customer's own
+# messages are short, so all of them (last CUSTOMER_SAID_DAYS) ride along as a
+# block the model is told never to re-ask from or contradict.
+CUSTOMER_SAID_DAYS = 30
+CUSTOMER_SAID_ROWS = 120
+CUSTOMER_SAID_CHARS = 4000
+_BARE_ACK = re.compile(r"^(ok+|k+|kk+|ss+|s|sari|haa+|ha|hm+|yes|yep|no|thanks?|thank you|"
+                       r"ಸರಿ|ಹೌದು|ಓಕೆ|👍|🙏)[\s.!🙏👍]*$", re.IGNORECASE)
+
+
+def customer_said_block(messages: list) -> str:
+    """The customer's own messages, oldest first, as one prompt block. Bare
+    acknowledgements ("Kk", "Ss") say nothing on their own and are dropped.
+    Over the size cap the OLDEST go first, but the first message (the ad form,
+    which carries the name and the budget) always stays."""
+    said = [" ".join((m or "").split())[:300] for m in messages]
+    said = [s for s in said if s and not _BARE_ACK.match(s)]
+    if not said:
+        return ""
+    head, rest = said[0], said[1:]
+    while rest and len(head) + sum(len(s) + 3 for s in rest) > CUSTOMER_SAID_CHARS:
+        rest.pop(0)
+    lines = "\n".join(f"• {s}" for s in [head] + rest)
+    return ("WHAT THIS CUSTOMER HAS ALREADY TOLD US in this chat (their own words, oldest first):\n"
+            f"{lines}\n"
+            "RULES: never ask again for anything answered above (name, business, area, page, "
+            "services, budget, timeline). Describe their business ONLY with the words above — "
+            "never call it something they did not say. If a service was already offered and "
+            "discussed, do not offer it again as if new.")
+
+
+# ── "I will pay" ───────────────────────────────────────────────────────────
+# The same chat ended "Kk I will pay" and nobody was told: the bot promised
+# "our team will send payment details" and asked for the name again. A
+# customer agreeing to pay is the deal goal itself, so the owner hears at once
+# and the bot stops asking questions.
+PAY_INTENT = "ASTHRA_PAY_INTENT"
+_PAY = re.compile(
+    r"\b(i\s*(will|'ll|wil|shall|can)\s*pay|will\s*pay|ready\s*to\s*pay|"
+    r"pay\s*(maad|mad|kodt|kodu|karunga|kardunga|now|today|tomorrow)\w*|"
+    r"payment\s*(maad|mad|kodt|kodu|ready|details?|link|kalis|kals|send|haak|hak)\w*|"
+    r"advance\s*(kodt|kodu|kodo|maad|mad|pay|ready|send|kalis|kals|haak|hak)\w*|"
+    r"send\s*(the\s*|me\s*)?(payment|account|bank|upi|gpay|qr)|"
+    r"account\s*(details?|number|no)|upi|g\s*pay|phone\s*pe|paytm|qr\s*code)\b"
+    r"|ಪೇ\s*ಮಾಡ|ಪೇಮೆಂಟ್|ಅಡ್ವಾನ್ಸ್|ಹಣ\s*(ಕಳಿಸ|ಹಾಕ|ಕೊಡ|ಕಟ್ಟ)|ದುಡ್ಡು\s*(ಕಳಿಸ|ಹಾಕ|ಕೊಡ|ಕಟ್ಟ)",
+    re.IGNORECASE)
+_NOT_PAYING = re.compile(
+    r"\b(won'?t|will\s*not|can'?t|cannot|not|never|no|illa|alla|beda|aagalla|agalla|"
+    r"maadalla|madalla|kodalla|later)\b|ಇಲ್ಲ|ಅಲ್ಲ|ಬೇಡ|ಆಗಲ್ಲ|ಕೊಡಲ್ಲ|ಮಾಡಲ್ಲ|\?",
+    re.IGNORECASE)
+
+
+def said_will_pay(text: str) -> bool:
+    """True when the customer says they will pay (or asks where to pay).
+    A refusal, a "later" or a question about paying is not that."""
+    t = text or ""
+    return bool(_PAY.search(t)) and not _NOT_PAYING.search(t)
+
+
+PAY_AGREED_NOTE = (
+    "PAYMENT AGREED: the customer has just said they will pay. In this reply ask NO question. "
+    "Thank them in one short line and say our team will send the payment details on this same "
+    "WhatsApp shortly. Never write bank, UPI or account details yourself and never name an "
+    "amount that was not already agreed in the chat.")
+PAY_PENDING_NOTE = (
+    "PAYMENT PENDING: this customer already said they will pay and the team is sending the "
+    "payment details. Answer what they ask; do not ask for details they already gave and do "
+    "not push for the payment again.")
+
+
+def pay_intent_report(phone: str, said: str, last_offer: str = "") -> str:
+    """The owner's alert: who, their words, the last price the bot named."""
+    lines = ["🔥 Customer PAY maaDuttEne anta heLiddaare — payment details kaLisi",
+             f"wa.me/{phone}", f"Customer: \"{' '.join((said or '').split())[:200]}\""]
+    if last_offer:
+        lines.append(f"Bot heLida bele: {' '.join(last_offer.split())[:300]}")
+    lines += ["", f"👉 Advance bandaaga: #advance {phone[-4:]}"]
+    return "\n".join(lines)
+
+
+def last_offer(history: list) -> str:
+    """The newest bot line that names a ₹ amount, or ''."""
+    for turn in reversed(history or []):
+        if turn.get("role") != "assistant":
+            continue
+        for line in reversed((turn.get("content") or "").splitlines()):
+            if "₹" in line:
+                return line.strip()
+    return ""

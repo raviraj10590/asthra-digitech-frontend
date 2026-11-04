@@ -2210,11 +2210,26 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
     if intel:
         messages.append({"role": "system", "content": intel})
 
+    # What the customer already said, and whether they already agreed to pay
+    # (asthra_deal, 2026-11-04). Ten turns was not enough for a long chat.
+    said, pay_pending = fetch_customer_said(phone, user_message)
+    said_block = asthra_deal.customer_said_block(said)
+    if said_block:
+        messages.append({"role": "system", "content": said_block})
+    paying_now = asthra_deal.said_will_pay(user_message)
+    if paying_now:
+        messages.append({"role": "system", "content": asthra_deal.PAY_AGREED_NOTE})
+    elif pay_pending:
+        messages.append({"role": "system", "content": asthra_deal.PAY_PENDING_NOTE})
+
     # When memory holds a summary of older turns, only the most recent raw turns
     # are needed — the summary carries the rest, cutting tokens on long chats.
-    keep = MEMORY_HISTORY_COMPRESS_AT if (memory and (memory.get("summary") or "").strip()) else 10
+    # Otherwise all 20 turns fetch_context already read (was 10).
+    keep = MEMORY_HISTORY_COMPRESS_AT if (memory and (memory.get("summary") or "").strip()) else 20
     messages.extend(_as_ai_messages(history[-keep:]))
     messages.append({"role": "user", "content": user_message})
+    if paying_now and not pay_pending:
+        report_pay_intent(phone, user_message, asthra_deal.last_offer(history))
 
     reply = _generate_ai_reply(messages,
         "ನಮಸ್ಕಾರ 🙏 ಸ್ವಲ್ಪ ತಾಂತ್ರಿಕ ಸಮಸ್ಯೆ ಆಗಿದೆ. "
@@ -2227,6 +2242,52 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
     if summary:
         report_quote_request(phone, summary)
     return reply
+
+
+CUSTOMER_SAID_TIMEOUT_SECONDS = 3
+
+
+def fetch_customer_said(phone: str, current: str = "") -> tuple:
+    """(the customer's own messages oldest first, already-agreed-to-pay) for
+    the last asthra_deal.CUSTOMER_SAID_DAYS. One read; any failure or a short
+    deadline gives ([], False) and the reply goes out as before."""
+    if ai_seconds_left() < CUSTOMER_SAID_TIMEOUT_SECONDS + POST_AI_RESERVE_SECONDS:
+        return [], False
+    since = (datetime.now(timezone.utc)
+             - timedelta(days=asthra_deal.CUSTOMER_SAID_DAYS)).isoformat()
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/whatsapp_messages",
+            headers=_supa_headers(""),
+            params={"select": "role,content", "phone": f"eq.{phone}",
+                    "created_at": f"gte.{since}",
+                    "or": f"(role.eq.user,content.eq.{asthra_deal.PAY_INTENT})",
+                    "order": "created_at.desc,id.desc",
+                    "limit": str(asthra_deal.CUSTOMER_SAID_ROWS)},
+            timeout=_bounded(CUSTOMER_SAID_TIMEOUT_SECONDS))
+        rows = r.json() if r.ok else []
+    except Exception as e:
+        print(f"CUSTOMER_SAID_FAILED type={type(e).__name__} phone=...{phone[-4:]}")
+        return [], False
+    if not isinstance(rows, list):
+        return [], False
+    pay_pending = any(x.get("role") == "system" for x in rows)
+    said = [x.get("content") or "" for x in reversed(rows) if x.get("role") == "user"]
+    # On paths that save the message before replying, it is already the newest
+    # row; it goes in as the user turn, not twice.
+    if said and current and said[-1].strip() == current.strip():
+        said = said[:-1]
+    return said, pay_pending
+
+
+def report_pay_intent(phone: str, said: str, last_offer: str) -> None:
+    """Tell the owner the customer agreed to pay. Marked first, so a second
+    "I will pay" in the same chat does not alert again."""
+    try:
+        save_message(phone, "system", asthra_deal.PAY_INTENT)
+        notify_owner(asthra_deal.pay_intent_report(phone, said, last_offer))
+    except Exception as e:
+        print(f"PAY_INTENT_REPORT_FAILED type={type(e).__name__} phone=...{phone[-4:]}")
 
 
 def report_quote_request(phone: str, summary: str) -> None:
