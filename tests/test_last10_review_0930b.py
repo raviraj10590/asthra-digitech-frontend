@@ -104,7 +104,7 @@ class PurposeAndPlaceInOneAnswer(unittest.TestCase):
     def test_the_real_form(self):
         p = b.parse(FORM.format("Agriculture Kanakagiri"))
         self.assertEqual((p["location"], p["application"]), ("Kanakagiri", "AGRICULTURE"))
-        self.assertIn("ಡೆಲಿವರಿ Kanakagiri ಗೆ ತಾನೇ?", b.compose_reply(p))
+        self.assertIn("ನಿಮ್ಮ ಊರು Kanakagiri ಅಲ್ವಾ?", b.compose_reply(p))
 
     def test_unchanged_cases(self):
         self.assertEqual(b.parse(FORM.format("Kanakagiri"))["location"], "Kanakagiri")

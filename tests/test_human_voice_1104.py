@@ -62,6 +62,32 @@ class NoBotShapes(unittest.TestCase):
         self.assertIn("ನಮ್ಮ engineer *ಮಧ್ಯಾಹ್ನ 3 ಗಂಟೆಗೆ* ನಿಮಗೆ ಕರೆ ಮಾಡುತ್ತಾರೆ", r)
 
 
+class NoDeliveryTalkFirst(unittest.TestCase):
+    """Owner, 2026-11-04: "delivery anno word beda sthala tilkondre saaku ... jille mattu taluku or
+    adress aste deliver kodo vichra barodu ella ok adnele"."""
+
+    def test_the_place_question_asks_taluk_and_district(self):
+        for known in ({}, KNOWN):
+            q = b.question_for(b.AWAITING_DELIVERY, known)
+            self.assertNotIn("ಡೆಲಿವರಿ", q)
+            self.assertIn("ತಾಲ್ಲೂಕು, ಜಿಲ್ಲೆ", q)
+
+    def test_the_opening_and_the_answers_never_say_delivery(self):
+        for form in (lead_form(location="Kadur", name="Ravi"), lead_form(location="", name="Ravi")):
+            self.assertNotIn("ಡೆಲಿವರಿ", b.compose_reply(b.parse(form)))
+        for text, awaiting in (("kadur", DELIVERY), ("houdu", DELIVERY), ("krushi", PURPOSE),
+                               ("blah", DELIVERY)):
+            self.assertNotIn("ಡೆಲಿವರಿ", reply(text, awaiting), text)
+        k = dict(KNOWN, application="AGRICULTURE", delivery_location="Kadur")
+        self.assertNotIn("ಡೆಲಿವರಿ", reply("naale 11 ge call maadi", CALLBACK, k))
+
+    def test_a_re_ask_is_the_question_alone(self):
+        f = b.parse_followup("blah", awaiting=DELIVERY)
+        full = b.compose_followup_reply(f, KNOWN)
+        short = b.compose_followup_reply(f, KNOWN, None, b.reply_fingerprint(full))
+        self.assertNotIn("ಇಷ್ಟು ಮಾತ್ರ ಬೇಕು", short)
+
+
 class Bubbles(unittest.TestCase):
     def test_one_message_per_paragraph(self):
         self.assertEqual(b.bubbles("ಸರಿ 👍\n\nಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು?"),

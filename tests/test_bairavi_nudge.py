@@ -138,7 +138,7 @@ class WhatTheNudgeSays(unittest.TestCase):
 
     def test_it_repeats_the_actual_question(self):
         self.assertIn("ಉದ್ದೇಶ", self.msg(("purpose",)))
-        self.assertIn("ಡೆಲಿವರಿ", self.msg(("delivery",)))
+        self.assertIn("ನಿಮ್ಮ ಊರು", self.msg(("delivery",)))
 
     def test_it_confirms_the_known_location_rather_than_asking_cold(self):
         self.assertIn("Mangalore", self.msg(("delivery",)))
@@ -239,7 +239,7 @@ class WhatIsOutstandingIsDecidedInOnePlace(unittest.TestCase):
             self.assertLessEqual(len(awaiting), 1, text)
             reply = b.compose_followup_reply(f)
             for field in awaiting:
-                token = "ಡೆಲಿವರಿ" if field == b.AWAITING_DELIVERY else "ಉದ್ದೇಶ"
+                token = "ನಿಮ್ಮ ಊರು" if field == b.AWAITING_DELIVERY else "ಉದ್ದೇಶ"
                 self.assertIn(token, reply, f"{text} / {field}")
 
 

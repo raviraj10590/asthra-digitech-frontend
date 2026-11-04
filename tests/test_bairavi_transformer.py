@@ -936,7 +936,7 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
 
     def test_an_unreadable_message_still_re_asks_the_next_question(self):
         r = b.compose_followup_reply(b.parse_followup("hmm ok"))
-        self.assertIn("ಡೆಲಿವರಿ", r)                # delivery comes first
+        self.assertIn("ನಿಮ್ಮ ಊರು", r)                # delivery comes first
         self.assertNotIn("ಉದ್ದೇಶ", r)              # one question per message
 
     def test_the_quantity_is_never_chased(self):
@@ -954,12 +954,12 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         self.assertNotIn("ಉದ್ದೇಶಕ್ಕೆ ಬೇಕು", first)   # does not re-ask what it has
         # The delivery place is now outstanding and IS asked — quantity is
         # not, because it defaults.
-        self.assertIn("ಡೆಲಿವರಿ", first)
+        self.assertIn("ನಿಮ್ಮ ಊರು", first)
         self.assertNotIn("ಎಷ್ಟು *units* ಬೇಕು?", first)
 
         second = b.compose_followup_reply(b.parse_followup("100kv"))
         self.assertIn("100 kVA", second)
-        self.assertIn("ಡೆಲಿವರಿ", second)         # next open question, one at a time
+        self.assertIn("ನಿಮ್ಮ ಊರು", second)         # next open question, one at a time
 
     def test_the_re_ask_is_short(self):
         """Owner, 2026-09-25: "in one message dont tell everything". A re-ask
@@ -977,7 +977,7 @@ class AFollowUpReplyIsNeverJustAReceipt(unittest.TestCase):
         self.assertIn("ಕೈಗಾರಿಕೆ", r)
         self.assertNotIn("units* ಬೇಕು", r)
         self.assertNotIn("ಉದ್ದೇಶಕ್ಕೆ ಬೇಕು", r)
-        self.assertIn("ಡೆಲಿವರಿ", r)                # the one thing still open
+        self.assertIn("ನಿಮ್ಮ ಊರು", r)                # the one thing still open
         known = {"delivery_same": True, "location": "X"}
         done = b.compose_followup_reply(b.parse_followup("3 units for industry", (), known), known)
         self.assertIn(b.CALLBACK_QUESTION, done)    # everything in: offer the call
@@ -1314,19 +1314,19 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
 
     def test_the_opening_reply_asks_for_it(self):
         r = b.compose_reply(b.parse(form()))
-        self.assertIn("ಡೆಲಿವರಿ", r)
+        self.assertIn("ನಿಮ್ಮ ಊರು", r)
 
     def test_it_confirms_the_project_location_rather_than_asking_cold(self):
         """One word to answer instead of a sentence — and it captures the
         exception, which is the case worth knowing."""
         r = b.compose_reply(b.parse(form(location="Mangalore")))
-        self.assertIn("ಡೆಲಿವರಿ Mangalore ಗೆ ತಾನೇ?", r)
+        self.assertIn("ನಿಮ್ಮ ಊರು Mangalore ಅಲ್ವಾ?", r)
 
     def test_it_asks_outright_when_the_form_gave_no_location(self):
         bare = ("Hello! I filled out your form.\n"
                 "ಸಾಮರ್ಥ್ಯ: 100 kVA\nFull name: X\nPhone number: 910000000000")
         r = b.compose_reply(b.parse(bare))
-        self.assertIn("ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು", r)
+        self.assertIn("ನಿಮ್ಮ ಊರು ಯಾವುದು", r)
 
     def test_a_form_that_asks_delivery_is_confirmed_not_re_asked(self):
         p = b.parse(form() + "\nDelivery location: Puttur")
@@ -1345,7 +1345,7 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
             self.assertNotIn("\u20e3", r)          # no numbered list
             awaited = b.opening_awaiting(p)
             self.assertLessEqual(len(awaited), 1)
-            token = {b.AWAITING_DELIVERY: "ಡೆಲಿವರಿ", b.AWAITING_PURPOSE: "ಉದ್ದೇಶ"}
+            token = {b.AWAITING_DELIVERY: "ನಿಮ್ಮ ಊರು", b.AWAITING_PURPOSE: "ಉದ್ದೇಶ"}
             for field in awaited:
                 self.assertIn(token[field], r)
 
@@ -1402,7 +1402,7 @@ class WhereTheTransformerActuallyGoes(unittest.TestCase):
     def test_it_is_chased_until_answered(self):
         f = b.parse_followup("Agriculture")
         r = b.compose_followup_reply(f, self.KNOWN)
-        self.assertIn("ಡೆಲಿವರಿ", r)
+        self.assertIn("ನಿಮ್ಮ ಊರು", r)
         self.assertIn("Mangalore", r)
 
     def test_it_is_not_chased_once_the_form_supplied_it(self):

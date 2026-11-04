@@ -1383,8 +1383,8 @@ QUESTION_DRY_TYPE = "dry_type"
 _ASK_DRY_TYPE = ("dry type", "dry-type", "drytype", "dry transformer", "ಡ್ರೈ ಟೈಪ್", "ಡ್ರೈ-ಟೈಪ್", "ಡ್ರೈ ಟ್ರಾನ್ಸ್")
 _WHY_WORDS = ("yake", "yaake", "yak", "ಯಾಕೆ", "ಯಾಕ್", "why")
 _WHY_ANSWER_KN = {
-    "delivery": "ಡೆಲಿವರಿ ಸ್ಥಳ ತಿಳಿದರೆ ಸಾಗಣೆ (transport) ಮತ್ತು ಡೆಲಿವರಿ ಸಮಯವನ್ನು "
-                "ಸರಿಯಾಗಿ ತಿಳಿಸಲು ಸಾಧ್ಯ — ಅದಕ್ಕೇ ಕೇಳುತ್ತಿದ್ದೇವೆ 🙏",
+    "delivery": "ನಿಮ್ಮ ಊರು ತಿಳಿದರೆ ನಮ್ಮ engineer ನಿಮ್ಮ site ಬಗ್ಗೆ ಸರಿಯಾಗಿ "
+                "ಮಾತಾಡೋಕೆ ಆಗುತ್ತೆ — ಅದಕ್ಕೇ ಕೇಳ್ತಿದ್ದೀವಿ 🙏",
     "purpose": "ಯಾವ ಕೆಲಸಕ್ಕೆ ಬೇಕು ಎಂದು ತಿಳಿದರೆ ನಿಮಗೆ ಸೂಕ್ತವಾದ transformer "
                "ಸೂಚಿಸಲು ಸಾಧ್ಯ — ಅದಕ್ಕೇ ಕೇಳುತ್ತಿದ್ದೇವೆ 🙏",
 }
@@ -3151,7 +3151,7 @@ _RANGE = " / ".join(f"{k} kVA" for k in CATALOGUE_KVA)
 # The one sentence that carries the whole evidence boundary. A customer who
 # asked for a price list gets a real next step instead of a number, and the
 # promise made is one the business can actually keep.
-_NO_PRICE = ("ದರ ಮತ್ತು ಡೆಲಿವರಿ ಸಮಯ — ನಮ್ಮ engineer "
+_NO_PRICE = ("ದರ — ನಮ್ಮ engineer "
              "ನಿಮ್ಮ requirement ನೋಡಿ ನಿಖರವಾಗಿ ತಿಳಿಸುತ್ತಾರೆ.")
 
 # ── THE OWNER'S PRICE LIST — 2026-09-24 ──────────────────────────────────
@@ -3208,8 +3208,8 @@ _SALES_TERMS = (
     # Owner-confirmed 2026-10-05 ("yes" to BIS licence for IS 1180, BEE star
     # label, ISO 9001). Composed text only: the MODEL is still never allowed
     # to write a certification itself (_REPLY_BANNED_TERMS).
-    "🏅 BIS (IS 1180) · BEE star rated · ISO 9001\n"
-    "⏱️ ಡೆಲಿವರಿ ಸಮಯ — ನಮ್ಮ ತಂಡ call ನಲ್ಲಿ ಖಚಿತಪಡಿಸುತ್ತಾರೆ")
+    # No delivery-time line (owner 2026-11-04: delivery is talked about only once the deal is OK).
+    "🏅 BIS (IS 1180) · BEE star rated · ISO 9001")
 
 
 # "YOU TOLD US NOTHING" (replay 2026-10-03: "ನೀವು ನಮಗೆ ಯಾವ ಮಾಹಿತಿನು ಸಹ
@@ -3870,7 +3870,7 @@ def _compose_opening_reply(parsed: dict) -> str:
     # quantity is asked once at the close.
     known = {"location": parsed["location"]}
     if parsed.get("delivery_location"):
-        lines.append(f"ಡೆಲಿವರಿ ಸ್ಥಳ: {parsed['delivery_location']}")
+        lines.append(f"ಊರು: {parsed['delivery_location']}")
         if not parsed.get("application"):
             lines.append("\n" + question_for(AWAITING_PURPOSE, known))
     else:
@@ -4173,8 +4173,8 @@ def question_for(field: str, known: dict = None) -> str:
     known = known or {}
     if field == AWAITING_DELIVERY:
         if known.get("location"):
-            return f"ಡೆಲಿವರಿ {place_display(known['location'])} ಗೆ ತಾನೇ? ಬೇರೆ ಊರಾದರೆ ಹೇಳಿ."
-        return "ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು? ಊರು, ತಾಲ್ಲೂಕು ಹೇಳಿ."
+            return f"ನಿಮ್ಮ ಊರು {place_display(known['location'])} ಅಲ್ವಾ? ತಾಲ್ಲೂಕು, ಜಿಲ್ಲೆ ಹೇಳಿ."
+        return "ನಿಮ್ಮ ಊರು ಯಾವುದು? ತಾಲ್ಲೂಕು, ಜಿಲ್ಲೆ ಅಥವಾ address ಹೇಳಿ."
     if field == AWAITING_PURPOSE:
         return "ಇದು ಯಾವ ಉದ್ದೇಶಕ್ಕೆ ಬೇಕು — ಹೊಲ/borewell, factory, ಅಥವಾ ಬೇರೆ ಏನಾದರೂ?"
     if field == AWAITING_CAPACITY:
@@ -4319,7 +4319,7 @@ def compose_short_reask(followup: dict, known: dict = None) -> str:
     if not fields:
         return ("🙏 ಧನ್ಯವಾದ — ನಮ್ಮ *Bairavi Trans Solutions* ತಂಡ "
                 "ಶೀಘ್ರದಲ್ಲೇ ನಿಮ್ಮನ್ನು ಸಂಪರ್ಕಿಸುತ್ತಾರೆ.")
-    return "🙏 ಇಷ್ಟು ಮಾತ್ರ ಬೇಕು:\n" + question_for(fields[0], known)
+    return question_for(fields[0], known)          # the question alone, like a person re-asking
 
 
 MAX_BUBBLES = 3
@@ -4415,9 +4415,9 @@ def _compose_followup_reply(followup: dict, known: dict = None,
                    + " ಕೆಲಸಕ್ಕೆ")
     if followup.get("delivery_location"):
         _shown = place_display(followup['delivery_location'])
-        got.append(f"{_shown.title() if _shown.isascii() and _shown.islower() else _shown} ಗೆ ಡೆಲಿವರಿ")
+        got.append(f"{_shown.title() if _shown.isascii() and _shown.islower() else _shown}")
     elif followup.get("delivery_same"):
-        got.append("ಅದೇ ಊರಿಗೆ ಡೆಲಿವರಿ")
+        got.append("ಅದೇ ಊರು")
 
     _state_now = merged_state(known, followup)
     if followup.get("declined") and (not got or followup.get("bought_elsewhere")) and not followup.get("asked_discount"):
@@ -4550,7 +4550,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         _who = display_name(merged_state(known, followup).get("name"))
         lines.append(("ಸರಿ " + _who + " ಅವರೇ." if _who else "ಸರಿ.")
                      + f" ನಮ್ಮ engineer *{callback_when_kn(_callback, _hour)}* ನಿಮಗೆ "
-                     "ಕರೆ ಮಾಡಿ, ಡೆಲಿವರಿ ಮತ್ತು order ಬಗ್ಗೆ ಮಾತಾಡ್ತಾರೆ 🙏")
+                     "ಕರೆ ಮಾಡುತ್ತಾರೆ 🙏")
     _chosen_time = followup.get("call_time")
     if _chosen_time:
         _who = display_name(merged_state(known, followup).get("name"))

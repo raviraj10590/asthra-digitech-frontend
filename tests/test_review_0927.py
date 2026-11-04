@@ -25,7 +25,7 @@ class TheNameIsNotAPlace(unittest.TestCase):
         p = b.parse(FORM.format(loc="Shivakumar sadashiva ambi"))
         self.assertIsNone(p["location"])
         reply = b.compose_reply(p)
-        self.assertIn("ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು", reply)             # asks, instead of confirming his name
+        self.assertIn("ನಿಮ್ಮ ಊರು ಯಾವುದು", reply)             # asks, instead of confirming his name
         self.assertNotIn("sadashiva", reply.lower().split("kadaba ಇಂದ.")[1])
 
     def test_places_sharing_a_name_word_are_kept(self):

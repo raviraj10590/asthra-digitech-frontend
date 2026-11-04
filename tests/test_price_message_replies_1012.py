@@ -21,7 +21,7 @@ class ThumbsUpInAnyColour(unittest.TestCase):
         for t in ("👍🏿", "👍🏻", "👍🏽", "👍"):
             f, reply = turn(t, (b.AWAITING_DELIVERY,))
             self.assertTrue(f["delivery_same"], t)
-            self.assertIn("ಅದೇ ಊರಿಗೆ ಡೆಲಿವರಿ", reply)
+            self.assertIn("ಅದೇ ಊರು", reply)
 
 
 class AnotherSizeAsksItsPrice(unittest.TestCase):

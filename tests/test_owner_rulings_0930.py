@@ -64,7 +64,7 @@ class IgnoredTwiceMoveOn(unittest.TestCase):
     def test_the_real_conversation(self):
         run = history_of([FORM.format(loc="land"), "ರೇಟ್ ಹೇಳಿ", "2 units",
                           "ರೇಟ್ ಕಡಿಮೆ madabeku", "No"])
-        where = [s for s in run.sent if "ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು" in s]
+        where = [s for s in run.sent if "ನಿಮ್ಮ ಊರು ಯಾವುದು" in s]
         self.assertLessEqual(len(where), 3)                  # was 5
         self.assertIn(b.question_for(b.AWAITING_PURPOSE), run.sent[-1])
 
@@ -75,7 +75,7 @@ class IgnoredTwiceMoveOn(unittest.TestCase):
 
     def test_one_ignored_ask_is_asked_again(self):
         run = history_of([FORM.format(loc=""), "ok"])
-        self.assertIn("ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು", run.sent[-1])
+        self.assertIn("ನಿಮ್ಮ ಊರು ಯಾವುದು", run.sent[-1])
 
     def test_rule(self):
         m = {"role": "assistant", "content": b.flow_marker(D)}
@@ -135,7 +135,7 @@ class INeedItIsNotAPlace(unittest.TestCase):
     def test_the_real_form(self):
         p = b.parse(FORM.format(loc="ನನಗೆ ಬೇಕಾ ಆಗಿದಿ"))
         self.assertIsNone(p["location"])
-        self.assertIn("ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು", b.compose_reply(p))
+        self.assertIn("ನಿಮ್ಮ ಊರು ಯಾವುದು", b.compose_reply(p))
 
     def test_other_need_answers(self):
         for loc in ("ಬೇಕು", "ಬೇಕಾಗಿದೆ", "need", "Required", "i need 25 kva", "ನಮಗೆ ಬೇಕಾಗಿದೆ",

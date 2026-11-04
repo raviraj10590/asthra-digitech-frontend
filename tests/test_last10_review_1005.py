@@ -169,7 +169,7 @@ class WhyAreYouAsking(unittest.TestCase):
         f = read("Yake sir", D, k)
         self.assertEqual(f["customer_question"], b.QUESTION_WHY)
         reply = b.compose_followup_reply(f, k, None, None)
-        self.assertTrue(reply.startswith("ಡೆಲಿವರಿ ಸ್ಥಳ ತಿಳಿದರೆ"), reply)
+        self.assertTrue(reply.startswith("ನಿಮ್ಮ ಊರು ತಿಳಿದರೆ"), reply)
         self.assertIn("nadi sinur", reply)
 
     def test_a_long_message_with_why_is_not_this(self):

@@ -169,7 +169,7 @@ class TheCustomerGetsTheAnswer(unittest.TestCase):
     def test_the_reply_still_re_asks_what_is_outstanding(self):
         """Answering the question must not stop the qualification."""
         reply = b.compose_followup_reply(self.followup, self.known)
-        self.assertIn("ಡೆಲಿವರಿ", reply)
+        self.assertIn("ನಿಮ್ಮ ಊರು", reply)
 
     def test_an_ordinary_followup_reply_is_unchanged(self):
         """The feature is additive: no approval question, no new text."""

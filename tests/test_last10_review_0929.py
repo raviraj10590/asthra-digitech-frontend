@@ -24,7 +24,7 @@ class TheWholeNameIsNotAPlace(unittest.TestCase):
     def test_the_real_form(self):
         p = b.parse(FORM.format(loc="Jagadish", name="Jagadish R"))
         self.assertIsNone(p["location"])
-        self.assertIn("ಡೆಲಿವರಿ ಯಾವ ಊರಿಗೆ ಬೇಕು", b.compose_reply(p))
+        self.assertIn("ನಿಮ್ಮ ಊರು ಯಾವುದು", b.compose_reply(p))
 
     def test_one_word_of_a_longer_name_is_still_a_place(self):
         for loc, name in (("Shivakumar", "Shivakumar S Ambi"), ("Ambi", "Shivakumar Ambi"),

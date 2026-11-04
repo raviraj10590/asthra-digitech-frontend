@@ -28,7 +28,7 @@ class TheRealLead(unittest.TestCase):
         self.r = b.compose_reply(self.p)
 
     def test_address_is_tidy(self):
-        self.assertIn("ಡೆಲಿವರಿ Toranagatti, Ramdurga, Belgaum ಗೆ ತಾನೇ?", self.r)
+        self.assertIn("ನಿಮ್ಮ ಊರು Toranagatti, Ramdurga, Belgaum ಅಲ್ವಾ?", self.r)
         self.assertNotIn("  ", self.r)
 
     def test_stored_place_is_untouched(self):
@@ -48,7 +48,7 @@ class NotUrgent(unittest.TestCase):
         r = b.compose_reply(b.parse(FORM.format(when=LATER, loc="Sira")))
         self.assertNotIn("ಆದ್ಯತೆ", r)
         self.assertIn("63 kVA transformer ಬಗ್ಗೆ ಕೇಳಿದ್ರಿ ಅಲ್ವಾ", r)
-        self.assertIn("ಡೆಲಿವರಿ Sira ಗೆ ತಾನೇ?", r)
+        self.assertIn("ನಿಮ್ಮ ಊರು Sira ಅಲ್ವಾ?", r)
 
 
 class PlaceDisplay(unittest.TestCase):

@@ -50,8 +50,7 @@ class ThePriceList(unittest.TestCase):
     def test_the_terms_are_exactly_what_the_owner_said(self):
         r = b.price_block_kn(25) + "\n".join(b.TERM_LINES.values()) + b.CLOSING_VALUE
         for must in ("Transport ಸೇರಿದೆ", "installation ಪ್ರತ್ಯೇಕ", "1 ವರ್ಷ warranty",
-                     "service ಲಭ್ಯ", "50% advance", "MESCOM approved",
-                     "ಡೆಲಿವರಿ ಸಮಯ — ನಮ್ಮ ತಂಡ call ನಲ್ಲಿ"):
+                     "service ಲಭ್ಯ", "50% advance", "MESCOM approved"):
             self.assertIn(must, r)
 
     def test_nothing_the_owner_did_not_state(self):
