@@ -500,16 +500,20 @@ _BROCHURE_DESIGN_ASK = re.compile(
 # polite redirect WITHOUT an AI call (saves cost + guarantees scope control).
 # Deliberately conservative — only clear non-business signals; ambiguous cases
 # fall through to the AI, whose prompt also enforces scope.
+# ONLY WHAT NO CUSTOMER OF A MARKETING AGENCY ASKS (2026-11-05 debate). "₹1,499 ಮಾಸಿಕ
+# ಶುಲ್ಕವನ್ನು ಯಾವ ದಿನಕ್ಕೆ ಪಾವತಿಸಬೇಕು?" — a customer agreeing to pay — got "I only help with
+# Asthra services": "ಕವನ" (poem) sits inside "ಶುಲ್ಕವನ್ನು". Kannada words now match only at a word
+# start, and the English words our own customers use were removed: "Instagram story", "video
+# script", "QR code", "html website", "event program".
+_KN_WORD_START = r"(?<![\u0C80-\u0CFF])"
 OFFTOPIC_PATTERNS = [
-    r'\bpython\b', r'\bjava(script)?\b', r'\bc\+\+\b', r'\bhtml\b', r'\bsql\b',
-    r'\bcode\b', r'\bscript\b', r'\bprogram(ming)?\b', r'\balgorithm\b',
-    r'\bfunction\b.*\bwrite\b', r'\bleetcode\b', r'\bcompile\b',
-    r'\bjoke\b', r'\briddle\b', r'\bpoem\b', r'\bshayari\b', r'\bstory\b',
+    r'\bpython\b', r'\bjavascript\b', r'\bc\+\+\b', r'\bleetcode\b', r'\bcompile\b',
+    r'\bfunction\b.*\bwrite\b', r'\balgorithm\b',
+    r'\bjoke\b', r'\briddle\b', r'\bpoem\b', r'\bshayari\b',
     r'\bessay\b', r'\bhomework\b', r'\bassignment\b', r'\bsolve\b.*\b(equation|sum|math)\b',
     r'\bcapital of\b', r'\bwho is the (president|prime minister|ceo of)\b',
     r'\brecipe\b', r'\bhoroscope\b', r'\bweather\b.*\btoday\b',
-    'ಜೋಕ್', 'ಕವನ', 'ಪ್ರಬಂಧ', 'ಕಥೆ', 'ಹೋಮ್‌ವರ್ಕ್', 'ಪೈಥಾನ್', 'ಕೋಡ್',
-]
+] + [_KN_WORD_START + w for w in ('ಜೋಕ್', 'ಕವನ', 'ಪ್ರಬಂಧ', 'ಹೋಮ್‌ವರ್ಕ್', 'ಪೈಥಾನ್')]
 def is_off_topic(text: str) -> bool:
     t = text.lower()
     return any(re.search(p, t) for p in OFFTOPIC_PATTERNS)

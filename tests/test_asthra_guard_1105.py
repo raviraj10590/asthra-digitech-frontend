@@ -75,5 +75,19 @@ class AfterHoursOnce(unittest.TestCase):
             self.assertEqual(w.after_hours_once([]), "")
 
 
+class NotOffTopic(unittest.TestCase):
+    def test_business_words_are_not_off_topic(self):
+        import webhook as w
+        for t in ("₹1,499 ಮಾಸಿಕ ಶುಲ್ಕವನ್ನು ಯಾವ ದಿನಕ್ಕೆ ಪಾವತಿಸಬೇಕು?", "Instagram story beku",
+                  "video script neeve bareetira?", "UPI QR code kalisi", "html website beku",
+                  "event program ge poster", "ನಮ್ಮ ಕಥೆ ವಿಡಿಯೋ ಮಾಡಿ", "QR ಕೋಡ್ ಕಳಿಸಿ"):
+            self.assertFalse(w.is_off_topic(t), t)
+
+    def test_real_off_topic_still_caught(self):
+        import webhook as w
+        for t in ("python code bareyiri", "ondu joke heli", "ಕವನ ಬರೆದು ಕೊಡಿ", "capital of France?"):
+            self.assertTrue(w.is_off_topic(t), t)
+
+
 if __name__ == "__main__":
     unittest.main()
