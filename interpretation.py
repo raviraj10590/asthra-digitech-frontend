@@ -219,6 +219,7 @@ def validate(interp, text: str, awaiting=(), known: dict = None) -> dict:
            "asked_discount": brain["asked_discount"],
            "offer": brain["offer"],
            "no_call": brain["no_call"],
+           "compare_kva": brain["compare_kva"],
            "asks_call": brain["asks_call"],
            "asks_call_when": brain["asks_call_when"],
            "call_missed": brain["call_missed"],

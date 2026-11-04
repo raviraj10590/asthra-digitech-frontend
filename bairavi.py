@@ -707,7 +707,9 @@ _QTY_RE = re.compile(
 
 _CALL_AT_RE = re.compile(r"(?:kke|ಕ್ಕೆ|ge|ಗೆ)\s*(?:call|phone|fone|kaal|coll|ಕಾಲ್|ಫೋನ್|ಕರೆ)", re.I)
 _NOT_TRANSFORMERS = ("ಕಂಬ", "ಕಹಬ", "ಕಂಭ", "kamba", "kamb", "pole", "ಪೋಲ್",
-                     "acre", "ekare", "ಎಕರೆ", "gunte", "ಗುಂಟೆ", "wire", "ವೈರ್")
+                     "acre", "ekare", "ಎಕರೆ", "gunte", "ಗುಂಟೆ", "wire", "ವೈರ್",
+                     # 2026-11-04 debate: "50% advance", "24/7" and "3 motors" were 50, 24 and 3 units
+                     "%", "/", "x ", "×", "motor", "motar", "ಮೋಟಾರ್", "ಮೋಟರ್", "pump", "ಪಂಪ್")
 
 
 _SIZE_FIGURES = frozenset((25, 63, 100, 250, 500))
@@ -717,6 +719,10 @@ _SIZE_FIGURE_RE = re.compile(r"(?<!\d)(25|63|100|250|500)(?!\d)")
 def _size_figures(low: str) -> set:
     """The distinct transformer sizes written in this text, with or without kVA."""
     return {int(n) for n in _SIZE_FIGURE_RE.findall(low or "")}
+
+
+_OUR_FACTORY_RE = re.compile(r"(?:ಫ್ಯಾಕ್ಟರಿ|factory|ಕಾರ್ಖಾನೆ)\s*(?:kadaba|ಕಡಬ)"
+                             r"|(?:nimma|nimm|ನಿಮ್ಮ|your|ur)\s*(?:ಫ್ಯಾಕ್ಟರಿ|factory|ಕಾರ್ಖಾನೆ)", re.I)
 
 
 def _read_quantity(low: str, cap=None):
@@ -752,7 +758,7 @@ def _read_quantity(low: str, cap=None):
         if low[digits_end:digits_end + 1].isdigit():
             continue
         before = low[m.start() - 1] if m.start() else ""
-        if before == "+" or before.isdigit():
+        if before in ("+", "/") or before.isdigit():   # "/": the 7 of "24/7"
             continue
         if not stated_unit and low[digits_end:digits_end + 1].isalpha():
             continue
@@ -1340,6 +1346,23 @@ QUESTION_WHY = "why_asked"
 # "Dry type ideya?" (2026-10-25 stress test) got the 25 kVA price. Owner 2026-10-05: "we dont have dry
 # type now" — say so plainly and name what we do make; never offer it.
 QUESTION_DRY_TYPE = "dry_type"
+# 2026-11-04 debate: "25 kVA ಅಂದ್ರೆ ಏನು? … ಸರ್ಕಾರದ ಸಬ್ಸಿಡಿ, ಲೋನ್" got "ಇದನ್ನ ನಮ್ಮ engineer ಹತ್ರ ಕೇಳಿ".
+# kVA is explained in plain words; on subsidy and loans the owner has stated nothing, so the
+# answer says so and where to ask — never a scheme or a rate.
+QUESTION_KVA = "kva_meaning"
+QUESTION_SUBSIDY = "subsidy_loan"
+QUESTION_KVA_SUBSIDY = "kva_and_subsidy"
+_KVA_MEANING_RE = re.compile(r"(?:kva|ಕೆವಿಎ|ಕೆ\.ವಿ\.ಎ)\W{0,3}(?:andre|andare|ಅಂದ್ರೆ|ಅಂದರೆ|means?|meaning)"
+                             r"|what\s+is\s+(?:a\s+)?kva", re.I)
+_SUBSIDY_WORDS = ("subsidy", "subsidi", "sabsidi", "ಸಬ್ಸಿಡಿ", "loan", "ಲೋನ್", "ಸಾಲ ಸಿಗ", "ಸಾಲ ಕೊಡ",
+                  "ಸಾಲ ಮಾಹಿತಿ", "ಸಾಲ ಯಾವ", "ಸಾಲದ ", "ಸರ್ಕಾರದ ಸಹಾಯ", "sarkari sahaya")
+_KVA_KN = ("*kVA* ಅಂದ್ರೆ transformer ಎಷ್ಟು ವಿದ್ಯುತ್ load ತಡೆಯುತ್ತೆ ಅನ್ನೋ ಅಳತೆ — kVA ಜಾಸ್ತಿ ಆದಷ್ಟು "
+           "ಹೆಚ್ಚು motor/pump ನಡೆಸಬಹುದು. ನಿಮ್ಮಲ್ಲಿ ಎಷ್ಟು HP motor ಇದೆ ಅಂತ ಹೇಳಿದ್ರೆ ಯಾವ size "
+           "ಸರಿ ಅಂತ ನಮ್ಮ engineer ಹೇಳ್ತಾರೆ.")
+_SUBSIDY_KN = ("ಸರ್ಕಾರದ ಸಬ್ಸಿಡಿ / ಲೋನ್ ಬಗ್ಗೆ ನಮ್ಮ ಬಳಿ ಖಚಿತ ಮಾಹಿತಿ ಇಲ್ಲ — ಅದನ್ನ ನಿಮ್ಮ ESCOM office "
+               "ಅಥವಾ bank ನಲ್ಲಿ ಕೇಳಿ 🙏 Transformer ದರ ಮತ್ತು payment ವಿವರ ನಾವು ಇಲ್ಲೇ ಕೊಡ್ತೀವಿ.")
+# "ಡೆಲಿವರಿ ಟೈಮ್ ಎಷ್ಟು?" was not a delivery-time question (2026-11-04 debate).
+_WHEN_WORDS_DELIVERY = ("ಟೈಮ್", "time", "ಎಷ್ಟು ದಿನ", "eshtu dina", "estu dina", "yeshtu dina", "days")
 _ASK_DRY_TYPE = ("dry type", "dry-type", "drytype", "dry transformer", "ಡ್ರೈ ಟೈಪ್", "ಡ್ರೈ-ಟೈಪ್", "ಡ್ರೈ ಟ್ರಾನ್ಸ್")
 _WHY_WORDS = ("yake", "yaake", "yak", "ಯಾಕೆ", "ಯಾಕ್", "why")
 _WHY_ANSWER_KN = {
@@ -1369,6 +1392,9 @@ _DELIVER_WORDS = ("deliver", "ಡೆಲಿವರಿ", "kodtira", "kodthira", "ko
                   "kalstira", "kalsthira", "kalistira", "kalustira", "ಕಳಿಸ್ತೀರಾ")
 _DELIVERY_TIME_KN = ("ಡೆಲಿವರಿ ಸಮಯವನ್ನು ನಿಮ್ಮ order ವಿವರ ನೋಡಿ ನಮ್ಮ ತಂಡ ಕರೆಯಲ್ಲಿ "
                      "ಖಚಿತಪಡಿಸುತ್ತಾರೆ.")
+# The same, for someone who asked not to be called (2026-11-04 debate).
+_DELIVERY_TIME_NO_CALL_KN = ("ಡೆಲಿವರಿ ಸಮಯವನ್ನು ನಿಮ್ಮ order ವಿವರ ನೋಡಿ ನಮ್ಮ ತಂಡ ಇಲ್ಲೇ WhatsApp ನಲ್ಲಿ "
+                             "ಖಚಿತಪಡಿಸುತ್ತಾರೆ.")
 
 # DELIVERY REACH — owner-stated, 2026-09-20, in the owner's own words:
 # "sadyakke delivery irodu mescom limit in 2 month etaire karnataka delivery
@@ -1439,8 +1465,13 @@ def customer_question(text: str):
     owner needs to see.
     """
     low = (text or "").lower()
-    if any(w in low for w in _WHEN_WORDS) and any(w in low for w in _DELIVER_WORDS):
+    if (any(w in low for w in _WHEN_WORDS + _WHEN_WORDS_DELIVERY)
+            and any(w in low for w in _DELIVER_WORDS)):
         return QUESTION_DELIVERY_TIME
+    _kva_q, _subsidy_q = bool(_KVA_MEANING_RE.search(low)), _mentions(low, _SUBSIDY_WORDS)
+    if _kva_q or _subsidy_q:
+        return (QUESTION_KVA_SUBSIDY if _kva_q and _subsidy_q
+                else QUESTION_KVA if _kva_q else QUESTION_SUBSIDY)
     if _mentions(low, _GST_WORDS):
         return QUESTION_GST
     if len(_size_figures(low)) >= 2 and _mentions(low, _SIZE_CHANGE_WORDS):
@@ -1497,6 +1528,9 @@ def answer_question_kn(tag, known: dict = None) -> str:
                 "dry-type ಸದ್ಯ ಲಭ್ಯವಿಲ್ಲ.\n" + _range_line_kn())
     if tag == QUESTION_DELIVERY_TIME:
         return _DELIVERY_TIME_KN
+    if tag in (QUESTION_KVA, QUESTION_SUBSIDY, QUESTION_KVA_SUBSIDY):
+        return "\n".join(t for k, t in ((QUESTION_KVA, _KVA_KN), (QUESTION_SUBSIDY, _SUBSIDY_KN))
+                         if tag in (k, QUESTION_KVA_SUBSIDY))
     if tag == QUESTION_GST:
         kva = known.get("capacity_kva")
         if kva in PRICE_LIST:
@@ -1531,6 +1565,7 @@ def unanswered_question(followup: dict) -> bool:
         return False
     return (followup.get("discom_approval_ask") is None
             and not followup.get("asked_price")
+            and not followup.get("asked_discount")     # "45k ಗೆ ಕೊಡುವಿರಾ?" is answered by the bargain reply
             and not followup.get("asked_terms"))
 
 
@@ -1568,7 +1603,7 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
     # PRICE AND APPROVAL STAY DETERMINISTIC. Both are hard evidence rules
     # with carefully worded answers, and a fluent paraphrase of "we cannot
     # quote a figure" is a chance to quote one.
-    if followup.get("asked_price"):
+    if followup.get("asked_price") or followup.get("compare_kva"):
         return False
     if followup.get("discom_approval_ask") is not None:
         return False
@@ -1602,6 +1637,9 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
         return False
     # "No dry-type" is the owner's fact (2026-10-05); a model could offer one.
     if followup.get("customer_question") == QUESTION_DRY_TYPE:
+        return False
+    # kVA in plain words, and "we do not know the subsidy" (2026-11-04): a model could name a scheme.
+    if followup.get("customer_question") in (QUESTION_KVA, QUESTION_SUBSIDY, QUESTION_KVA_SUBSIDY):
         return False
     # THE OTHER QUESTIONS GO TO THE MODEL FIRST, and their evidenced answers
     # become the fallback rather than the first responder. A keyword match is
@@ -2508,6 +2546,19 @@ def _bare_delivery_answer(text: str):
     raw = (text or "").strip(_TRIM)
     if not raw:
         return None
+    # THE ADDRESS ENDS WITH ITS SENTENCE (2026-11-04 debate). "ಹೌದು, Hubballi, Bagalkot ಜಿಲ್ಲೆ. 100 kVA
+    # ಗಾಗಿ GST ಸಹಿತ ಬೆಲೆ, ಡೆಲಿವರಿ ದಿನಗಳು, … ತಿಳಿಸಿ." was stored whole as the place. After a
+    # taluk/district word, the first full stop or question mark closes the address.
+    _low = raw.lower()
+    _marks = [i + len(m) for m in _ADMIN_MARKER for i in [_low.find(m)] if i >= 0]
+    if _marks:
+        _end = re.search(r"[.?!।]\s|\n", raw[min(_marks):])
+        _rest = raw[min(_marks) + _end.end():].strip(_TRIM + " .?!") if _end else ""
+        # Only when what follows is not more of the address ("ತುಮಕೂರು .ಜಿಲ್ಲೆ . ಗುಬ್ಬಿ ..ತಾಲ್ಲೂಕು" is
+        # one address written with dots).
+        if (_rest and not _is_place_like(_rest)
+                and not any(m in _rest.lower() for m in _ADMIN_MARKER)):
+            raw = raw[:min(_marks) + _end.start()].strip(_TRIM)
     # NUMBERED ANSWERS. "1) ತೋಟ / 2) agriculture / 3) 25kVA" (2026-09-24)
     # was stored as the address "1) ತೋಟ": customers number their answers to
     # match our numbered questions, and the number is not part of any place.
@@ -2841,7 +2892,19 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             and (known or {}).get("callback") in CALLBACK_LABEL_KN):
         out["quantity"] = None
         out["digit_unclear"] = int(bare)
+    # "100kVA ಅಥವಾ 63kVA ಸಾಕಾ? … ಬೆಲೆ ಹೋಲಿಸಿ" (2026-11-04 debate) switched the lead to 100 kVA and
+    # priced only that. Two or more of our sizes in a price question: each is priced, and the
+    # size on record stays until they choose.
+    _sizes = tuple(sorted({int(n) for n in _KVA_RE.findall(text or "")} & set(PRICE_LIST)))
+    out["compare_kva"] = None
+    if len(_sizes) >= 2 and (out.get("asked_price") or _mentions((text or "").lower(), _COMPARE_WORDS)):
+        out["compare_kva"], out["capacity_kva"], out["asked_price"] = _sizes, None, True
+        if out.get("offer") is None:          # "a size a bit lower than 250" is not a bargain
+            out["asked_discount"] = False
     return out
+
+
+_COMPARE_WORDS = ("compare", "ಹೋಲಿಸಿ", "holisi", "ಸಾಕಾ", "saaka", "saka", "enough", "difference", "ವ್ಯತ್ಯಾಸ")
 
 
 _EMOJI_MODIFIERS = re.compile("[\U0001F3FB-\U0001F3FF\uFE0F]")
@@ -2942,7 +3005,9 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # "units" for kVA) were both recorded as an order of 25 units.
     if qty is not None and qty in _SIZE_FIGURES and len(_size_figures(low)) >= 2:
         qty = None
-    app = _application_of(low)
+    # "ಫ್ಯಾಕ್ಟರಿ Kadaba ಅಲ್ಲಿ ಇದ್ದೇ?" asks about OUR factory (2026-11-04 debate); it was
+    # read as their purpose, "ಕೈಗಾರಿಕೆ ಕೆಲಸಕ್ಕೆ".
+    app = _application_of(_OUR_FACTORY_RE.sub(" ", low))
     # WHERE TO DELIVER. An explicit delivery word is required: a bare place
     # name in a follow-up cannot be told apart from an application, a company
     # or a person, and a guessed delivery address is a lorry sent to the wrong
@@ -3196,9 +3261,16 @@ _INFO_ASK = ("ಮಾಹಿತಿ", "mahiti", "maahiti", "information", "info", "
 _INFO_NOT = ("ದಾಖಲೆ", "document", "ಡಾಕ್ಯುಮೆಂಟ್", "photo", "ಫೋಟೋ")
 
 
+# "IS THIS A SCAM?" (2026-11-04 debate) got the company line and nothing on the advance. The
+# details card is the owner's own facts: the Kadaba factory, MESCOM approval, BIS/ISO, 50/50.
+_TRUST_ASK = ("scam", "ಸ್ಕ್ಯಾಮ್", "fake", "ಫೇಕ್", "fraud", "ಫ್ರಾಡ್", "ಮೋಸ", "mosa", "nambike",
+              "ನಂಬಿಕೆ", "nambodu", "ನಂಬೋದು", "genuine", "real company", "original company", "ನಿಜವಾದ ವಿಳಾಸ",
+              "ನಿಜವಾದ ಕಂಪನಿ", "ನಿಜವಾದ company", "nijavada company", "real aa", "ನಂಬಬಹುದಾ")
+
+
 def asks_for_info(text: str) -> bool:
     low = (text or "").lower()
-    return _mentions(low, _INFO_ASK) and not _mentions(low, _INFO_NOT)
+    return (_mentions(low, _INFO_ASK) or _mentions(low, _TRUST_ASK)) and not _mentions(low, _INFO_NOT)
 
 
 def info_card_kn(state: dict) -> str:
@@ -3414,6 +3486,11 @@ def value_line_kn(kva=None) -> str:
             "lower losses, ಕರೆಂಟ್ ಉಳಿತಾಯ.")
 
 
+_BARGAIN_CALL_KN = "ರೇಟ್ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ call ಮಾಡಿ ಮಾತಾಡ್ತಾರೆ."
+# For someone who asked not to be called (2026-11-04 debate).
+_BARGAIN_NO_CALL_KN = "ರೇಟ್ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ಇಲ್ಲೇ WhatsApp ನಲ್ಲಿ ಉತ್ತರಿಸ್ತಾರೆ."
+
+
 def bargain_reply_kn(kva=None, offer=None) -> str:
     """The answer to a lower-price ask or a counter-offer.
 
@@ -3434,7 +3511,7 @@ def bargain_reply_kn(kva=None, offer=None) -> str:
         lines.append(f"ನೀವು ಹೇಳಿದ ಮೊತ್ತಕ್ಕೆ ಹೊಸ {kva} kVA transformer ಬರೋದು ಕಷ್ಟ.")
     if kva in PRICE_LIST and kva > min(PRICE_LIST):
         lines.append("ನಿಮ್ಮ load ಗೆ ಚಿಕ್ಕ size ಸಾಕಾದರೆ ಅದರ ದರ ಕಡಿಮೆ — ಯಾವುದು ಸರಿ ಅಂತ engineer ನೋಡಿ ಹೇಳ್ತಾರೆ.")
-    lines.append("ರೇಟ್ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ call ಮಾಡಿ ಮಾತಾಡ್ತಾರೆ.")
+    lines.append(_BARGAIN_CALL_KN)
     return "\n".join(lines)
 
 
@@ -3686,6 +3763,8 @@ _TERM_TOPIC = {
     "warranty": "warranty", "guarantee": "warranty", "ವಾರಂಟಿ": "warranty", "ಗ್ಯಾರಂಟಿ": "warranty",
     "service": "warranty", "ಸರ್ವಿಸ್": "warranty",
     "payment": "payment", "advance": "payment", "ಅಡ್ವಾನ್ಸ್": "payment", "ಪೇಮೆಂಟ್": "payment",
+    # "50% ಮುಂಚಿತ ಪಾವತಿ ಮಾಡಬೇಕೆ?" (2026-11-04 debate)
+    "ಮುಂಚಿತ": "payment", "ಪಾವತಿ": "payment",
     "emi": "payment", "loan": "payment",
     # 2026-11-03 modern-chat test: "UPI code haaki", "GPay number kodi" got only the place question again
     "upi": "payment", "gpay": "payment", "phonepe": "payment", "paytm": "payment", "cash": "payment",
@@ -3898,7 +3977,12 @@ _PERSISTENT_FIELDS = ("capacity_kva", "quantity", "application", "location",
                       "delivery_location", "delivery_same",
                       "delivery_mentioned", "name", "callback", "urgency", "call_time",
                       # "ಕರೆ ಬೇಡ" once is for the whole chat: never offered a call time again.
-                      "no_call")
+                      "no_call",
+                      # a second bargain gets a short answer, not the same block again (2026-11-04)
+                      "asked_discount")
+# What counts as the customer telling us something new: a bargain is remembered (to keep the
+# reply short) but answers none of our questions, so "ignored twice" still counts it.
+_ANSWER_FIELDS = tuple(f for f in _PERSISTENT_FIELDS if f != "asked_discount")
 
 
 def merged_state(known: dict, turn: dict = None) -> dict:
@@ -3975,10 +4059,10 @@ def established_from_history(history) -> dict:
         # read by its own extractor. Neither is trusted to invent a field.
         turn = (parse(text) if is_lead_form(text)
                 else parse_followup(text, awaiting, known=state))
-        before = {f: state.get(f) for f in _PERSISTENT_FIELDS}
+        before = {f: state.get(f) for f in _ANSWER_FIELDS}
         state = merged_state(state, turn)
         if (awaiting[:1] in ((AWAITING_DELIVERY,), (AWAITING_PURPOSE,))
-                and before == {f: state.get(f) for f in _PERSISTENT_FIELDS}):
+                and before == {f: state.get(f) for f in _ANSWER_FIELDS}):
             ignored[awaiting[0]] = ignored.get(awaiting[0], 0) + 1
     # IGNORED TWICE: MOVE ON (owner-approved 2026-09-30; purpose too,
     # 2026-10-01). Live ...4996 was
@@ -4125,7 +4209,7 @@ def outstanding(followup: dict, known: dict = None) -> tuple:
     known = known or {}
     ignored = dict(known.get("ignored_asks") or {})
     if (followup and known.get("last_asked")
-            and all(state.get(f) == known.get(f) for f in _PERSISTENT_FIELDS)):
+            and all(state.get(f) == known.get(f) for f in _ANSWER_FIELDS)):
         ignored[known["last_asked"]] = ignored.get(known["last_asked"], 0) + 1
     if not (state.get("delivery_location") or state.get("delivery_same")
             or state.get("delivery_mentioned")
@@ -4347,6 +4431,14 @@ def bubbles(reply: str) -> list:
 ACK_KN = "ಸರಿ 🙏"
 
 
+def asks_more_than_no_call(followup: dict) -> bool:
+    """"Call ಬೇಡ" with a question in the same message: the question is answered and the
+    usual next question asked (and awaited, so "ignored twice" still moves on)."""
+    return bool(followup.get("asked_price") or followup.get("asked_discount")
+                or followup.get("customer_question") or followup.get("asks_info")
+                or followup.get("asked_terms") or followup.get("discom_approval_ask") is not None)
+
+
 def compose_followup_reply(followup: dict, known: dict = None, *args, **kwargs) -> str:
     """The reply — and never a bare "ಧನ್ಯವಾದಗಳು." to someone waiting for a
     call. A lone thanks after "25" (live ...1709, 2026-10-01) read as the
@@ -4424,7 +4516,8 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     if followup.get("delivery_location"):
         _shown = place_display(followup['delivery_location'])
         got.append(f"{_shown.title() if _shown.isascii() and _shown.islower() else _shown}")
-    elif followup.get("delivery_same"):
+    elif followup.get("delivery_same") and not (known or {}).get("delivery_same"):
+        # Once: "ಸರಿ, ಅದೇ ಊರು 👍" opened every reply in the 2026-11-04 debate.
         got.append("ಅದೇ ಊರು")
 
     _state_now = merged_state(known, followup)
@@ -4433,12 +4526,19 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         _who = display_name(_state_now.get("name"))
         return (("ಸರಿ " + _who + " ಅವರೇ 🙏" if _who else "ಸರಿ 🙏")
                 + " ಮುಂದೆ ಏನಾದ್ರೂ ಬೇಕಿದ್ರೆ ಇದೇ ನಂಬರ್‌ಗೆ message ಮಾಡಿ.")
-    if followup.get("no_call"):
+    # "CALL ಬೇಡ" WITH QUESTIONS IN THE SAME MESSAGE (2026-11-04 debate): "ಬೆಲೆ, ಡೆಲಿವರಿ ಟೈಮ್,
+    # ಇನ್‌ಸ್ಟಾಲ್ ವೆಚ್ಚ ಎಷ್ಟು? Call ಬೇಡ" got only "ನಾವು call ಮಾಡಲ್ಲ", six times. The promise is
+    # made once, and the questions are answered here on WhatsApp.
+    if followup.get("no_call") and not asks_more_than_no_call(followup):
         # The answer the owner gave ...8314 himself ("sari kare madalla"), and the door left open
         # where they chose to talk. The owner alert says not to call.
         _who = display_name(_state_now.get("name"))
         return ((f"ಸರಿ {_who} ಅವರೇ 🙏" if _who else "ಸರಿ 🙏") + " ನಾವು call ಮಾಡಲ್ಲ.\n"
                 "ಏನು ಬೇಕಾದ್ರೂ ಇಲ್ಲೇ WhatsApp ನಲ್ಲಿ ಕೇಳಿ — ದರ, warranty, transport ಎಲ್ಲಾ ಇಲ್ಲೇ ಹೇಳ್ತೀವಿ.")
+    _no_call = bool(_state_now.get("no_call"))
+    if followup.get("no_call") and not (known or {}).get("no_call"):
+        _who = display_name(_state_now.get("name"))
+        lines.append((f"ಸರಿ {_who} ಅವರೇ 🙏" if _who else "ಸರಿ 🙏") + " ನಾವು call ಮಾಡಲ್ಲ — ವಿವರ ಇಲ್ಲೇ:")
     if followup.get("is_greeting") and not got:
         # "Hii namaste" is a hello, not an answer. It was met with the
         # call-back close on 2026-09-25; it gets a hello and the one open
@@ -4494,7 +4594,7 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         lines.append(("ಕ್ಷಮಿಸಿ " + _who + " ಅವರೇ 🙏" if _who else "ಕ್ಷಮಿಸಿ 🙏")
                      + " ಕರೆ ತಡವಾಗಿದೆ. ನಿಮ್ಮ ವಿಚಾರವನ್ನು ನಮ್ಮ ತಂಡಕ್ಕೆ ಮತ್ತೊಮ್ಮೆ "
                      "ತುರ್ತಾಗಿ ತಿಳಿಸಿದ್ದೇವೆ — ಆದಷ್ಟು ಬೇಗ ಕರೆ ಮಾಡುತ್ತಾರೆ.")
-    elif followup.get("asks_call") and _chosen and not followup.get("callback"):
+    elif followup.get("asks_call") and _chosen and not followup.get("callback") and not _no_call:
         _who = display_name(merged_state(known, followup).get("name"))
         _their_time = (known or {}).get("call_time")
         _when = (f"*{_their_time['label_kn'] if _their_time else callback_when_kn(_chosen, followup.get('call_hour'))}*")
@@ -4512,9 +4612,23 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     if followup.get("asked_discount"):
         # Never a discount and never the same price again: a person calls.
         # The value answer first (owner's selling points), then a person.
-        lines.append("\n" + bargain_reply_kn(merged_state(known, followup).get("capacity_kva"),
-                                              followup.get("offer")))
-    elif followup["asked_price"]:
+        if (known or {}).get("asked_discount"):
+            # SAID ALREADY (2026-11-04 debate): the same four-line block went out three times.
+            # Still no figure and no discount; the owner is alerted again on this turn.
+            lines.append("\nನಿಮ್ಮ ಮಾತು ನಮ್ಮ sales ತಂಡಕ್ಕೆ ಮತ್ತೆ ತಿಳಿಸಿದ್ದೇವೆ 🙏\n"
+                         + (_BARGAIN_NO_CALL_KN if _no_call else "ರೇಟ್ ಬಗ್ಗೆ ಅವರೇ call ಮಾಡಿ ಮಾತಾಡ್ತಾರೆ."))
+        else:
+            _bargain = bargain_reply_kn(merged_state(known, followup).get("capacity_kva"),
+                                        followup.get("offer"))
+            if _no_call:
+                _bargain = _bargain.replace(_BARGAIN_CALL_KN, _BARGAIN_NO_CALL_KN)
+            lines.append("\n" + _bargain)
+    elif followup.get("compare_kva"):
+        lines.append("\n" + "\n".join("• " + price_line(k) for k in followup["compare_kva"])
+                     + "\nTransport ದರದಲ್ಲೇ ಸೇರಿದೆ. ನಿಮ್ಮ load ಗೆ ಯಾವ size ಸರಿ ಅಂತ ನಮ್ಮ engineer "
+                     "ನೋಡಿ ಹೇಳ್ತಾರೆ.")
+    elif followup["asked_price"] and not followup.get("asks_info"):
+        # (The details card below carries the price; it was sent twice in one message.)
         # The question they actually asked. Answered with a real next step,
         # never a number — the evidence for one does not exist.
         # THE PRICE THEY ASKED FOR, from the owner's list (2026-09-24).
@@ -4611,6 +4725,8 @@ def _compose_followup_reply(followup: dict, known: dict = None,
                      + ("" if _qty_known else "\n" + QUANTITY_NOTE)
                      + "\n\n" + CALLBACK_QUESTION)
     full = "\n".join(lines).strip()
+    if _no_call:
+        full = full.replace(_DELIVERY_TIME_KN, _DELIVERY_TIME_NO_CALL_KN)
 
     # THE SAME REPLY TWICE IN A ROW. Checked here, at the single place the
     # reply is built, so no caller can send a repeat by forgetting to ask.
@@ -4943,8 +5059,8 @@ def awaiting_after(followup: dict, known: dict = None) -> tuple:
         return ()
     if followup.get("wants_number"):     # they will call; nothing is asked
         return ()
-    if followup.get("no_call"):          # asked not to be called; nothing is asked
-        return ()
+    if followup.get("no_call") and not asks_more_than_no_call(followup):
+        return ()                         # the bare "we won't call" reply asks nothing
     if followup.get("digit_unclear"):    # asked "units, or a new call time?"
         return (AWAITING_CALLBACK, AWAITING_QUANTITY)
     out = outstanding(followup, known)

@@ -113,6 +113,10 @@ def offered_amount(text: str, list_prices=()):
     low = PHONE_IN_TEXT_RE.sub(" ", (text or "").lower())
     if mentions(low, TERMS_MONEY):
         return None
+    # SEVERAL FIGURES: THE LOWEST IS THEIR OFFER (2026-11-04 debate). "ಬೆಲೆ ₹70,000 … ಬೇರೆ ಕಂಪನಿ
+    # ₹50,000 … ನಾನು ₹45,000 ಕೊಟ್ಟರೆ?" quotes a price and a rival before the offer; ₹70,000 went
+    # to the owner. A buyer's own figure is the low one.
+    found = []
     for m in OFFER_RE.finditer(low):
         digits = (m.group(1) or m.group(2) or m.group(3) or "").replace(",", "")
         if not digits.isdigit():
@@ -122,8 +126,8 @@ def offered_amount(text: str, list_prices=()):
             continue
         if any(n in (price, round(price * 1.18)) for price in list_prices):
             continue
-        return n
-    return None
+        found.append(n)
+    return min(found) if found else None
 
 
 
