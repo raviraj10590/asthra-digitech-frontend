@@ -201,6 +201,13 @@ class SecondRun(unittest.TestCase):
         self.assertNotEqual(b.awaiting_after(f, K), ())
         self.assertEqual(b.awaiting_after(b.parse_followup("call beda", DL, known=K), K), ())
 
+    def test_third_run_factory_where_and_is_it_real(self):
+        K = {"capacity_kva": 63, "location": "Hassan"}
+        f, r = turn("ನಿನ್ನ ಕಂಪನಿ ನಿಜವೇ? ಫ್ಯಾಕ್ಟರಿ ಎಲ್ಲಿ ಇದೆ? 50% advance ಕೊಡಬೇಕೆಂದರೆ?", K)
+        self.assertIsNone(f["application"])
+        self.assertTrue(f["asks_info"])
+        self.assertIn("Kadaba", r)
+
 
 if __name__ == "__main__":
     unittest.main()

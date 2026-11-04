@@ -722,7 +722,9 @@ def _size_figures(low: str) -> set:
 
 
 _OUR_FACTORY_RE = re.compile(r"(?:ಫ್ಯಾಕ್ಟರಿ|factory|ಕಾರ್ಖಾನೆ)\s*(?:kadaba|ಕಡಬ)"
-                             r"|(?:nimma|nimm|ನಿಮ್ಮ|your|ur)\s*(?:ಫ್ಯಾಕ್ಟರಿ|factory|ಕಾರ್ಖಾನೆ)", re.I)
+                             r"|(?:nimma|nimm|ನಿಮ್ಮ|your|ur)\s*(?:ಫ್ಯಾಕ್ಟರಿ|factory|ಕಾರ್ಖಾನೆ)"
+                             # "ಫ್ಯಾಕ್ಟರಿ ಎಲ್ಲಿ ಇದೆ?" — where is (your) factory
+                             r"|(?:ಫ್ಯಾಕ್ಟರಿ|factory|ಕಾರ್ಖಾನೆ)\s*(?:ಎಲ್ಲಿ|elli|where)", re.I)
 
 
 def _read_quantity(low: str, cap=None):
@@ -3265,7 +3267,8 @@ _INFO_NOT = ("ದಾಖಲೆ", "document", "ಡಾಕ್ಯುಮೆಂಟ್",
 # details card is the owner's own facts: the Kadaba factory, MESCOM approval, BIS/ISO, 50/50.
 _TRUST_ASK = ("scam", "ಸ್ಕ್ಯಾಮ್", "fake", "ಫೇಕ್", "fraud", "ಫ್ರಾಡ್", "ಮೋಸ", "mosa", "nambike",
               "ನಂಬಿಕೆ", "nambodu", "ನಂಬೋದು", "genuine", "real company", "original company", "ನಿಜವಾದ ವಿಳಾಸ",
-              "ನಿಜವಾದ ಕಂಪನಿ", "ನಿಜವಾದ company", "nijavada company", "real aa", "ನಂಬಬಹುದಾ")
+              "ನಿಜವಾದ ಕಂಪನಿ", "ನಿಜವಾದ company", "nijavada company", "real aa", "ನಂಬಬಹುದಾ",
+              "ಕಂಪನಿ ನಿಜವೇ", "ಕಂಪನಿ ನಿಜನಾ", "company nija", "company real")
 
 
 def asks_for_info(text: str) -> bool:
