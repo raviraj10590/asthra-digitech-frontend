@@ -531,11 +531,38 @@ def _name_words(text) -> set:
     return {w for w in re.findall(r"(?:[^\W\d_]|[\u0C80-\u0CE3])+", clean) if len(w) >= 3}
 
 
+# THE SAME NAME IN THE OTHER SCRIPT (live ...0765, 2026-11-04). Full name "Suresh Lamani", place
+# field "ಸುರೇಶ್ ಹೀರಪ್ಪ ಲಮಾಣಿ" — the bot asked "ನಿಮ್ಮ ಊರು ಸುರೇಶ್ ಹೀರಪ್ಪ ಲಮಾಣಿ ಅಲ್ವಾ?". Words are
+# compared by their consonants only (ಸುರೇಶ್ / Suresh -> "srs"), so a script difference is no
+# difference. A comparison key, never a spelling: nothing here is shown or stored.
+_KN_CONSONANT = {"ಕ": "k", "ಖ": "k", "ಗ": "g", "ಘ": "g", "ಙ": "n", "ಚ": "c", "ಛ": "c", "ಜ": "j", "ಝ": "j",
+                 "ಞ": "n", "ಟ": "t", "ಠ": "t", "ಡ": "d", "ಢ": "d", "ಣ": "n", "ತ": "t", "ಥ": "t", "ದ": "d",
+                 "ಧ": "d", "ನ": "n", "ಪ": "p", "ಫ": "p", "ಬ": "b", "ಭ": "b", "ಮ": "m", "ಯ": "y", "ರ": "r",
+                 "ಲ": "l", "ವ": "v", "ಶ": "s", "ಷ": "s", "ಸ": "s", "ಹ": "h", "ಳ": "l"}
+_LATIN_DIGRAPH = (("sh", "s"), ("th", "t"), ("dh", "d"), ("ch", "c"), ("kh", "k"), ("gh", "g"),
+                  ("ph", "p"), ("bh", "b"), ("w", "v"), ("z", "j"), ("q", "k"), ("x", "ks"), ("f", "p"))
+
+
+def _consonant_key(word: str) -> str:
+    w = (word or "").lower()
+    if w.isascii():
+        for a, b_ in _LATIN_DIGRAPH:
+            w = w.replace(a, b_)
+        key = "".join(c for c in w if c.isalpha() and c not in "aeiou")
+    else:
+        key = "".join(_KN_CONSONANT.get(c, "") for c in w)
+    return re.sub(r"(.)\1+", r"\1", key)
+
+
 def _is_the_name(location, name) -> bool:
     """True when a location answer is, in the main, the customer's name:
     at least two of its words, and at least half of them, are name words."""
     loc_w, name_w = _name_words(location), _name_words(name)
     shared = loc_w & name_w
+    _name_keys = {k for k in map(_consonant_key, name_w) if len(k) >= 2}
+    _cross = {w for w in loc_w if w not in shared and _consonant_key(w) in _name_keys}
+    if len(shared | _cross) >= 2 and 2 * len(shared | _cross) >= len(loc_w):
+        return True
     # Or it IS the whole name: "Jagadish" for "Jagadish R" (live ...0962).
     # One shared word of a longer name stays a place ("Shivakumar").
     # Or the same name with different initials: "ರವಿಕುಮಾರ್. ಜಿ. ಎಮ್" for
@@ -3105,6 +3132,14 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             dl = f"{_held}, {_addition}"
 
     dl = _without_place_label(dl)
+    # THEIR NAME ON THE FIRST LINE OF THE ADDRESS (live ...0765, 2026-11-04): "ಸುರೇಶ್ ಹೀರಪ್ಪ ಲಮಾಣಿ
+    # / ಹುಲಿಕೇರಿ ತಾಂಡ / ತಾಲೂಕು ಸವದತಿ / ಜಿಲ್ಲಾ ಬೆಳಗಾವ" was echoed back name and all. Only whole
+    # lines that are the name go, and only when an address is left.
+    _nm = (known or {}).get("name")
+    if dl and _nm and "\n" in dl:
+        _kept = [l for l in dl.splitlines() if l.strip() and not _is_the_name(l, _nm)]
+        if _kept and len(_kept) < len([l for l in dl.splitlines() if l.strip()]):
+            dl = "\n".join(_kept)
     # "kadur ok", "yep kadur", "kadur delivery" (2026-11-04 stress test) were stored as the place
     # "kadur ok". The filler words go; what is left naming the place we hold is a "same".
     # Short Latin answers only: a full Kannada address is kept word for word.
@@ -3157,6 +3192,7 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             "asked_price": _mentions(low, _PRICE_ASK) or _asks_price_latin(low),
             "asked_discount": asked_discount(text),
             "offer": offered_amount(text),
+            "no_call": refuses_call(text),
             "asks_call": asks_about_call(text),
             "asks_call_when": asks_call_time(text),
             "call_missed": call_missed(text),
@@ -3742,6 +3778,12 @@ _CALLBACK_CHOICE = {
     "3": CALLBACK_TOMORROW, "tomorrow": CALLBACK_TOMORROW, "ನಾಳೆ": CALLBACK_TOMORROW,
     "nale": CALLBACK_TOMORROW, "naale": CALLBACK_TOMORROW,
 }
+# Whole-message spellings only ("Naliy", live ...7601, 2026-11-04, was asked the question again).
+_CALLBACK_TYPOS = {"naliy": CALLBACK_TOMORROW, "nali": CALLBACK_TOMORROW, "naley": CALLBACK_TOMORROW,
+                   "nalee": CALLBACK_TOMORROW, "naaley": CALLBACK_TOMORROW, "naale ge": CALLBACK_TOMORROW,
+                   "nale ge": CALLBACK_TOMORROW, "ನಾಳೇ": CALLBACK_TOMORROW, "ನಾಳಿ": CALLBACK_TOMORROW,
+                   "ega call": CALLBACK_NOW, "egle": CALLBACK_NOW, "ivaga": CALLBACK_NOW, "ivag": CALLBACK_NOW,
+                   "sanjee": CALLBACK_EVENING, "sanjeya": CALLBACK_EVENING, "sanje ge": CALLBACK_EVENING}
 
 
 # QUESTIONS THE OWNER'S TERMS NOW ANSWER. "what about warranty?" used to get
@@ -3840,6 +3882,25 @@ _PERSON_ASK_RE = re.compile(
 _LATER_RE = re.compile(r"later|nantara|amele|aamele|ನಂತರ|ಆಮೇಲೆ|tomorrow|naale|nale|ನಾಳೆ|evening|sanje|ಸಂಜೆ")
 
 
+# "CALL ME" INSIDE A LONGER MESSAGE (live ...2521, 2026-11-04): "99727 15155 ಕರೆ ಮಾಡಿ ವಿಷಯ
+# ತಿಳಿಸಿ" (call this number and tell me) was asked "when shall we call?" again. The bare
+# words were read only as the whole message.
+_CALL_ME_RE = re.compile(r"(?:ಕರೆ|ಕಾಲ್|ಫೋನ್)\s*ಮಾಡಿ(?!ಲ್ಲ|ಲಿಲ್ಲ|ದ)|(?<![a-z])(?:call|cal|coll|phone|kal)\s*(?:madi|maadi|"
+                         r"madri|maadri|me|madu)(?![a-z])")
+# "DON'T CALL" (live ...8314, 2026-11-04): "ಕರೆ madabedi" was answered with the call-time
+# question again, and the owner had to write "sari kare madalla".
+_NO_CALL_RE = re.compile(
+    r"(?:ಕರೆ|ಕಾಲ್|ಫೋನ್|kare|call|cal|coll|phone|kal)\s*(?:ಮಾಡಬೇಡಿ|ಮಾಡ್ಬೇಡಿ|ಬೇಡ|ಮಾಡಬೇಡ|madabedi|madbedi|"
+    r"maadbedi|maadabedi|madbeda|madabeda|beda|bedi|bed)(?![a-z])"
+    r"|(?:don'?t|do not|dont|no)\s*(?:call|phone)|(?:only|just)\s*(?:whatsapp|message|msg)"
+    r"|whatsapp\s*(?:alli|alle|nalli|nalle|li)\s*(?:heli|tilisi|kalisi|maatadi)|ಮೆಸೇಜ್\s*ಮಾಡಿ\s*ಸಾಕು", re.I)
+
+
+def refuses_call(text: str) -> bool:
+    """They asked NOT to be called: answered on WhatsApp, never asked for a call time again."""
+    return bool(_NO_CALL_RE.search((text or "").lower()))
+
+
 def callback_request(text: str, awaiting=()):
     """now / evening / tomorrow when the customer asked for a call, else None.
 
@@ -3855,9 +3916,15 @@ def callback_request(text: str, awaiting=()):
         return CALLBACK_NOW
     if len(bare.split()) <= 8 and _PERSON_ASK_RE.search(bare) and not _LATER_RE.search(bare):
         return CALLBACK_NOW
+    if (not refuses_call(text) and not call_missed(text) and not _LATER_RE.search(bare)
+            and _CALL_ME_RE.search(_PHONE_IN_TEXT_RE.sub(" ", bare))
+            and len(bare.split()) <= 10):
+        return CALLBACK_NOW
     if AWAITING_CALLBACK in (awaiting or ()):
         if bare in _CALLBACK_CHOICE:
             return _CALLBACK_CHOICE[bare]
+        if bare in _CALLBACK_TYPOS:
+            return _CALLBACK_TYPOS[bare]
         for word, slot in _CALLBACK_CHOICE.items():
             if not word.isdigit() and word in bare:
                 return slot
@@ -3951,7 +4018,9 @@ def _compose_opening_reply(parsed: dict) -> str:
 # answer "ನನ್ನ ಹೆಸರು ಗೊತ್ತಾ?" with something it already knew.
 _PERSISTENT_FIELDS = ("capacity_kva", "quantity", "application", "location",
                       "delivery_location", "delivery_same",
-                      "delivery_mentioned", "name", "callback", "urgency", "call_time")
+                      "delivery_mentioned", "name", "callback", "urgency", "call_time",
+                      # "ಕರೆ ಬೇಡ" once is for the whole chat: never offered a call time again.
+                      "no_call")
 
 
 def merged_state(known: dict, turn: dict = None) -> dict:
@@ -4486,6 +4555,12 @@ def _compose_followup_reply(followup: dict, known: dict = None,
         _who = display_name(_state_now.get("name"))
         return (("ಸರಿ " + _who + " ಅವರೇ 🙏" if _who else "ಸರಿ 🙏")
                 + " ಮುಂದೆ ಏನಾದ್ರೂ ಬೇಕಿದ್ರೆ ಇದೇ ನಂಬರ್‌ಗೆ message ಮಾಡಿ.")
+    if followup.get("no_call"):
+        # The answer the owner gave ...8314 himself ("sari kare madalla"), and the door left open
+        # where they chose to talk. The owner alert says not to call.
+        _who = display_name(_state_now.get("name"))
+        return ((f"ಸರಿ {_who} ಅವರೇ 🙏" if _who else "ಸರಿ 🙏") + " ನಾವು call ಮಾಡಲ್ಲ.\n"
+                "ಏನು ಬೇಕಾದ್ರೂ ಇಲ್ಲೇ WhatsApp ನಲ್ಲಿ ಕೇಳಿ — ದರ, warranty, transport ಎಲ್ಲಾ ಇಲ್ಲೇ ಹೇಳ್ತೀವಿ.")
     if followup.get("is_greeting") and not got:
         # "Hii namaste" is a hello, not an answer. It was met with the
         # call-back close on 2026-09-25; it gets a hello and the one open
@@ -4805,6 +4880,8 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
            and not followup.get("call_missed") else "")
         + ("❌ *NOT INTERESTED* — customer declined; a call may still save it\n"
            if followup.get("declined") else "")
+        + ("📵 *DO NOT CALL* — customer asked not to be called; reply on WhatsApp\n"
+           if followup.get("no_call") else "")
         + ("💰🔥 *PRICE NEGOTIATION* — customer asked for a lower price"
            + (f" (offered ₹{inr(followup['offer'])})" if followup.get("offer") else "")
            + ". Bot promised a call from sales; no discount was offered.\n"
@@ -4968,7 +5045,8 @@ def call_settled(followup: dict, known: dict = None) -> bool:
     instead of the menu ("4 gantege call madi") answers the menu too — it was
     confirmed and then the 1/2/3 question asked again (stress test 2026-11-01)."""
     state = merged_state(known, followup)
-    return bool(followup.get("callback") or state.get("callback") or state.get("call_time"))
+    return bool(followup.get("callback") or state.get("callback") or state.get("call_time")
+                or state.get("no_call"))
 
 
 def offers_call_time(followup: dict, known: dict = None) -> bool:
@@ -4986,6 +5064,8 @@ def awaiting_after(followup: dict, known: dict = None) -> tuple:
     if followup.get("declined"):
         return ()
     if followup.get("wants_number"):     # they will call; nothing is asked
+        return ()
+    if followup.get("no_call"):          # asked not to be called; nothing is asked
         return ()
     if followup.get("digit_unclear"):    # asked "units, or a new call time?"
         return (AWAITING_CALLBACK, AWAITING_QUANTITY)
