@@ -32,11 +32,11 @@ class KnowledgeBlock(unittest.TestCase):
 
 class FetchKnowledge(unittest.TestCase):
     def setUp(self):
-        w._knowledge_cache.update(at=0.0, rows=[])
+        w._knowledge_cache.clear()
         p = mock.patch.multiple(w, CRM_SUPABASE_URL="https://crm.example", CRM_SUPABASE_SERVICE_KEY="k")
         p.start()
         self.addCleanup(p.stop)
-        self.addCleanup(lambda: w._knowledge_cache.update(at=0.0, rows=[]))
+        self.addCleanup(lambda: w._knowledge_cache.clear())
 
     def resp(self, rows, ok=True):
         r = mock.Mock(ok=ok)
@@ -54,7 +54,7 @@ class FetchKnowledge(unittest.TestCase):
         self.assertTrue(get.call_args[0][0].endswith("/rest/v1/bot_knowledge"))
 
     def test_a_failed_read_keeps_the_last_good_rows(self):
-        w._knowledge_cache.update(at=1.0, rows=ROWS)              # stale, so it re-reads
+        w._knowledge_cache["asthra"] = {"at": 1.0, "rows": ROWS}  # stale, so it re-reads
         with mock.patch.object(w.requests, "get", side_effect=OSError("down")), \
              mock.patch.object(w, "ai_seconds_left", return_value=60), \
              mock.patch.object(w.time, "monotonic", return_value=10_000.0):

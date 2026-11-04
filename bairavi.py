@@ -1769,27 +1769,51 @@ _SELF_INTRO_RE = re.compile(
     r"ತಯಾರಕರು|ತಯಾರಿಸುತ್ತೇವೆ|ತಯಾರಿಕಾ ಘಟಕ|\bmanufactur", re.I)
 
 
-def reply_violates_evidence(text: str, customer_text: str = None):
+_AMOUNT_RE = re.compile(r"(?:₹|\brs\.?|\binr\b)\s*[\d,]*\d(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s*(?:rs\b|inr\b|rupees?|"
+                        r"lakhs?|crores?|ರೂ|ಲಕ್ಷ|ಕೋಟಿ)|₹", re.I)
+
+
+def _owner_said(fragment: str, owner_facts: str) -> bool:
+    """Is this price / time / term in what the owner wrote on the Bot Knowledge page? Figures are
+    compared as digits (₹3,20,000 = 320000), words case-insensitively."""
+    if not owner_facts or not fragment:
+        return False
+    digits = re.findall(r"\d+", fragment.replace(",", ""))
+    if digits:
+        have = set(re.findall(r"\d+", owner_facts.replace(",", "")))
+        return all(d in have for d in digits)
+    return fragment.lower().strip() in owner_facts.lower()
+
+
+def reply_violates_evidence(text: str, customer_text: str = None, owner_facts: str = ""):
     """Why this generated reply may not be sent, or None if it may.
 
     Returns a short reason, so a refusal can be logged and counted rather
     than silently swallowed.
+
+    `owner_facts` is the owner's Bairavi Bot Knowledge text (2026-11-05): a price, a delivery
+    time or a term the owner wrote there is evidence, so the model may repeat it. Anything not
+    written there is still refused exactly as before.
     """
     raw = text or ""
     low = raw.lower()
     if not raw.strip():
         return "empty"
     if _REPLY_MONEY_RE.search(raw):
-        return "a price"
+        # Each amount in full ("₹3,20,000", "2.5 lakh"); one the owner did not write is refused.
+        amounts = _AMOUNT_RE.findall(raw)
+        if not amounts or not all(re.search(r"\d", a) and _owner_said(a, owner_facts) for a in amounts):
+            return "a price"
     if _PRICE_REFUSAL_RE.search(raw):
         return "refuses to share a price"
-    if _REPLY_LEADTIME_RE.search(raw):
+    if _REPLY_LEADTIME_RE.search(raw) and not all(
+            _owner_said(x.group(0), owner_facts) for x in _REPLY_LEADTIME_RE.finditer(raw)):
         return "a delivery time"
     for term, reason in _REPLY_BANNED_TERMS:
         if term.isascii():
-            if _label_matches(low, term):
+            if _label_matches(low, term) and not _owner_said(term, owner_facts):
                 return reason
-        elif term in low:
+        elif term in low and not _owner_said(term, owner_facts):
             return reason
     # NOT OUR VOICE (owner, 2026-09-25: "answer is some not good"). The model
     # replied in Kannada written in English letters and used the informal
@@ -1833,7 +1857,8 @@ def reply_violates_evidence(text: str, customer_text: str = None):
             return "re-introduces the company"
     # A capacity we do not offer, stated as if we do.
     for figure in re.findall(r"(\d{2,4})\s*k\s*v\s*a", low):
-        if int(figure) not in CATALOGUE_KVA and int(figure) not in PLANNED_KVA:
+        if (int(figure) not in CATALOGUE_KVA + PLANNED_KVA + HT_SANCTION_KVA
+                and not _owner_said(f"{figure} kva", owner_facts)):
             return "a rating we do not offer"
     return None
 
@@ -1900,7 +1925,13 @@ def english_prose(text: str) -> bool:
     return small >= 3 and kannada_share(text) < 0.5
 
 
-def model_brief_kn(known: dict = None, english: bool = False) -> str:
+def owner_knowledge_text(rows) -> str:
+    """The owner's Bairavi Bot Knowledge rows (CRM, owner 2026-11-05 "2 maadu") as one block."""
+    rows = [r for r in rows or () if (r.get("topic") or "").strip() and (r.get("body") or "").strip()]
+    return "\n".join(f"• {r['topic'].strip()}: {' '.join(r['body'].split())}" for r in rows)[:3000]
+
+
+def model_brief_kn(known: dict = None, english: bool = False, knowledge=()) -> str:
     """The system prompt for a Bairavi reply, built from the same tables the
     deterministic answers use, so the two cannot disagree.
 
@@ -1966,8 +1997,18 @@ def model_brief_kn(known: dict = None, english: bool = False) -> str:
         "10. ಕೆಳಗೆ ಈಗಾಗಲೇ ತಿಳಿದಿರುವ ವಿವರ ಇದೆ — ಅದನ್ನು ಮತ್ತೆ ಕೇಳಬೇಡಿ.\n"
         "11. ಯಾವ kVA ಯಾವ load ಗೆ ಸೂಕ್ತ/ಸಾಕು ಎಂದು ಹೇಳಬೇಡಿ — ಅದು engineer "
         "ನಿರ್ಧಾರ."
+        + _owner_knowledge_kn(knowledge)
         + _known_lines_kn(known)
     )
+
+
+def _owner_knowledge_kn(knowledge) -> str:
+    text = owner_knowledge_text(knowledge)
+    if not text:
+        return ""
+    return ("\n\nಮಾಲೀಕರ ಹೊಸ ಮಾಹಿತಿ (CRM Bot Knowledge — ಇದೇ ಅಂತಿಮ). ಇಲ್ಲಿ ಬರೆದ ಅಂಕಿ, ಸಮಯ, "
+            "ದಾಖಲೆ ಅಥವಾ ಬೆಲೆಯನ್ನು ಇಲ್ಲಿರುವಂತೆಯೇ ಹೇಳಬಹುದು — ನಿಯಮ 1–5 ಇದಕ್ಕೆ ಅನ್ವಯಿಸುವುದಿಲ್ಲ. "
+            "ಇಲ್ಲಿ ಇಲ್ಲದ್ದನ್ನು ಸೇರಿಸಬೇಡಿ:\n" + text)
 
 
 def _known_lines_kn(known: dict = None) -> str:
@@ -1988,7 +2029,7 @@ def _known_lines_kn(known: dict = None) -> str:
 
 
 def compose_model_reply(ai_text: str, followup: dict, known: dict = None,
-                        customer_text: str = None, english: bool = False):
+                        customer_text: str = None, english: bool = False, owner_facts: str = ""):
     """(reply, refusal_reason) for a generated answer.
 
     The guard runs FIRST, so a reply that states a price or a certification
@@ -2001,7 +2042,7 @@ def compose_model_reply(ai_text: str, followup: dict, known: dict = None,
     conversation does not stall just because the customer changed the
     subject for one turn.
     """
-    reason = reply_violates_evidence(ai_text, customer_text)
+    reason = reply_violates_evidence(ai_text, customer_text, owner_facts)
     if reason:
         return None, reason
     # A Kannada conversation gets a Kannada answer. An English one from the

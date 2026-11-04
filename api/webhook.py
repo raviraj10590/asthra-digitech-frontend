@@ -1986,8 +1986,12 @@ def bairavi_model_reply(phone: str, user_text: str, history: list,
              if bairavi.FLOW_MARKER not in (m.get("content") or "")]
     english = bairavi.customer_writes_english(
         [m.get("content") for m in _seen if m.get("role") == "user"] + [user_text])
+    # The owner's Bairavi Bot Knowledge (CRM, 2026-11-05): told to the model AND accepted by the
+    # guard, so a fact the owner wrote there can be said; nothing else changes.
+    knowledge = fetch_knowledge("bairavi")
+    owner_facts = bairavi.owner_knowledge_text(knowledge)
     messages = ([{"role": "system",
-                  "content": bairavi.model_brief_kn(known, english=english)}]
+                  "content": bairavi.model_brief_kn(known, english=english, knowledge=knowledge)}]
                 + _as_ai_messages(_seen[-8:])
                 + [{"role": "user", "content": user_text}])
     raw = _generate_ai_reply(messages, "",
@@ -2002,7 +2006,7 @@ def bairavi_model_reply(phone: str, user_text: str, history: list,
               f"phone=...{str(phone)[-4:]}")
         return ""
     reply, reason = bairavi.compose_model_reply(raw, followup, known, customer_text=user_text,
-                                                english=english)
+                                                english=english, owner_facts=owner_facts)
     if reply is None:
         # Counted and named, never silently swallowed. The phone is reduced
         # to its last four digits and the refused text is NOT printed.
@@ -2341,17 +2345,37 @@ def fetch_customer_said(phone: str, current: str = "") -> tuple:
 
 
 KNOWLEDGE_TTL_SECONDS = 300
-_knowledge_cache = {"at": 0.0, "rows": []}
+_knowledge_cache = {}          # business -> {"at": monotonic, "rows": [...]}
 
 
-def fetch_knowledge() -> list:
-    """The owner's active Bot Knowledge rows from the CRM, cached for
-    KNOWLEDGE_TTL_SECONDS so an edit reaches replies within five minutes
+def fetch_knowledge(business: str = "asthra") -> list:
+    """The owner's active Bot Knowledge rows for one business ("asthra" / "bairavi") from the
+    CRM, cached for KNOWLEDGE_TTL_SECONDS so an edit reaches replies within five minutes
     without a read per message. A failed read keeps the last good rows (or
     none), and the prompt's own text still holds every rule."""
     now = time.monotonic()
-    if now - _knowledge_cache["at"] < KNOWLEDGE_TTL_SECONDS and _knowledge_cache["at"]:
-        return _knowledge_cache["rows"]
+    cache = _knowledge_cache.setdefault(business, {"at": 0.0, "rows": []})
+    if now - cache["at"] < KNOWLEDGE_TTL_SECONDS and cache["at"]:
+        return cache["rows"]
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY):
+        return []
+    if ai_seconds_left() < CUSTOMER_SAID_TIMEOUT_SECONDS + POST_AI_RESERVE_SECONDS:
+        return cache["rows"]
+    try:
+        r = requests.get(
+            f"{CRM_SUPABASE_URL}/rest/v1/bot_knowledge",
+            headers=_crm_headers(),
+            params={"select": "topic,body", "business": f"eq.{business}", "active": "is.true",
+                    "order": "sort.asc,id.asc", "limit": "50"},
+            timeout=_bounded(CUSTOMER_SAID_TIMEOUT_SECONDS))
+        rows = r.json() if r.ok else None
+    except Exception as e:
+        print(f"KNOWLEDGE_READ_FAILED type={type(e).__name__}")
+        rows = None
+    cache["at"] = now
+    if isinstance(rows, list):
+        cache["rows"] = rows
+    return cache["rows"]
     if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY):
         return []
     if ai_seconds_left() < CUSTOMER_SAID_TIMEOUT_SECONDS + POST_AI_RESERVE_SECONDS:
