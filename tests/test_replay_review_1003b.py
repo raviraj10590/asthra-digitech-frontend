@@ -61,7 +61,7 @@ class WhenWillYouCall(unittest.TestCase):
                 f, reply = turn(t, CHOSEN)
                 self.assertEqual(f["customer_question"], b.QUESTION_DELIVERY_TIME)
                 self.assertFalse(f["asks_call"])
-                self.assertIn("ಡೆಲಿವರಿ ಸಮಯ", reply)
+                self.assertIn(b._DELIVERY_TIME_KN, reply)   # owner-stated answer since 2026-11-04
 
     def test_a_place_is_not_a_question(self):
         self.assertFalse(b.asks_call_time("Kadaba"))

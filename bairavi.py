@@ -108,6 +108,14 @@ CATALOGUE_KVA = (25, 63, 100, 250)
 # facts and now have different statuses.
 PLANNED_KVA = (500,)
 
+# ON AN HT LOAD SANCTION (owner, 2026-11-04: "Ht load sanction aadre 160 KVa saha supply
+# madbahudu"). Supplied, but only to a customer with an HT sanction, and the owner has stated
+# no price — so it stays VERIFY (a person quotes it) and is never in PRICE_LIST. Said only when
+# the customer names 160 ("kelidre matra 160 kva helbeku"), never in the range list.
+HT_SANCTION_KVA = (160,)
+HT_SANCTION_KN = ("*160 kVA* ಕೂಡ ಕೊಡ್ತೀವಿ — ನಿಮ್ಮಲ್ಲಿ *HT load sanction* ಇದ್ದರೆ. "
+                  "ಅದರ ದರ ನಮ್ಮ engineer ತಿಳಿಸ್ತಾರೆ.")
+
 FAMILY = "OIL_IMMERSED"
 
 # Requirement type · AC-02. The first fork, and it is answered by the enquiry
@@ -1351,6 +1359,16 @@ QUESTION_DRY_TYPE = "dry_type"
 # 2026-11-04 debate: "25 kVA ಅಂದ್ರೆ ಏನು? … ಸರ್ಕಾರದ ಸಬ್ಸಿಡಿ, ಲೋನ್" got "ಇದನ್ನ ನಮ್ಮ engineer ಹತ್ರ ಕೇಳಿ".
 # kVA is explained in plain words; on subsidy and loans the owner has stated nothing, so the
 # answer says so and where to ask — never a scheme or a rate.
+# Owner, 2026-11-04: "winding alluminiumn".
+QUESTION_WINDING = "winding"
+_WINDING_WORDS = ("winding", "ವೈಂಡಿಂಗ್", "ವಿಂಡಿಂಗ್", "copper", "ಕಾಪರ್", "ತಾಮ್ರ", "aluminium",
+                  "aluminum", "alluminium", "ಅಲ್ಯೂಮಿನಿಯಂ", "ಅಲ್ಯುಮಿನಿಯಂ")
+_WINDING_KN = "ನಮ್ಮ ಎಲ್ಲಾ transformer ಗಳಲ್ಲಿ *aluminium winding* (best-grade) ಇದೆ."
+# Owner, 2026-11-04: "test certificate sigutte".
+QUESTION_TEST_CERT = "test_certificate"
+_TEST_CERT_WORDS = ("test certificate", "test cert", "test report", "ಟೆಸ್ಟ್ ಸರ್ಟಿಫಿಕೇಟ್", "ಟೆಸ್ಟ್ ಸರ್ಕಿಟ್",
+                    "ಟೆಸ್ಟ್ ರಿಪೋರ್ಟ್", "ಪರೀಕ್ಷಾ ಪ್ರಮಾಣಪತ್ರ", "ಟೆಸ್ಟ್ ಪ್ರಮಾಣಪತ್ರ")
+_TEST_CERT_KN = "ಹೌದು, transformer ಜೊತೆ *test certificate* ಕೊಡ್ತೀವಿ."
 QUESTION_KVA = "kva_meaning"
 QUESTION_SUBSIDY = "subsidy_loan"
 QUESTION_KVA_SUBSIDY = "kva_and_subsidy"
@@ -1392,11 +1410,10 @@ _DELIVER_WORDS = ("deliver", "ಡೆಲಿವರಿ", "kodtira", "kodthira", "ko
                   # kalstira" ...2053 — both went to the model).
                   "barate", "baratte", "barutte", "barute", "ಬರುತ್ತೆ", "ಬರುತ್ತದೆ",
                   "kalstira", "kalsthira", "kalistira", "kalustira", "ಕಳಿಸ್ತೀರಾ")
-_DELIVERY_TIME_KN = ("ಡೆಲಿವರಿ ಸಮಯವನ್ನು ನಿಮ್ಮ order ವಿವರ ನೋಡಿ ನಮ್ಮ ತಂಡ ಕರೆಯಲ್ಲಿ "
-                     "ಖಚಿತಪಡಿಸುತ್ತಾರೆ.")
-# The same, for someone who asked not to be called (2026-11-04 debate).
-_DELIVERY_TIME_NO_CALL_KN = ("ಡೆಲಿವರಿ ಸಮಯವನ್ನು ನಿಮ್ಮ order ವಿವರ ನೋಡಿ ನಮ್ಮ ತಂಡ ಇಲ್ಲೇ WhatsApp ನಲ್ಲಿ "
-                             "ಖಚಿತಪಡಿಸುತ್ತಾರೆ.")
+# OWNER, 2026-11-04: "advance maadida 1 month olgade delivery sigutte". Said when they ask how
+# long delivery takes; the details card still carries no delivery line (same day's ruling:
+# delivery is talked about once the deal is OK, not volunteered).
+_DELIVERY_TIME_KN = "Advance ಕೊಟ್ಟ *1 ತಿಂಗಳೊಳಗೆ* ಡೆಲಿವರಿ ಆಗುತ್ತೆ."
 
 # DELIVERY REACH — owner-stated, 2026-09-20, in the owner's own words:
 # "sadyakke delivery irodu mescom limit in 2 month etaire karnataka delivery
@@ -1438,7 +1455,8 @@ _ASK_WHO = ("who are you", "who is this", "your company", "about your company",
 _ASK_WHERE_BARE = ("location", "loction", "locatin", "lokation", "address", "adress", "addres",
                    "ಲೊಕೇಶನ್", "ಲೋಕೇಶನ್", "ವಿಳಾಸ", "ಅಡ್ರೆಸ್")
 _ASK_WHERE_FILLER = ("sir", "please", "pls", "plz", "ಸರ್", "heli", "tilisi", "ಹೇಳಿ", "ತಿಳಿಸಿ")
-_ASK_RANGE = ("what do you make", "what do you manufacture", "which models",
+_ASK_RANGE = ("ಯಾವ ಯಾವ kva", "yava yava kva", "yava kva", "which kva", "ಯಾವ kva ಮಾಡ್ತೀರ",
+              "what do you make", "what do you manufacture", "which models",
               "what models", "your range", "available sizes", "which kva",
               "what kva", "which capacity", "your products",
               "ಯಾವ ಮಾಡೆಲ್", "ನಿಮ್ಮ range", "ಎಷ್ಟು kva ಇದೆ", "ಉತ್ಪನ್ನ",
@@ -1470,6 +1488,10 @@ def customer_question(text: str):
     if (any(w in low for w in _WHEN_WORDS + _WHEN_WORDS_DELIVERY)
             and any(w in low for w in _DELIVER_WORDS)):
         return QUESTION_DELIVERY_TIME
+    if _mentions(low, _WINDING_WORDS):
+        return QUESTION_WINDING
+    if _mentions(low, _TEST_CERT_WORDS):
+        return QUESTION_TEST_CERT
     _kva_q, _subsidy_q = bool(_KVA_MEANING_RE.search(low)), _mentions(low, _SUBSIDY_WORDS)
     if _kva_q or _subsidy_q:
         return (QUESTION_KVA_SUBSIDY if _kva_q and _subsidy_q
@@ -1507,6 +1529,7 @@ def _range_line_kn() -> str:
     if PLANNED_KVA:
         planned = " / ".join(f"{k} kVA" for k in PLANNED_KVA)
         line += f" ({planned} ಯೋಜನೆಯಲ್ಲಿದೆ.)"
+    # 160 kVA is NOT listed here: the owner, 2026-11-04, "kelidre matra 160 kva helbeku".
     return line
 
 
@@ -1530,6 +1553,10 @@ def answer_question_kn(tag, known: dict = None) -> str:
                 "dry-type ಸದ್ಯ ಲಭ್ಯವಿಲ್ಲ.\n" + _range_line_kn())
     if tag == QUESTION_DELIVERY_TIME:
         return _DELIVERY_TIME_KN
+    if tag == QUESTION_WINDING:
+        return _WINDING_KN
+    if tag == QUESTION_TEST_CERT:
+        return _TEST_CERT_KN
     if tag in (QUESTION_KVA, QUESTION_SUBSIDY, QUESTION_KVA_SUBSIDY):
         return "\n".join(t for k, t in ((QUESTION_KVA, _KVA_KN), (QUESTION_SUBSIDY, _SUBSIDY_KN))
                          if tag in (k, QUESTION_KVA_SUBSIDY))
@@ -1641,7 +1668,8 @@ def should_ask_model(followup: dict, known: dict = None) -> bool:
     if followup.get("customer_question") == QUESTION_DRY_TYPE:
         return False
     # kVA in plain words, and "we do not know the subsidy" (2026-11-04): a model could name a scheme.
-    if followup.get("customer_question") in (QUESTION_KVA, QUESTION_SUBSIDY, QUESTION_KVA_SUBSIDY):
+    if followup.get("customer_question") in (QUESTION_KVA, QUESTION_SUBSIDY, QUESTION_KVA_SUBSIDY,
+                                             QUESTION_WINDING, QUESTION_TEST_CERT):
         return False
     # THE OTHER QUESTIONS GO TO THE MODEL FIRST, and their evidenced answers
     # become the fallback rather than the first responder. A keyword match is
@@ -2898,6 +2926,17 @@ def parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
     # priced only that. Two or more of our sizes in a price question: each is priced, and the
     # size on record stays until they choose.
     _sizes = tuple(sorted({int(n) for n in _KVA_RE.findall(text or "")} & set(PRICE_LIST)))
+    # SEVERAL QUESTIONS IN ONE MESSAGE (2026-11-04 debate: "ಡೆಲಿವರಿ ಎಷ್ಟು ದಿನ? winding? test
+    # certificate?"): customer_question names one; the other owner-stated facts asked are answered too.
+    _low = (text or "").lower()
+    _facts = []
+    if (any(w in _low for w in _WHEN_WORDS + _WHEN_WORDS_DELIVERY) and any(w in _low for w in _DELIVER_WORDS)):
+        _facts.append(QUESTION_DELIVERY_TIME)
+    if _mentions(_low, _WINDING_WORDS):
+        _facts.append(QUESTION_WINDING)
+    if _mentions(_low, _TEST_CERT_WORDS):
+        _facts.append(QUESTION_TEST_CERT)
+    out["facts_asked"] = tuple(t for t in _facts if t != out.get("customer_question"))
     out["compare_kva"] = None
     if len(_sizes) >= 2 and (out.get("asked_price") or _mentions((text or "").lower(), _COMPARE_WORDS)):
         out["compare_kva"], out["capacity_kva"], out["asked_price"] = _sizes, None, True
@@ -3234,7 +3273,8 @@ _SALES_TERMS = (
     "🔩 ದರ TC (transformer) ಮಾತ್ರ — ಕಂಬ, DP structure, installation ಪ್ರತ್ಯೇಕ "
     "(site estimate ನಂತರ)\n"
     "🛡️ *1 ವರ್ಷ warranty* — ನಂತರವೂ service ಲಭ್ಯ\n"
-    "💳 *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ\n"
+    # Owner, 2026-11-04: "50 percent advance must, remaining delivery timli clear madbekagutte".
+    "💳 *50% advance* ಕಡ್ಡಾಯ, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ ಪಾವತಿಸಬೇಕು\n"
     # NOT "direct from the manufacturer, no middleman" (owner, 2026-10-05):
     # Bairavi also sells through distributors and electrical contractors.
     "🏭 ತಯಾರಿಕೆ: Kadaba, ದಕ್ಷಿಣ ಕನ್ನಡ\n"
@@ -3427,7 +3467,7 @@ TERM_LINES = {
                   "contractor ಮೂಲಕ ಆಗುತ್ತದೆ, ಅದು ಹೆಚ್ಚುವರಿ ವೆಚ್ಚ (installation ಪ್ರತ್ಯೇಕ). "
                   "Installation charges ಬಗ್ಗೆ ನಮ್ಮ engineer ಜೊತೆ ಮಾತನಾಡಿ."),
     "warranty": "ನಮ್ಮ transformer ಗಳಿಗೆ *1 ವರ್ಷ warranty* ಇದೆ; ಅದರ ನಂತರವೂ service ಲಭ್ಯವಿದೆ.",
-    "payment": "Payment: *50% advance*, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ.",
+    "payment": "Payment: *50% advance* ಕಡ್ಡಾಯ, ಉಳಿದ 50% ಡೆಲಿವರಿ ಸಮಯದಲ್ಲಿ ಪಾವತಿಸಬೇಕು.",
 }
 CLOSING_VALUE = "ನಮ್ಮ engineer ನಿಮ್ಮ ಜೊತೆ ಮಾತಾಡಿ ಪೂರ್ತಿ ವಿವರ ಹೇಳ್ತಾರೆ."
 # Quantity, asked ONCE (owner, 2026-09-17: "just ask them, if they don't
@@ -3768,6 +3808,8 @@ _TERM_TOPIC = {
     "payment": "payment", "advance": "payment", "ಅಡ್ವಾನ್ಸ್": "payment", "ಪೇಮೆಂಟ್": "payment",
     # "50% ಮುಂಚಿತ ಪಾವತಿ ಮಾಡಬೇಕೆ?" (2026-11-04 debate)
     "ಮುಂಚಿತ": "payment", "ಪಾವತಿ": "payment",
+    # credit terms: the owner's answer is the 50/50 rule (2026-11-04)
+    "credit": "payment", "ಕ್ರೆಡಿಟ್": "payment",
     "emi": "payment", "loan": "payment",
     # 2026-11-03 modern-chat test: "UPI code haaki", "GPay number kodi" got only the place question again
     "upi": "payment", "gpay": "payment", "phonepe": "payment", "paytm": "payment", "cash": "payment",
@@ -4580,12 +4622,19 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     # price or approval question, because those have their own answers above
     # and a customer asking one thing should not be answered twice.
     _question = followup.get("customer_question")
-    if _question == QUESTION_UNANSWERED:
+    _ht = followup.get("capacity_kva") in HT_SANCTION_KVA
+    if _ht:
+        lines.append(HT_SANCTION_KN)
+    if _question == QUESTION_UNANSWERED and _ht:
+        pass                                   # "160 sigutta?" — the line above is the answer
+    elif _question == QUESTION_UNANSWERED:
         # The information card below IS the answer to "you told us nothing?".
         if unanswered_question(followup) and not followup.get("asks_info"):
             lines.append("\n" + answer_question_kn(_question, known))
     elif _question is not None:
         lines.append("\n" + answer_question_kn(_question, known))
+    for _fact in followup.get("facts_asked") or ():
+        lines.append(answer_question_kn(_fact, known))
 
     _intent = followup.get("commercial_intent")
     if followup.get("asked_terms"):
@@ -4728,8 +4777,6 @@ def _compose_followup_reply(followup: dict, known: dict = None,
                      + ("" if _qty_known else "\n" + QUANTITY_NOTE)
                      + "\n\n" + CALLBACK_QUESTION)
     full = "\n".join(lines).strip()
-    if _no_call:
-        full = full.replace(_DELIVERY_TIME_KN, _DELIVERY_TIME_NO_CALL_KN)
 
     # THE SAME REPLY TWICE IN A ROW. Checked here, at the single place the
     # reply is built, so no caller can send a repeat by forgetting to ask.

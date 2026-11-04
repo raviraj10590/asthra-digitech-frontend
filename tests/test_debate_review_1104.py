@@ -192,8 +192,7 @@ class SecondRun(unittest.TestCase):
     def test_delivery_time_without_a_call(self):
         K = {"capacity_kva": 25, "name": "Shobha", "location": "Tumakuru", "no_call": True}
         r = turn("ಡೆಲಿವರಿ ಎಷ್ಟು ದಿನ? ಕರೆ ಬೇಡ", K, ())[1]
-        self.assertNotIn("ಕರೆಯಲ್ಲಿ", r)
-        self.assertIn("WhatsApp", r)
+        self.assertIn("1 ತಿಂಗಳೊಳಗೆ", r)
 
     def test_no_call_with_a_question_still_awaits_the_next_answer(self):
         K = {"capacity_kva": 25, "name": "Shobha", "location": "Tumakuru"}
@@ -207,6 +206,52 @@ class SecondRun(unittest.TestCase):
         self.assertIsNone(f["application"])
         self.assertTrue(f["asks_info"])
         self.assertIn("Kadaba", r)
+
+
+class OwnerAnswers1104(unittest.TestCase):
+    """Owner, 2026-11-04: "winding alluminiumn. Ht load sanction aadre 160 KVa saha supply madbahudu"."""
+    K = {"capacity_kva": 100, "name": "Kiran", "location": "Hubballi", "delivery_same": True}
+
+    def test_winding(self):
+        f, r = turn("winding copper aa aluminium aa?", self.K, ())
+        self.assertEqual(f["customer_question"], b.QUESTION_WINDING)
+        self.assertIn("aluminium winding", r)
+        self.assertFalse(b.should_ask_model(f, self.K))
+
+    def test_160_on_an_ht_sanction_without_a_price(self):
+        f, r = turn("160 kva sigutta?", self.K, ())
+        self.assertIn("HT load sanction", r)
+        self.assertNotIn("ಇದನ್ನ ನಮ್ಮ engineer ಹತ್ರ ಕೇಳಿ", r)
+        self.assertNotIn(160, b.PRICE_LIST)
+        self.assertEqual(b.sku_status(160), b.VERIFY)
+        r2 = turn("160 kva rate eshtu", self.K, ())[1]
+        self.assertIn("ಅದರ ದರ ನಮ್ಮ engineer ತಿಳಿಸ್ತಾರೆ", r2)
+
+    def test_160_only_when_asked(self):
+        self.assertNotIn("160", b._range_line_kn())
+        self.assertNotIn("160", b.info_card_kn({"capacity_kva": 100}))
+        self.assertEqual(b.customer_question("ಯಾವ ಯಾವ kVA ಮಾಡ್ತೀರಾ?"), b.QUESTION_RANGE)
+
+
+class OwnerAnswers1104b(unittest.TestCase):
+    """Owner, 2026-11-04: test certificate yes; 50% advance must, rest at delivery; delivery
+    within one month of the advance."""
+    K = {"capacity_kva": 100, "name": "Kiran", "location": "Hubballi", "delivery_same": True}
+
+    def test_the_factory_buyers_four_questions(self):
+        f, r = turn("ಡೆಲಿವರಿ ಎಷ್ಟು ದಿನಗಳು? ವಿಂಡಿಂಗ್ ಕಾಪರ್ ಇದೆಯಾ ಅಥವಾ ಅಲ್ಯೂಮಿನಿಯಂ? ಟೆಸ್ಟ್ ಸರ್ಟಿಫಿಕೇಟ್ ಬೇಕು. "
+                    "ಕ್ರೆಡಿಟ್ ಟರ್ಮ್ಸ್ 30 ದಿನಗಳಾ?", self.K, ())
+        self.assertIn("1 ತಿಂಗಳೊಳಗೆ", r)
+        self.assertIn("aluminium winding", r)
+        self.assertIn("test certificate", r)
+        self.assertIn("50% advance", r)
+        self.assertIsNone(f["quantity"])
+
+    def test_payment_is_firm(self):
+        self.assertIn("ಕಡ್ಡಾಯ", b.TERM_LINES["payment"])
+
+    def test_the_card_still_has_no_delivery_line(self):
+        self.assertNotIn("ತಿಂಗಳೊಳಗೆ", b.info_card_kn({"capacity_kva": 25}))
 
 
 if __name__ == "__main__":
