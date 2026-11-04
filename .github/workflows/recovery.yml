@@ -7,9 +7,11 @@ name: Brain recovery sweep
 # Authentication: Authorization: Bearer <CRON_SECRET>, the same value stored
 # in Vercel's production environment. Never echoed; GitHub also masks it.
 
+# SCHEDULE MOVED TO THE DATABASE, 2026-11-04: GitHub's */5 really ran every 3-9 h, so
+# pg_cron job 'brain-recovery' (supabase/migrations/20261104000001_recovery_pg_cron.sql)
+# now calls the endpoint every 5 min. Kept for a manual run only; the GitHub secret is the
+# old CRON_SECRET and must be updated before a manual run works.
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 # One sweep at a time. Correctness does not depend on this — every event is
