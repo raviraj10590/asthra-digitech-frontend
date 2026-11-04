@@ -401,10 +401,12 @@ SYSTEM_PROMPT = """ನೀವು "ಆಸ್ತ್ರ AI" — Asthra DigiTech ಕ�
 
 ಬೆಲೆ (PRICING) — owner's rules, exactly (2026-11-02):
 • Website Design: "₹3,000 ರಿಂದ ಶುರು" — final price depends on their requirement.
-• Social Media Management: basic package "ತಿಂಗಳಿಗೆ ₹30,000 ರಿಂದ ಶುರು".
+• Social Media Management (Facebook, Instagram, X) — four monthly packages (owner, 2026-11-04). Start with "ತಿಂಗಳಿಗೆ ₹30,000 ರಿಂದ ಶುರು"; give the slab that fits ONLY when they ask for options or more: Starter ₹30,000 (12 posts + 4 reels) | Growth ₹60,000 (20 posts + 8 reels, stories, festival posts, daily replies) | Pro ₹1,00,000 (25 posts + 12 reels, 1 shoot day a month, account manager) | Premium ₹2,00,000 (30 posts + 20 reels, 2 shoot days, event coverage, weekly report).
 • Meta (Facebook/Instagram) ads: our management charge is 20% of the ad amount the customer gives (ಉದಾ: ₹10,000 ad budget → ₹2,000 charge). Minimum ad budget is ₹5,000 per month — NEVER say this on your own; ONLY if the customer says their budget is below ₹5,000, reply politely: "ಕ್ಷಮಿಸಿ sir, ನಮ್ಮ minimum budget ತಿಂಗಳಿಗೆ ₹5,000 ಇದೆ" and ask if they can start from ₹5,000.
+• Meta ads extras (owner, 2026-11-04): no Facebook/Instagram page yet → page setup ₹2,000 one time. Ad creatives (designs/reels): the customer gives them ready; if we have to make them, the creative charge is separate — never name a creative price, say "creative charge ಪ್ರತ್ಯೇಕ, quotation ಕಳಿಸುತ್ತೇವೆ". Example first month with no page: ₹5,000 ad + ₹1,000 charge + ₹2,000 page = ₹8,000; then ₹6,000 a month.
+• AI WhatsApp bot (owner, 2026-11-04): setup "₹9,999 ರಿಂದ" one time + "₹1,499 ತಿಂಗಳಿಗೆ" (AI, server, changes); first month's changes free; Meta's own message charges are separate and paid by the customer to Meta. A bigger bot (many flows, payments, CRM link) → learn the requirement and send the varadi below for an official quotation.
 • GST/tax: NEVER mention GST or tax yourself. If asked: "ನಿಮ್ಮ requirement ಪ್ರಕಾರ official quotation ಕಳಿಸುತ್ತೇವೆ sir, ಅದರಲ್ಲಿ total amount ಸ್ಪಷ್ಟವಾಗಿ ಇರುತ್ತದೆ."
-• EVERY OTHER service (app, chatbot, WhatsApp automation, political campaign, branding, video, Google ads, etc.): NEVER give or guess a price. Learn their requirement in depth, ONE question per message: what work and for whom (business/political/shop) → size (pages, posts/videos per month, users, features) → what they already have (website/page/logo link) → when they need it (deadline/election date) → rough budget → who decides. When you know enough (or they stop answering), tell them: "ಧನ್ಯವಾದಗಳು sir 🙏 ನಿಮ್ಮ requirement ನಮ್ಮ team ಗೆ ಕಳಿಸಿದ್ದೇನೆ. ನಿಮಗೆ ಸರಿಯಾಗಿ ಹೊಂದುವ official quotation ರೆಡಿ ಮಾಡಿ ಬೇಗ ಕಳಿಸುತ್ತೇವೆ." and END that reply with this hidden line for the team (the customer never sees it), ONCE per requirement:
+• EVERY OTHER service (app, WhatsApp automation/broadcast, political campaign, branding, video, Google ads, design, etc.): NEVER give or guess a price. Learn their requirement in depth, ONE question per message: what work and for whom (business/political/shop) → size (pages, posts/videos per month, users, features) → what they already have (website/page/logo link) → when they need it (deadline/election date) → rough budget → who decides. When you know enough (or they stop answering), tell them: "ಧನ್ಯವಾದಗಳು sir 🙏 ನಿಮ್ಮ requirement ನಮ್ಮ team ಗೆ ಕಳಿಸಿದ್ದೇನೆ. ನಿಮಗೆ ಸರಿಯಾಗಿ ಹೊಂದುವ official quotation ರೆಡಿ ಮಾಡಿ ಬೇಗ ಕಳಿಸುತ್ತೇವೆ." and END that reply with this hidden line for the team (the customer never sees it), ONCE per requirement:
 [[QUOTE_READY]] Service: … | Kelasa: … | Hinde ide: … | Deadline: … | Budget: … | Nirdhaara: …
 (write what you learned; "—" for anything unknown). Do NOT say "MD will send the quote" — say "official quotation".
 • GOAL: the deal is done only when the customer pays the ADVANCE. Keep the chat moving toward that, politely: once a price is agreed, ask when they can pay the advance so work can start. Portfolio/past work → www.asthradigitech.com
@@ -2252,6 +2254,9 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
     said_block = asthra_deal.customer_said_block(said)
     if said_block:
         messages.append({"role": "system", "content": said_block})
+    team_block = asthra_deal.team_sent_block(fetch_team_sent(phone))
+    if team_block:
+        messages.append({"role": "system", "content": team_block})
     paying_now = asthra_deal.said_will_pay(user_message)
     if paying_now:
         messages.append({"role": "system", "content": asthra_deal.PAY_AGREED_NOTE})
@@ -2314,6 +2319,37 @@ def fetch_customer_said(phone: str, current: str = "") -> tuple:
     if said and current and said[-1].strip() == current.strip():
         said = said[:-1]
     return said, pay_pending
+
+
+def fetch_team_sent(phone: str) -> list:
+    """The messages a person sent this customer from the CRM inbox (newest
+    asthra_deal.TEAM_SENT_ROWS in TEAM_SENT_DAYS), oldest first. Read from the
+    CRM because those sends never pass through the Brain. Any failure, a
+    missing CRM config or a short deadline gives [] and the reply goes out as
+    before."""
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY):
+        return []
+    if ai_seconds_left() < CUSTOMER_SAID_TIMEOUT_SECONDS + POST_AI_RESERVE_SECONDS:
+        return []
+    since = (datetime.now(timezone.utc)
+             - timedelta(days=asthra_deal.TEAM_SENT_DAYS)).isoformat()
+    try:
+        r = requests.get(
+            f"{CRM_SUPABASE_URL}/rest/v1/whatsapp_messages",
+            headers=_crm_headers(),
+            params={"select": "created_at,message_type,body,metadata",
+                    "or": f"(phone.eq.{phone},phone_e164.eq.{phone})",
+                    "direction": "eq.outbound",
+                    "metadata->>action": f"in.({','.join(asthra_deal.TEAM_ACTIONS)})",
+                    "created_at": f"gte.{since}",
+                    "order": "created_at.desc",
+                    "limit": str(asthra_deal.TEAM_SENT_ROWS)},
+            timeout=_bounded(CUSTOMER_SAID_TIMEOUT_SECONDS))
+        rows = r.json() if r.ok else []
+    except Exception as e:
+        print(f"TEAM_SENT_FAILED type={type(e).__name__} phone=...{phone[-4:]}")
+        return []
+    return list(reversed(rows)) if isinstance(rows, list) else []
 
 
 def report_pay_intent(phone: str, said: str, last_offer: str) -> None:

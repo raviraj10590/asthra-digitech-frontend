@@ -350,3 +350,43 @@ def last_offer(history: list) -> str:
             if "₹" in line:
                 return line.strip()
     return ""
+
+
+# ── What our team sent from the CRM (owner 2026-11-04, "eradannu sari madu") ──
+# Messages a person sends from the CRM inbox (quotation PDFs, payment details)
+# go out through the CRM and never reach this chat's history, so the bot kept
+# promising "we will send the quotation" after it had been sent. The CRM marks
+# its own sends with metadata.action; the bot's mirrored replies carry
+# metadata.source instead and are already in the history.
+TEAM_SENT_DAYS = 30
+TEAM_SENT_ROWS = 15
+TEAM_ACTIONS = ("text", "media", "template")
+
+
+def _team_line(row: dict) -> str:
+    meta = row.get("metadata") or {}
+    ts = _ts(row.get("created_at"))
+    when = ts.astimezone(IST).strftime("%d %b %I:%M %p") if ts else "—"
+    if row.get("message_type") == "media":
+        kind = meta.get("original_type") or "file"
+        what = f"{kind}: {meta.get('file_name') or row.get('body') or '—'}"
+    elif row.get("message_type") == "template":
+        what = "template message: " + " ".join((row.get("body") or "").split())[:200]
+    else:
+        what = " ".join((row.get("body") or "").split())[:300]
+    return f"• {when} — {what}"
+
+
+def team_sent_block(rows: list) -> str:
+    """The team's own messages to this customer, oldest first, as one prompt
+    block. Only the file NAME of a document is known, never its contents."""
+    rows = [r for r in rows or [] if (r.get("metadata") or {}).get("action") in TEAM_ACTIONS]
+    if not rows:
+        return ""
+    lines = "\n".join(_team_line(r) for r in rows)
+    return ("WHAT OUR TEAM (a person, from the office) ALREADY SENT THIS CUSTOMER, oldest first (IST):\n"
+            f"{lines}\n"
+            "RULES: these really were sent. Never promise to send something already listed here "
+            "(say it was sent and ask if they saw it). You know only a file's NAME, not what is in "
+            "it — never quote amounts or terms from a document; for its details say our team will "
+            "explain.")
