@@ -437,29 +437,48 @@ SELF-DEMO: ನೀವು Asthra ನಿರ್ಮಿಸಿದ AI chatbot. ಸಂಭ
 # ══════════════════════════════════════════════════════════════════════════════
 # BROCHURE KEYWORD DETECTION (Comprehensive + Fuzzy)
 # ══════════════════════════════════════════════════════════════════════════════
+# Owner, 2026-11-04: the brochure goes ONLY when the customer asks for it, or
+# asks what the company does. Generic "details kalisi" / "info kodi" no longer
+# send it, and pamphlet / flyer are design services we sell, not our brochure.
 BROCHURE_KEYWORDS = [
     # ── Kannada script ────────────────────────────────────────────────────────
     "ಬ್ರೋಚರ್", "ಬ್ರೋಷರ್", "ಬ್ರೊಚರ್", "ಕ್ಯಾಟಲಾಗ್",
     "ಕಂಪನಿ ಪ್ರೊಫೈಲ್", "ಪ್ರೊಫೈಲ್ ಕಳಿಸಿ", "ಪ್ರೊಫೈಲ್ ಕೊಡಿ",
     "ಬ್ರೋಚರ್ ಕಳಿಸಿ", "ಬ್ರೋಚರ್ ಕೊಡಿ", "ಬ್ರೋಚರ್ ಕಳ್ಳಿಸಿ",
-    "ಡಾಕ್ಯುಮೆಂಟ್ ಕಳಿಸಿ", "ಪಿಡಿಎಫ್ ಕಳಿಸಿ", "ಪಿಡಿಎಫ್ ಕೊಡಿ",
-    "ಮಾಹಿತಿ ಕಳಿಸಿ", "ವಿವರ ಕಳಿಸಿ", "ಕಂಪನಿ ಮಾಹಿತಿ", "ಕಂಪನಿ ವಿವರ",
-    "ಪ್ಯಾಂಫ್ಲೆಟ್", "ಫ್ಲೈಯರ್",
+    "ಪಿಡಿಎಫ್ ಕಳಿಸಿ", "ಪಿಡಿಎಫ್ ಕೊಡಿ",
     # ── Kanglish ──────────────────────────────────────────────────────────────
     "brochure", "brochar", "brocher", "broucher", "broshur", "broshure",
     "brochre", "broshar", "brocure", "brouchar",
-    "catalogue", "catalog", "company profile", "profile",
-    "pamphlet", "pamphlit", "pamplet", "flyer",
+    "catalogue", "catalog", "company profile",
     "brochure kodi", "brochure kalisi", "brochure pathayisi", "brochure kalli",
-    "details kodi", "details kalisi", "info kodi", "info kalisi",
-    "maahiti kodi", "vivara kodi", "vivara kalisi",
     "pdf kodi", "pdf kalisi", "pdf pathayisi",
-    "document kodi", "document kalisi",
     # ── English ───────────────────────────────────────────────────────────────
     "send brochure", "share brochure", "company document", "company pdf",
     "send pdf", "share pdf", "send profile", "share profile",
     "send catalogue", "share catalogue",
 ]
+# "What does your company do?" — answered with the brochure too.
+COMPANY_OVERVIEW_PATTERNS = [
+    r"\b(nimma|nim|nimm|your|ur)\s+(company|compny|kampani|agency)\b.*\b(enu|en|yenu|yen|what)\b",
+    r"\b(enu|en|yenu|yen)\s+(kelsa|kelasa|work|service|services)\s+(maad|mad)",
+    r"\bwhat\s+(does|do)\s+(your|ur|the|asthra)\s*(company|agency|firm|team)?\s*do\b",
+    r"\bwhat\s+do\s+you\s+(do|offer|provide)\b",
+    r"\bwhat\s+(are|r)\s+(your|ur)\s+services\b",
+    r"\bwhat\s+services\s+(do\s+you|you)\s+(offer|provide|have|do)\b",
+    r"\b(about|tell\s+me\s+about)\s+(your|ur)\s+(company|agency)\b",
+    r"\b(company|kampani|asthra)\s+bagge\b",
+    r"\b(nimma|nim)\s+services\s+(enu|en|yenu|yen)\b",
+    r"(ನಿಮ್ಮ|ನಿಮ್)\s*(ಕಂಪನಿ|ಸಂಸ್ಥೆ).*(ಏನು|ಏನ್)",
+    r"(ಏನು|ಏನ್)\s*(ಕೆಲಸ|ಸೇವೆ).*(ಮಾಡ್ತ|ಮಾಡುತ್ತ|ಮಾಡ್ತೀ|ಮಾಡುತ್ತೀ)",
+    r"(ನಿಮ್ಮ|ನಿಮ್)\s*ಸೇವೆಗಳು\s*(ಏನು|ಯಾವುದು|ಯಾವುವು)",
+    r"(ಕಂಪನಿ|ಸಂಸ್ಥೆ)\s*ಬಗ್ಗೆ",
+    "ಕಂಪನಿ ಮಾಹಿತಿ", "ಕಂಪನಿ ವಿವರ",
+]
+# Asking us to MAKE a brochure / catalogue is a design enquiry, not a request
+# for ours.
+_BROCHURE_DESIGN_ASK = re.compile(
+    r"design|ಡಿಸೈನ್|print|ಪ್ರಿಂಟ್|\bmaadi\s*kod|\bmadi\s*kod|ಮಾಡಿ\s*ಕೊಡ|"
+    r"maadt(ee|i)ra|madt(ee|i)ra|ಮಾಡ್ತೀರ|ಮಾಡುತ್ತೀರ|make|create|prepare", re.IGNORECASE)
 
 # ── Off-topic / abuse guard: blatant non-business requests short-circuit to a
 # polite redirect WITHOUT an AI call (saves cost + guarantees scope control).
@@ -505,8 +524,25 @@ def is_menu_request(text: str) -> bool:
     return t in MENU_KEYWORDS or t in ('hi', 'hello', 'ಹಾಯ್', 'ನಮಸ್ಕಾರ')
 
 
+BROCHURE_OVERVIEW_KN = ("ನಾವು Facebook–Instagram ads, AI WhatsApp bot, social media, "
+                        "video ಮತ್ತು design ಮಾಡುತ್ತೇವೆ. ಪೂರ್ತಿ ವಿವರ ಈ brochure ನಲ್ಲಿ ಇದೆ 🙏")
+
+
+def is_company_overview(text: str) -> bool:
+    """"What does your company do?" in Kannada, Kanglish or English. An ad
+    form ("…would like to know more about your business") is not the question."""
+    t = " ".join((text or "").lower().split())
+    if "filled out your form" in t or "filled in your form" in t:
+        return False
+    return any(re.search(p, t) for p in COMPANY_OVERVIEW_PATTERNS)
+
+
 def is_brochure_request(text: str) -> bool:
-    t = text.lower().strip()
+    t = " ".join((text or "").lower().split())
+    if is_company_overview(t):
+        return not re.search(r"design|ಡಿಸೈನ್|print|ಪ್ರಿಂಟ್", t)
+    if _BROCHURE_DESIGN_ASK.search(t):
+        return False
     if any(kw.lower() in t for kw in BROCHURE_KEYWORDS):
         return True
     # Fuzzy regex — catches "brochur", "broochure", "broucher" etc.
@@ -3195,8 +3231,8 @@ def send_brochure(to: str, timeout: float = None, **_) -> bool:
         "type": "document",
         "document": {
             "link": BROCHURE_URL,
-            "caption": "ಆಸ್ತ್ರ ಡಿಜಿಟೆಕ್ — ಕಂಪನಿ ಪ್ರೊಫೈಲ್ 🙏",
-            "filename": "Asthra_DigiTech_Company_Profile.pdf",
+            "caption": "Asthra Digitech — ನಮ್ಮ ಸೇವೆಗಳು 🙏",
+            "filename": "Asthra_Digitech_Brochure.pdf",
         },
     }
     _res = _wa_post(_doc)
@@ -7219,7 +7255,8 @@ def run_client_pipeline(sender: str, user_text: str, ctx: dict,
         if BIC_AVAILABLE:
             bic_decision.mark_deterministic_branch(
                 bic_decision.BRANCH_BROCHURE_REQUEST)
-        send_text(sender, "ಖಂಡಿತ! ನಮ್ಮ ಕಂಪನಿ ಪ್ರೊಫೈಲ್ ಇಲ್ಲಿದೆ 🙏")
+        send_text(sender, BROCHURE_OVERVIEW_KN if is_company_overview(user_text)
+                  else "ಖಂಡಿತ sir 🙏 ನಮ್ಮ brochure ಇಲ್ಲಿದೆ.")
         # H1: the return value used to be discarded. A policy denial or a failed
         # send produced a customer who was PROMISED a brochure, a transcript
         # saying it had been sent, and an owner notified of a success that never
