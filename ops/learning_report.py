@@ -224,5 +224,17 @@ def main(argv):
         report()
 
 
+def kuma_push(name, msg="OK"):
+    """Tell the owner's Uptime Kuma (Mac, localhost:3001) this job finished (owner 2026-11-05).
+    Token from ~/.config/asthra/kuma_push.json; no file or no Kuma = nothing happens."""
+    import json as _j, os as _o, urllib.parse as _p, urllib.request as _r
+    try:
+        tok = _j.load(open(_o.path.expanduser("~/.config/asthra/kuma_push.json")))[name]
+        _r.urlopen(f"http://127.0.0.1:3001/api/push/{tok}?status=up&msg={_p.quote(msg)}", timeout=5).read()
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     main(sys.argv)
+    kuma_push("learning_report")

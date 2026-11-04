@@ -36,6 +36,10 @@
     {
       "src": "api/leads_sheet.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/status.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
@@ -70,6 +74,10 @@
     {
       "src": "/api/leads_sheet",
       "dest": "api/leads_sheet.py"
+    },
+    {
+      "src": "/api/status",
+      "dest": "api/status.py"
     }
   ],
   "crons": [

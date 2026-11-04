@@ -105,6 +105,30 @@ def deal_sweeps(now=None) -> dict:
         return {"error": "deal_sweeps_failed"}
 
 
+def mark_recovery_ok() -> bool:
+    """Stamp app_settings.recovery_last_ok so /api/status (and the owner's Uptime Kuma) can tell
+    a stopped sweep from a quiet one (owner 2026-11-05). One upserted row; never raises."""
+    import requests
+    from datetime import datetime, timezone
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    url = os.environ.get("SUPABASE_URL", "https://kpzprllzgqlqkqgcgrbp.supabase.co")
+    if not key:
+        return False
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        r = requests.post(f"{url}/rest/v1/app_settings",
+                          headers={"apikey": key, "Authorization": f"Bearer {key}",
+                                   "Content-Type": "application/json",
+                                   "Prefer": "resolution=merge-duplicates"},
+                          json={"key": "recovery_last_ok", "value": now, "updated_at": now}, timeout=5)
+        if not r.ok:
+            print(f"RECOVERY_ENDPOINT mark=failed {r.status_code}")
+        return r.ok
+    except Exception as e:
+        print(f"RECOVERY_ENDPOINT mark=failed type={type(e).__name__}")
+        return False
+
+
 def publish_health(counts) -> str:
     """After the sweep, push the Brain's aggregate health to the CRM's Brain
     Health page (brain_health.py). Best-effort: 'ok' / 'failed', never raises,
@@ -135,6 +159,7 @@ class handler(BaseHTTPRequestHandler):
         reminders = call_reminders()
         deals = deal_sweeps()
         health = publish_health(results)
+        mark_recovery_ok()
         print("RECOVERY_ENDPOINT result=ok health=" + health + " " + json.dumps(results, sort_keys=True))
         return self._json(200, {"ok": True, "results": results, "health_snapshot": health,
                                 "meta_leads": leads, "call_reminders": reminders,
