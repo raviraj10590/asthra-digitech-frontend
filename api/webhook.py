@@ -2228,6 +2228,12 @@ def generate_reply(phone: str, user_message: str, history: list = None, memory: 
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
+    # The owner's own knowledge, edited in the CRM (Bot Knowledge page). It
+    # comes right after the static prompt and wins where the two differ.
+    knowledge = asthra_deal.knowledge_block(fetch_knowledge())
+    if knowledge:
+        messages.append({"role": "system", "content": knowledge})
+
     # Hierarchical memory: known/fresh facts + prior summary, so the bot never
     # re-asks answered questions. Injected after the static prompt (cache-safe).
     mem_ctx = build_memory_context(memory) if memory else ""
@@ -2319,6 +2325,39 @@ def fetch_customer_said(phone: str, current: str = "") -> tuple:
     if said and current and said[-1].strip() == current.strip():
         said = said[:-1]
     return said, pay_pending
+
+
+KNOWLEDGE_TTL_SECONDS = 300
+_knowledge_cache = {"at": 0.0, "rows": []}
+
+
+def fetch_knowledge() -> list:
+    """The owner's active Bot Knowledge rows from the CRM, cached for
+    KNOWLEDGE_TTL_SECONDS so an edit reaches replies within five minutes
+    without a read per message. A failed read keeps the last good rows (or
+    none), and the prompt's own text still holds every rule."""
+    now = time.monotonic()
+    if now - _knowledge_cache["at"] < KNOWLEDGE_TTL_SECONDS and _knowledge_cache["at"]:
+        return _knowledge_cache["rows"]
+    if not (CRM_SUPABASE_URL and CRM_SUPABASE_SERVICE_KEY):
+        return []
+    if ai_seconds_left() < CUSTOMER_SAID_TIMEOUT_SECONDS + POST_AI_RESERVE_SECONDS:
+        return _knowledge_cache["rows"]
+    try:
+        r = requests.get(
+            f"{CRM_SUPABASE_URL}/rest/v1/bot_knowledge",
+            headers=_crm_headers(),
+            params={"select": "topic,body", "business": "eq.asthra", "active": "is.true",
+                    "order": "sort.asc,id.asc", "limit": "50"},
+            timeout=_bounded(CUSTOMER_SAID_TIMEOUT_SECONDS))
+        rows = r.json() if r.ok else None
+    except Exception as e:
+        print(f"KNOWLEDGE_READ_FAILED type={type(e).__name__}")
+        rows = None
+    _knowledge_cache["at"] = now
+    if isinstance(rows, list):
+        _knowledge_cache["rows"] = rows
+    return _knowledge_cache["rows"]
 
 
 def fetch_team_sent(phone: str) -> list:

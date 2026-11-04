@@ -390,3 +390,20 @@ def team_sent_block(rows: list) -> str:
             "(say it was sent and ask if they saw it). You know only a file's NAME, not what is in "
             "it — never quote amounts or terms from a document; for its details say our team will "
             "explain.")
+
+
+# ── The owner's Bot Knowledge (CRM page, owner 2026-11-04 "1,2,3 maadu") ─────
+# Prices, packages and service facts the owner edits without a deploy. The
+# block follows the static prompt and is told to win where they differ, so a
+# price the owner changes in the CRM is the price the bot says.
+KNOWLEDGE_CHARS = 6000
+
+
+def knowledge_block(rows: list) -> str:
+    rows = [r for r in rows or [] if (r.get("topic") or "").strip() and (r.get("body") or "").strip()]
+    if not rows:
+        return ""
+    text = "\n".join(f"• {r['topic'].strip()}: {' '.join(r['body'].split())}" for r in rows)[:KNOWLEDGE_CHARS]
+    return ("OWNER'S LATEST KNOWLEDGE (the owner edits this in the CRM). Where it differs from anything "
+            "above — a price, a package, a fact — THIS wins. Never mention GST, and never name a price "
+            "that is not here or above.\n" + text)
