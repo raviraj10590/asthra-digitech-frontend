@@ -24,6 +24,8 @@ Pure module: no network and no clock of its own. api/webhook.py and
 api/nudge.py do the reads and sends.
 """
 import re
+
+import kannada_understanding as ku
 from datetime import datetime, timedelta, timezone
 
 import bairavi
@@ -298,26 +300,7 @@ def customer_said_block(messages: list) -> str:
 # customer agreeing to pay is the deal goal itself, so the owner hears at once
 # and the bot stops asking questions.
 PAY_INTENT = "ASTHRA_PAY_INTENT"
-_PAY = re.compile(
-    r"\b(i\s*(will|'ll|wil|shall|can)\s*pay|will\s*pay|ready\s*to\s*pay|"
-    r"pay\s*(maad|mad|kodt|kodu|karunga|kardunga|now|today|tomorrow)\w*|"
-    r"payment\s*(maad|mad|kodt|kodu|ready|details?|link|kalis|kals|send|haak|hak)\w*|"
-    r"advance\s*(kodt|kodu|kodo|maad|mad|pay|ready|send|kalis|kals|haak|hak)\w*|"
-    r"send\s*(the\s*|me\s*)?(payment|account|bank|upi|gpay|qr)|"
-    r"account\s*(details?|number|no)|upi|g\s*pay|phone\s*pe|paytm|qr\s*code)\b"
-    r"|ಪೇ\s*ಮಾಡ|ಪೇಮೆಂಟ್|ಅಡ್ವಾನ್ಸ್|ಹಣ\s*(ಕಳಿಸ|ಹಾಕ|ಕೊಡ|ಕಟ್ಟ)|ದುಡ್ಡು\s*(ಕಳಿಸ|ಹಾಕ|ಕೊಡ|ಕಟ್ಟ)",
-    re.IGNORECASE)
-_NOT_PAYING = re.compile(
-    r"\b(won'?t|will\s*not|can'?t|cannot|not|never|no|illa|alla|beda|aagalla|agalla|"
-    r"maadalla|madalla|kodalla|later)\b|ಇಲ್ಲ|ಅಲ್ಲ|ಬೇಡ|ಆಗಲ್ಲ|ಕೊಡಲ್ಲ|ಮಾಡಲ್ಲ|\?",
-    re.IGNORECASE)
-
-
-def said_will_pay(text: str) -> bool:
-    """True when the customer says they will pay (or asks where to pay).
-    A refusal, a "later" or a question about paying is not that."""
-    t = text or ""
-    return bool(_PAY.search(t)) and not _NOT_PAYING.search(t)
+_PAY, _NOT_PAYING, said_will_pay = ku.PAY_RE, ku.NOT_PAYING, ku.said_will_pay
 
 
 PAY_AGREED_NOTE = (

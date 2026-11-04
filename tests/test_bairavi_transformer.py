@@ -547,8 +547,19 @@ class Structure(unittest.TestCase):
         # is stdlib, pure computation, and touches no network or filesystem,
         # which is what this test is defending. The list stays closed: any
         # OTHER import still fails here.
-        self.assertEqual(imports, {"hashlib", "re"},
+        # kannada_understanding joined on 2026-11-04: the shared language
+        # module every bot uses. It is held to the same rule just below.
+        self.assertEqual(imports, {"hashlib", "re", "kannada_understanding"},
                          f"bairavi.py must stay pure; got {imports}")
+        ku_tree = ast.parse(io.open(os.path.join(os.path.dirname(__file__), "..",
+                                                 "kannada_understanding.py"), encoding="utf-8").read())
+        ku_imports = set()
+        for n in ast.walk(ku_tree):
+            if isinstance(n, ast.Import):
+                ku_imports |= {a.name.split(".")[0] for a in n.names}
+            elif isinstance(n, ast.ImportFrom):
+                ku_imports.add((n.module or "").split(".")[0])
+        self.assertEqual(ku_imports, {"re"}, f"kannada_understanding.py must stay pure; got {ku_imports}")
 
     def test_the_fingerprint_is_the_only_reason_for_hashlib(self):
         """Keeps the exception narrow: hashlib may be used to identify a

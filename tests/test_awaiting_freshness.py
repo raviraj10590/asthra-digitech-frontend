@@ -184,7 +184,9 @@ class TheTimeLogicStaysOutOfThePureModule(unittest.TestCase):
                 imports |= {a.name.split(".")[0] for a in n.names}
             elif isinstance(n, ast.ImportFrom):
                 imports.add((n.module or "").split(".")[0])
-        self.assertEqual(imports, {"hashlib", "re"})
+        # kannada_understanding (2026-11-04) is the shared language module; it is pure too
+        # (test_bairavi_transformer checks that it imports only `re`).
+        self.assertEqual(imports, {"hashlib", "re", "kannada_understanding"})
 
     def test_the_marker_format_is_still_read_by_bairavi(self):
         """The wrapper adds the age check and delegates the parsing, so the
