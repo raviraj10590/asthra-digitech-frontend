@@ -77,7 +77,10 @@ class APriceObjection(unittest.TestCase):
         reply = b.compose_followup_reply(self.f, self.known, None, None)
         self.assertIn("5 Star", reply)
         self.assertIn("sales ತಂಡ", reply)
-        self.assertIsNone(b.reply_violates_evidence(reply.replace("5 Star", "")))
+        # The warranty line is the owner's stated term (2026-09-24), composed, not model text;
+        # added to this reply on the owner's 2026-11-04 bargain ruling.
+        self.assertIsNone(b.reply_violates_evidence(
+            reply.replace("5 Star", "").replace("*1 ವರ್ಷ warranty*, ನಂತರವೂ service", "")))
         alert = b.compose_followup_alert("919000000000", self.f, "It's very High", self.known)
         self.assertIn("PRICE NEGOTIATION", alert)
 

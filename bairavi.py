@@ -2007,7 +2007,43 @@ _LOWER_WORDS = ("less", "reduce", "kadime", "kammi", "ಕಡಿಮೆ", "ಕಮ�
 def asked_discount(text: str) -> bool:
     low = (text or "").lower()
     return (_mentions(low, _DISCOUNT_WORDS)
-            or (_mentions(low, _LOWER_WORDS) and _mentions(low, _PRICE_WORDS)))
+            or (_mentions(low, _LOWER_WORDS) and _mentions(low, _PRICE_WORDS))
+            or offered_amount(text) is not None)
+
+
+# A RUPEE FIGURE IS A COUNTER-OFFER (live ...9249, 2026-11-04). "25000₹nane
+# kodayhni" (I will give only ₹25,000 — for 100 kVA) answered "which place?"
+# and was echoed back as the PLACE: "ಸರಿ, 25000₹nane kodayhni 👍". Only "45 k"
+# and "2 lakh" were read as a budget; a plain or ₹ figure was not.
+_OFFER_RE = re.compile(r"(?:₹|(?<![a-z])rs\.?|(?<![a-z])inr|ರೂ\.?)\s*(\d[\d,]*)"
+                       r"|(\d[\d,]*)\s*(?:₹|/-|rs(?![a-z])|rupees?|ರೂ)"
+                       r"|(?<![\d.,])(\d{1,2}(?:,\d\d)*,\d{3}|\d{4,5})(?![\d.,])", re.I)
+_PHONE_IN_TEXT_RE = re.compile(r"(?:\+?91[\s-]?)?(?<!\d)\d{5}[\s-]?\d{5}(?!\d)")
+# Money said about the terms, not the price: "Rs 5000 advance kodtini", "85000 + gst aa?".
+_TERMS_MONEY = ("advance", "ಅಡ್ವಾನ್ಸ್", "payment", "ಪೇಮೆಂಟ್", "emi", "loan", "gst", "ಜಿಎಸ್ಟಿ")
+
+
+def offered_amount(text: str):
+    """The rupee figure the customer says they will pay, else None.
+
+    Not an offer: a phone number, a figure under ₹5,000, a payment-terms
+    question, and one of the owner's own prices (with or without 18% GST) —
+    "85,000 alva?" repeats the price, it does not bargain.
+    """
+    low = _PHONE_IN_TEXT_RE.sub(" ", (text or "").lower())
+    if _mentions(low, _TERMS_MONEY):
+        return None
+    for m in _OFFER_RE.finditer(low):
+        digits = (m.group(1) or m.group(2) or m.group(3) or "").replace(",", "")
+        if not digits.isdigit():
+            continue
+        n = int(digits)
+        if not 5_000 <= n <= 10_000_000:
+            continue
+        if any(n in (price, round(price * 1.18)) for price, _ in PRICE_LIST.values()):
+            continue
+        return n
+    return None
 
 
 def commercial_intent(text: str):
@@ -3120,6 +3156,7 @@ def _parse_followup(text: str, awaiting=(), known: dict = None) -> dict:
             # at all". commercial_intent says WHICH ask it was.
             "asked_price": _mentions(low, _PRICE_ASK) or _asks_price_latin(low),
             "asked_discount": asked_discount(text),
+            "offer": offered_amount(text),
             "asks_call": asks_about_call(text),
             "asks_call_when": asks_call_time(text),
             "call_missed": call_missed(text),
@@ -3445,6 +3482,30 @@ def value_line_kn(kva=None) -> str:
     rating = f"*{stars} Star*" if stars else "*Star-rated*"
     return (f"{rating} premium transformer — best-grade aluminium winding, "
             "lower losses, ಕರೆಂಟ್ ಉಳಿತಾಯ.")
+
+
+def bargain_reply_kn(kva=None, offer=None) -> str:
+    """The answer to a lower-price ask or a counter-offer.
+
+    Owner, 2026-11-04: "bargain maadidaga sariyada uttara needi customer man
+    olisbeku". The reply used to be one value line and "sales will call". It
+    now says why the price is what it is — every line an owner-stated fact
+    (_SALES_TERMS, value_line_kn) — and hands the rate to a person. Still
+    never a discount and never a figure: the 2026-09-30 ruling forbids
+    sending the same price back to someone who asked for less.
+    """
+    # No certification line: the evidence guard (reply_violates_evidence) holds every reply on
+    # this path to carry none, and the owner's BIS/BEE/ISO card is shown when terms are asked.
+    lines = ["ನಿಮ್ಮ ಮಾತು ಅರ್ಥ ಆಯ್ತು 🙏 Transformer ಬೆಲೆ ಅದರ quality ಮೇಲೆ depend ಆಗುತ್ತೆ — ನಮ್ಮ ದರದಲ್ಲಿ:",
+             "• " + value_line_kn(kva),
+             "• Transport ಸೇರಿದೆ · *1 ವರ್ಷ warranty*, ನಂತರವೂ service"]
+    if offer and kva in PRICE_LIST and offer < 0.6 * PRICE_LIST[kva][0]:
+        # The owner's own answer to ...9249: "25,000 kke 100 kva transformer baralla".
+        lines.append(f"ನೀವು ಹೇಳಿದ ಮೊತ್ತಕ್ಕೆ ಹೊಸ {kva} kVA transformer ಬರೋದು ಕಷ್ಟ.")
+    if kva in PRICE_LIST and kva > min(PRICE_LIST):
+        lines.append("ನಿಮ್ಮ load ಗೆ ಚಿಕ್ಕ size ಸಾಕಾದರೆ ಅದರ ದರ ಕಡಿಮೆ — ಯಾವುದು ಸರಿ ಅಂತ engineer ನೋಡಿ ಹೇಳ್ತಾರೆ.")
+    lines.append("ರೇಟ್ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ call ಮಾಡಿ ಮಾತಾಡ್ತಾರೆ.")
+    return "\n".join(lines)
 
 
 def price_short_kn(kva=None) -> str:
@@ -4498,8 +4559,8 @@ def _compose_followup_reply(followup: dict, known: dict = None,
     if followup.get("asked_discount"):
         # Never a discount and never the same price again: a person calls.
         # The value answer first (owner's selling points), then a person.
-        lines.append("\n" + value_line_kn(merged_state(known, followup).get("capacity_kva"))
-                     + "\nರೇಟ್ ಬಗ್ಗೆ ನಮ್ಮ sales ತಂಡ ನಿಮಗೆ call ಮಾಡಿ ಮಾತಾಡ್ತಾರೆ.")
+        lines.append("\n" + bargain_reply_kn(merged_state(known, followup).get("capacity_kva"),
+                                              followup.get("offer")))
     elif followup["asked_price"]:
         # The question they actually asked. Answered with a real next step,
         # never a number — the evidence for one does not exist.
@@ -4744,8 +4805,9 @@ def compose_followup_alert(phone: str, followup: dict, text: str,
            and not followup.get("call_missed") else "")
         + ("❌ *NOT INTERESTED* — customer declined; a call may still save it\n"
            if followup.get("declined") else "")
-        + ("💰🔥 *PRICE NEGOTIATION* — customer asked for a lower price. "
-           "Bot promised a call from sales; no discount was offered.\n"
+        + ("💰🔥 *PRICE NEGOTIATION* — customer asked for a lower price"
+           + (f" (offered ₹{inr(followup['offer'])})" if followup.get("offer") else "")
+           + ". Bot promised a call from sales; no discount was offered.\n"
            if followup.get("asked_discount") else "")
         + "🔌 *BAIRAVI — follow-up*\n"
         f"From: wa.me/{phone}\n"
