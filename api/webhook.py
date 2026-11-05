@@ -429,6 +429,7 @@ SALES PSYCHOLOGY (owner 2026-11-04: "customer na conversion madoke try maado tar
 • BEFORE ASKING THE ADVANCE: sum up in one line what they agreed (service, amount now, start date), then ask when they can pay so work starts.
 • AFTER SILENCE OR "nodona/think maadtini": respect it, ask one gentle question about their goal (not the price), and leave the door open.
 • LANGUAGES: our AI WhatsApp bot speaks Kannada and English only — never say it speaks Tulu or any other language.
+• PHOTOS: a line "[ಗ್ರಾಹಕರು ಫೋಟೋ ಕಳುಹಿಸಿದ್ದಾರೆ. ಫೋಟೋದಲ್ಲಿ: …]" is what their photo shows (a visiting card, logo, shop). Use it: name their business and suggest which part to promote first, then answer their last question. Do not describe the photo back, and send ONE reply for several photos.
 • NEVER: fake urgency or scarcity ("ಇವತ್ತು ಮಾತ್ರ", "last slot"), invented results (lead counts, guaranteed sales/followers), guilt or pressure, or claims about competitors.
 • ADDRESS: "sir"/"madam" or their name + "ಅವರೇ" — never ಅಣ್ಣಾ, ಅಕ್ಕ, ಗುರು, boss, bro.
 
@@ -1953,6 +1954,72 @@ def analyze_image_with_gemini(image_bytes: bytes, mime: str, caption: str,
     except Exception as e:
         print(f"analyze_image_with_gemini error: {e}")
         return ""
+
+
+_IMAGE_FACTS_PROMPT = (
+    "A customer of a digital marketing agency sent this photo on WhatsApp. "
+    "State only what it shows, in ONE or TWO short English lines: what it is "
+    "(visiting card, logo, shop, product, poster, screenshot…), and any business "
+    "names, products or services and town you can READ on it. No phone numbers, "
+    "no guesses, no sales talk. Just the lines.")
+
+
+def describe_image_facts(image_bytes: bytes, mime: str) -> str:
+    """What a customer's photo shows, as facts for the reply model — not a
+    reply. Best-effort; '' on any failure."""
+    if not GEMINI_API_KEY or not image_bytes:
+        return ""
+    try:
+        import base64
+        body = {"contents": [{"parts": [
+            {"text": _IMAGE_FACTS_PROMPT},
+            {"inline_data": {"mime_type": mime, "data": base64.b64encode(image_bytes).decode()}},
+        ]}]}
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            json=body, timeout=15,
+        )
+        if not r.ok:
+            return ""
+        return " ".join(r.json()["candidates"][0]["content"]["parts"][0]["text"].split())[:400]
+    except Exception:
+        return ""
+
+
+def image_turn_text(facts: str, caption: str = "") -> str:
+    """The transcript line for an Asthra customer's photo. The reply model reads
+    it as part of the chat (see PHOTOS in the prompt)."""
+    line = f"[ಗ್ರಾಹಕರು ಫೋಟೋ ಕಳುಹಿಸಿದ್ದಾರೆ. ಫೋಟೋದಲ್ಲಿ: {facts}]"
+    return f"{line} {caption.strip()}" if (caption or "").strip() else line
+
+
+# Several photos sent together arrive as separate webhooks within a second or
+# two. Each saves its line, waits this long, and only the newest one replies,
+# with every line in the history. On 2026-11-05 a lead's visiting card and logo
+# got one standalone reply each plus a generic ack — three messages in a minute.
+IMAGE_BURST_WAIT_S = 5
+
+
+def superseded_by_newer(ctx: dict, own_line: str) -> bool:
+    """True when the customer's newest stored message is not this turn's own
+    line, i.e. a later photo or text arrived and that turn will answer."""
+    last = (ctx.get("last_user") or {}).get("content")
+    return bool(last) and last != own_line
+
+
+def drop_own_line(history: list, line: str) -> list:
+    """Remove this turn's own pre-saved line from the history (it is passed as
+    the current message instead)."""
+    for i in range(len(history) - 1, -1, -1):
+        h = history[i]
+        if h.get("role") == "user" and h.get("content") == line:
+            return history[:i] + history[i + 1:]
+    return history
+
+
+def chat_active(history: list, minutes: float = 10) -> bool:
+    """Anything said by either side in the last few minutes."""
+    return any(_within_hours(h.get("created_at", ""), minutes / 60) for h in history or [])
 
 
 def gemini_one_liner(image_bytes: bytes, mime: str) -> str:
@@ -8653,9 +8720,29 @@ class handler(BaseHTTPRequestHandler):
                     _bairavi_photo = bairavi.in_transformer_flow(fetch_context(sender)["history"])
                 except Exception:
                     _bairavi_photo = False
-                reply = (analyze_image_with_gemini(img, mime, caption, bairavi_lead=_bairavi_photo)
-                         if img else "")
-                if reply:
+                # Asthra customers: the photo becomes a line in the chat and the
+                # normal reply pipeline answers it with the whole conversation
+                # in view — not a standalone vision reply that forgets the chat.
+                facts = ""
+                if img and not _bairavi_photo and get_role(sender)[0] not in INTERNAL_ROLES:
+                    facts = describe_image_facts(img, mime)
+                if facts:
+                    user_text = image_turn_text(facts, caption)
+                    save_messages([(sender, "user", user_text)])
+                    _TURN_EXTRAS["incoming_saved"] = (sender, user_text)
+                    _TURN_EXTRAS["image_line"] = user_text
+                    notify_owner(f"📸 Image from wa.me/{sender} — {facts[:160]}")
+                    time.sleep(IMAGE_BURST_WAIT_S)
+                    if superseded_by_newer(fetch_context(sender), user_text):
+                        print("📸 photo burst — the newer message replies")
+                        self._ok(); return
+                    reply = None
+                else:
+                    reply = (analyze_image_with_gemini(img, mime, caption, bairavi_lead=_bairavi_photo)
+                             if img else "")
+                if reply is None:
+                    pass  # falls through to the text pipeline below
+                elif reply:
                     send_text(sender, reply)
                     save_messages([(sender, "user", f"[ಚಿತ್ರ ಕಳುಹಿಸಿದ್ದಾರೆ{': ' + caption if caption else ''}]"),
                                    (sender, "assistant", reply)])
@@ -8668,7 +8755,8 @@ class handler(BaseHTTPRequestHandler):
                     )
                     save_message(sender, "user", "[ಚಿತ್ರ ಕಳುಹಿಸಿದ್ದಾರೆ]")
                     notify_owner(f"📸 Image from wa.me/{sender} — open WhatsApp to view (vision unavailable).")
-                self._ok(); return
+                if reply is not None:
+                    self._ok(); return
 
             # ── Location pin: exact place + supply company (ESCOM) ─────────
             # Turned into ONE transcript line and handled like any message, so
@@ -8722,10 +8810,13 @@ class handler(BaseHTTPRequestHandler):
                 # "unsupported" type. We cannot read the content — so we must
                 # both RECORD it (else it is invisible in CRM/history/digest)
                 # and ALERT the owner (else a real customer is silently lost).
-                send_text(sender,
-                    "ನಿಮ್ಮ ಸಂದೇಶ ಸ್ವೀಕರಿಸಿದ್ದೇವೆ 🙏 "
-                    "ಪ್ರಶ್ನೆ ಅಥವಾ ವಿವರ ಟೈಪ್ ಮಾಡಿ."
-                )
+                # Mid-conversation it is usually a sticker or a part of a
+                # photo burst; "type your question" there only interrupts.
+                if not chat_active(fetch_context(sender)["history"]):
+                    send_text(sender,
+                        "ನಿಮ್ಮ ಸಂದೇಶ ಸ್ವೀಕರಿಸಿದ್ದೇವೆ 🙏 "
+                        "ಪ್ರಶ್ನೆ ಅಥವಾ ವಿವರ ಟೈಪ್ ಮಾಡಿ."
+                    )
                 save_message(sender, "user", f"[{msg_type} ಸಂದೇಶ — ಬಾಟ್ ಓದಲಾಗಲಿಲ್ಲ]")
                 notify_owner(
                     f"❓ Unreadable message ({msg_type}) from wa.me/{sender}\n"
@@ -8740,8 +8831,13 @@ class handler(BaseHTTPRequestHandler):
             turn["stage"] = "CONTEXT"
             ctx = fetch_context(sender)
 
+            # A photo's line was saved before the burst wait; it is this
+            # turn's message, not history (and not a retry of itself).
+            if _TURN_EXTRAS.get("image_line"):
+                ctx["history"] = drop_own_line(ctx["history"], user_text)
+
             # ── Meta retry deduplication ──────────────────────────────────
-            if is_duplicate_webhook(ctx, user_text):
+            elif is_duplicate_webhook(ctx, user_text):
                 print("↩️ duplicate webhook — skipped")
                 self._ok(); return
 
@@ -8764,7 +8860,7 @@ class handler(BaseHTTPRequestHandler):
             # ── Customer message persisted BEFORE any reply (Phase 2A) ────
             # Owner/staff turns keep their existing save; their history feeds
             # recall and memory, which this phase does not touch.
-            if role not in INTERNAL_ROLES:
+            if role not in INTERNAL_ROLES and not _TURN_EXTRAS.get("image_line"):
                 _save_incoming_first(sender, user_text)
             turn["stage"] = "DISPATCH"
             turn["dispatch_began"] = True
